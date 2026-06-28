@@ -1,0 +1,68 @@
+# render.yaml — Blueprint pro nasazení ApexSignal backendu na Render.com
+#
+# Jak na to:
+# 1. Vytvoř si GitHub repozitář a nahraj do něj tyto soubory:
+#    backend_api.py, probability_model.py, momentum_filter.py,
+#    data_provider.py, db.py, requirements.txt, render.yaml
+# 2. Na render.com: New + → Blueprint → vyber svůj GitHub repozitář.
+#    Render tento soubor automaticky najde a navrhne službu i databázi
+#    najednou — DATABASE_URL appka dostane automaticky, nemusíš nic
+#    ručně kopírovat (viz fromDatabase níže).
+# 3. Render se zeptá na hodnoty proměnných níže (jsou sync: false) —
+#    vlož své klíče přímo tam, NIKDY do kódu na GitHubu:
+#      APISPORTS_KEY — dashboard.api-sports.io, přímá registrace
+#                       (pokrývá fotbal + hokej + basketbal jedním klíčem)
+#      APITENNIS_KEY  — api-tennis.com (tenis)
+#      ODDSAPI_KEY    — the-odds-api.com (živé kurzy napříč sporty, volitelné
+#                        ale silně doporučené — bez něj appka jede jen na
+#                        vlastním heuristickém odhadu, ne na reálné tržní ceně)
+#      ANTHROPIC_API_KEY — console.anthropic.com (AI kontrola tiketů i
+#                        živých signálů — appka bez něj funguje, jen bez
+#                        téhle vrstvy)
+#      SECRET_KEY — appka tím podepisuje přihlašovací tokeny (viz auth.py).
+#                        Vygeneruj si náhodný dlouhý řetězec, např.:
+#                        python3 -c "import secrets; print(secrets.token_hex(32))"
+#                        NIKDY ho neměň po nasazení — všem uživatelům by
+#                        appka token rozplatnila a musely by se znovu přihlásit.
+# 4. Po nasazení dostaneš URL typu https://apexsignal-backend.onrender.com
+#    — tu vlož do API_BASE_URL v index.html.
+#
+# Pozn. 1: Free plán na Renderu "usíná" po ~15 min nečinnosti a první další
+# request pak trvá ~30-50 s (cold start). Pro produkční appku s reálnými
+# uživateli by chtělo placený plán, který neusíná.
+#
+# Pozn. 2: Free PostgreSQL databáze na Renderu má časové omezení (typicky
+# expiruje po ~90 dnech, podle aktuální politiky Renderu) — pro dlouhodobé
+# uchování historie/track recordu nakonec budeš potřebovat placený plán
+# databáze, ne jen webové služby.
+
+databases:
+  - name: apexsignal-db
+    plan: free
+    databaseName: apexsignal
+    user: apexsignal
+
+services:
+  - type: web
+    name: apexsignal-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend_api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: DATABASE_URL
+        fromDatabase:
+          name: apexsignal-db
+          property: connectionString
+      - key: APISPORTS_KEY
+        sync: false
+      - key: APITENNIS_KEY
+        sync: false
+      - key: ODDSAPI_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        sync: false
