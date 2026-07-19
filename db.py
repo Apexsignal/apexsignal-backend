@@ -263,6 +263,22 @@ def fetch_ticket_rows(user_id: Optional[int] = None, status: Optional[str] = Non
     return result
 
 
+def update_ticket_fields(ticket_id: int, total_odds: Optional[float] = None, actual_stake_amount: Optional[float] = None) -> None:
+    """Update jen těch polí tiketu, co appka skutečně dostala (viz PATCH /tickets/{id})."""
+    updates, params = [], []
+    if total_odds is not None:
+        updates.append("total_odds = %s")
+        params.append(total_odds)
+    if actual_stake_amount is not None:
+        updates.append("actual_stake_amount = %s")
+        params.append(actual_stake_amount)
+    if not updates:
+        return
+    params.append(ticket_id)
+    with get_cursor() as cur:
+        cur.execute(f"UPDATE tickets SET {', '.join(updates)} WHERE id = %s", params)
+
+
 def update_ticket_status(ticket_id: int, status: str) -> None:
     """Update ticket status."""
     with get_cursor() as cur:

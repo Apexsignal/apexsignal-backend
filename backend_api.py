@@ -2,9 +2,8 @@
 ApexSignal — Backend API
 Modul: backend_api.py
 
-REST + WebSocket vrstva spojující:
+REST vrstva spojující:
     - probability_model.TicketGenerator  (Generátor tiketů)
-    - momentum_filter.MomentumFilter      (Live Signal Engine)
     - data_provider                       (zdroj dat ze sportovního API)
     - auth                                (přihlašování — e-mail + heslo)
     - db                                  (PostgreSQL perzistence tiketů a uživatelů)
@@ -27,7 +26,7 @@ import requests
 import aiohttp
 import asyncio
 import logging
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request, UploadFile, Body
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -35,7 +34,6 @@ from pydantic import BaseModel, Field, field_validator
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
 )
-from momentum_filter import MomentumFilter, MatchSnapshot, MomentumSignal, SignalType
 import data_provider
 import ai_reviewer
 import db
@@ -214,7 +212,7 @@ class TicketResponse(BaseModel):
     recommended_stake_pct: float
     summary: str
     status: str   # "pending" / "won" / "lost" — appka tohle vyplní jen u uložených tiketů (viz /tickets/saved)
-    live_alert: Optional[str] = None   # viz _check_ticket_contradictions — appka sem píše, když živý signál odporuje výběru
+    live_alert: Optional[str] = None   # appka tenhle sloupec dřív plnila ze živých signálů; ty jsou odstraněné, pole zůstává kvůli zpětné kompatibilitě s DB/frontendem a je vždy None
     actual_stake_amount: Optional[float] = None   # co uživatel REÁLNĚ vsadil (viz POST /tickets/{id}/stake)
     actual_odds: Optional[float] = None           # za jaký kurz to reálně vsadil
     actual_profit_loss: Optional[float] = None    # appka to spočítá, jen když má actual_stake_amount A tiket je vyhodnocený
@@ -248,66 +246,15 @@ class TicketPairResponse(BaseModel):
     aggressive: Optional[TicketResponse]
 
 
-class LiveSignalResponse(BaseModel):
-    match_id: int
-    home_team: str
-    away_team: str
-    minute: int
-    market: str
-    odds: Optional[float]
-    reasoning: str
-    recommended_stake_pct: float
-    signal_type: str
-    is_real_pressure: bool
-    team_side: str
-    sent_at: datetime
-
-    @classmethod
-    def from_domain(cls, s: MomentumSignal, home_team: str = "Domácí", away_team: str = "Hosté", minute: int = 0) -> "LiveSignalResponse":
-        return cls(
-            match_id=s.match_id, home_team=home_team, away_team=away_team, minute=minute,
-            market=s.market, odds=s.odds,
-            reasoning=s.reasoning, recommended_stake_pct=s.recommended_stake_pct,
-            signal_type=s.signal_type.value, is_real_pressure=s.is_real_pressure,
-            team_side=s.team_side, sent_at=datetime.utcnow(),
-        )
-
-
-class LiveStatTickRequest(BaseModel):
-    """Vstupní data pro jednu minutu zápasu — typicky volá interní poller,
-    který stahuje live data z `data_provider.get_live_match_stats()`."""
-    minute: int
-    home_team: str = "Domácí"
-    away_team: str = "Hosté"
-    home_possession: int
-    away_possession: int
-    home_shots_on_target: int
-    away_shots_on_target: int
-    home_dangerous_attacks: int
-    away_dangerous_attacks: int
-    home_corners: int = 0
-    away_corners: int = 0
-    red_cards_home: int = 0
-    red_cards_away: int = 0
-    home_goals: int = 0
-    away_goals: int = 0
-
-
 # =====================================================================
-# Repository — tikety persistované v PostgreSQL (viz db.py), live signály
-# záměrně dál jen v paměti procesu (transientní stav běžících zápasů,
-# jeho ztráta při restartu je tolerovatelná — na rozdíl od tiketové
-# historie, kde by ztráta dat zničila smysl track recordu a kalibrace).
+# Repository — tikety persistované v PostgreSQL (viz db.py).
 # =====================================================================
 class Repo:
-    SIGNAL_FOLLOWUP_MINUTES = 15  # jak dlouho appka čeká na "trefu", než signál vyhodnotí jako miss
     FLAT_STAKE_PCT = 2.0          # srovnávací vklad "rovných X % na každý tiket bez ohledu na Kelly"
     CALIBRATION_BUCKET_WIDTH_PCT = 10
 
     def __init__(self):
-        self._momentum_filters: dict[int, MomentumFilter] = {}
         self._last_batch_match_ids: dict[int, list[int]] = {}  # user_id -> match_ids z posledního generování
-        self._signal_log: list[dict] = []  # historie odeslaných entry signálů + jejich výsledek (live signály, v paměti)
         db.ensure_schema()
 
     # --- Tikety: persistované, viz db.py -------------------------------
@@ -369,13 +316,6 @@ class Repo:
                         })
         return matches_data
 
-    def get_tickets_for_match(self, match_id: int) -> list[tuple[int, Ticket]]:
-        """Všechny uložené, ještě nevyhodnocené tikety obsahující výběr na
-        tenhle zápas — používá se pro křížovou kontrolu s živými signály
-        (viz _check_ticket_contradictions)."""
-        rows = db.fetch_ticket_rows(status="pending")
-        return [(r["ticket_id"], r["ticket"]) for r in rows if any(s.match_id == match_id for s in r["ticket"].selections)]
-
     def set_live_alert(self, ticket_id: int, message: Optional[str]) -> None:
         db.update_live_alert(ticket_id, message)
 
@@ -435,7 +375,7 @@ class Repo:
             "avg_winning_odds": avg_winning_odds,
             "kratky": by_type.get("kratky"),
             "stredni": by_type.get("stredni"),
-            "dlouhy": by_type.get("dlouhy"),
+            "dlouhy": by_type.get("boost"),  # ticket_type "boost" = UI label "Dlouhý"
             "by_type": by_type,
             "history": history,
         }
@@ -567,54 +507,11 @@ class Repo:
             ),
         }
 
-    # --- Live signály: záměrně v paměti (viz docstring třídy) ----------
-
-    def get_momentum_filter(self, match_id: int) -> MomentumFilter:
-        if match_id not in self._momentum_filters:
-            self._momentum_filters[match_id] = MomentumFilter(match_id=match_id)
-        return self._momentum_filters[match_id]
-
     def set_last_batch(self, user_id: int, match_ids: list[int]) -> None:
         self._last_batch_match_ids[user_id] = match_ids
 
     def get_last_batch(self, user_id: int) -> list[int]:
         return self._last_batch_match_ids.get(user_id, [])
-
-    def log_signal(self, match_id: int, team_side: str, minute: int, momentum_score: float, team_goals_at_signal: int) -> None:
-        """Zapíše nový entry signál jako 'pending' — výsledek se doplní později přes update_signal_outcomes."""
-        self._signal_log.append({
-            "match_id": match_id, "team_side": team_side, "fired_at_minute": minute,
-            "momentum_score": momentum_score, "team_goals_at_signal": team_goals_at_signal,
-            "outcome": "pending",
-        })
-
-    def update_signal_outcomes(self, match_id: int, current_minute: int, home_goals: int, away_goals: int) -> None:
-        """
-        Pro všechny dosud nevyhodnocené signály tohoto zápasu zkontroluje,
-        jestli straně, na kterou appka signál poslala, přibyl gól od chvíle
-        signálu (= hit), nebo jestli už uplynulo SIGNAL_FOLLOWUP_MINUTES
-        bez gólu (= miss). Volá se při každém pollu pro daný zápas.
-        """
-        current_goals = {"home": home_goals, "away": away_goals}
-        for entry in self._signal_log:
-            if entry["match_id"] != match_id or entry["outcome"] != "pending":
-                continue
-            if current_goals[entry["team_side"]] > entry["team_goals_at_signal"]:
-                entry["outcome"] = "hit"
-            elif current_minute - entry["fired_at_minute"] > self.SIGNAL_FOLLOWUP_MINUTES:
-                entry["outcome"] = "miss"
-
-    def get_track_record(self) -> dict:
-        resolved = [e for e in self._signal_log if e["outcome"] != "pending"]
-        hits = sum(1 for e in resolved if e["outcome"] == "hit")
-        total = len(resolved)
-        return {
-            "total_resolved": total,
-            "hits": hits,
-            "misses": total - hits,
-            "hit_rate_pct": round(hits / total * 100, 1) if total else None,
-            "pending": sum(1 for e in self._signal_log if e["outcome"] == "pending"),
-        }
 
 
 repo = Repo()
@@ -1099,9 +996,6 @@ def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
     Appka před vrácením historie zkusí dosettlovat tikety uživatele, co
     jsou ještě 'pending' — takže i bez čekání na cron (/tickets/settle)
     uvidíš čerstvý stav, hned jak si historii otevřeš PO skončení zápasů.
-    Případné upozornění na rozpor s živým signálem (viz
-    _check_ticket_contradictions) appka jednou vyhodnoceným tiketům
-    smaže — po skončení zápasu už není co sledovat.
 
     user_id appka bere VÝHRADNĚ z přihlašovacího tokenu — nikdy ne z
     parametru v URL, jinak by si kdokoli mohl jen změnit číslo v adrese
@@ -1314,264 +1208,6 @@ def get_ticket_roi(user_id: int = Depends(get_current_user_id)):
     """
     return repo.get_roi_report(user_id)
 
-
-# =====================================================================
-# Live Signal Engine — ingest + WebSocket distribuce
-# =====================================================================
-class ConnectionManager:
-    """
-    Spojení klíčuje per match_id (kdo sleduje konkrétní zápas), ale navíc
-    udržuje speciální kanál GLOBAL_CHANNEL — appka v `index.html` neví
-    dopředu, jaké zápasy jsou zrovna live, takže se připojuje na "všechno
-    najednou" a filtruje si signály sama podle sportu/kategorie. Broadcast
-    proto vždy posílá na obě místa: per-match i globální.
-    """
-    GLOBAL_CHANNEL = -1  # sentinel "match_id", nikdy se nestřetne s reálným ID
-
-    def __init__(self):
-        self._connections: dict[int, list[WebSocket]] = {}
-
-    async def connect(self, match_id: int, ws: WebSocket):
-        await ws.accept()
-        self._connections.setdefault(match_id, []).append(ws)
-
-    def disconnect(self, match_id: int, ws: WebSocket):
-        if match_id in self._connections and ws in self._connections[match_id]:
-            self._connections[match_id].remove(ws)
-
-    async def broadcast(self, match_id: int, payload: dict):
-        for ws in self._connections.get(match_id, []):
-            await ws.send_json(payload)
-        if match_id != self.GLOBAL_CHANNEL:
-            for ws in self._connections.get(self.GLOBAL_CHANNEL, []):
-                await ws.send_json(payload)
-
-
-ws_manager = ConnectionManager()
-
-
-@app.post("/live-signals/poll")
-async def poll_live_fixtures():
-    """
-    Jeden cyklus pollování: stáhne všechny právě běžící zápasy z API-Football,
-    pro každý vezme aktuální minutové statistiky, propustí je MomentumFilterem
-    a každý vzniklý signál rozešle přes WebSocket.
-
-    V produkci tohle nevoláš ručně — pustíš to na časovač (např. APScheduler
-    uvnitř aplikace, nebo externí cron jako cron-job.org, co bude tento
-    endpoint volat každých ~60 s, podle rate limitu tvého RapidAPI plánu).
-    """
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    live_fixtures = provider.get_live_fixtures()
-    signals_sent = 0
-
-    for raw_fixture in live_fixtures:
-        match_id = raw_fixture["fixture"]["id"]
-        minute = raw_fixture["fixture"]["status"].get("elapsed") or 0
-
-        live_raw = provider.get_live_match_stats(match_id)
-        live_data = data_provider.adapt_api_football_live_stats(minute, live_raw)
-
-        snapshot = MatchSnapshot(
-            minute=live_data["minute"],
-            home_possession=live_data["possession"]["home"], away_possession=live_data["possession"]["away"],
-            home_shots_on_target=live_data["shots_on_target"]["home"], away_shots_on_target=live_data["shots_on_target"]["away"],
-            home_dangerous_attacks=live_data["dangerous_attacks"]["home"], away_dangerous_attacks=live_data["dangerous_attacks"]["away"],
-            home_corners=live_data["corners"]["home"], away_corners=live_data["corners"]["away"],
-            red_cards_home=live_data["red_cards"]["home"], red_cards_away=live_data["red_cards"]["away"],
-            home_goals=live_data["goals"]["home"], away_goals=live_data["goals"]["away"],
-        )
-
-        mf = repo.get_momentum_filter(match_id)
-        signal = mf.ingest(snapshot)
-
-        # Bez ohledu na to, jestli teď vznikl nový signál, appka zkontroluje
-        # výsledky dřívějších pending signálů na tomhle zápase (padl gól? /
-        # vypršel čas na "trefu"?) — drží track record aktuální každý poll.
-        repo.update_signal_outcomes(match_id, minute, snapshot.home_goals, snapshot.away_goals)
-
-        if signal is not None:
-            home_team = raw_fixture["teams"]["home"]["name"]
-            away_team = raw_fixture["teams"]["away"]["name"]
-            if signal.signal_type == SignalType.ENTRY:
-                market_verdict = _enrich_with_live_odds_and_check_market(provider, signal)
-                if market_verdict is False:
-                    continue  # živý trh se hýbe opačným směrem než náš signál — appka ho nepošle
-
-                ai_note = ai_reviewer.review_live_signal(signal, home_team, away_team)
-                if ai_note:
-                    signal.reasoning += f" AI kontrola čerstvých zpráv: {ai_note}"
-
-                team_goals_now = snapshot.home_goals if signal.team_side == "home" else snapshot.away_goals
-                repo.log_signal(match_id, signal.team_side, minute, signal.momentum_score_team, team_goals_now)
-
-            _check_ticket_contradictions(signal, minute)
-
-            response = LiveSignalResponse.from_domain(signal, home_team, away_team, minute)
-            await ws_manager.broadcast(match_id, response.model_dump(mode="json"))
-            signals_sent += 1
-
-    return {"checked_fixtures": len(live_fixtures), "signals_sent": signals_sent}
-
-
-def _signal_contradicts_selection(selection: SelectionCandidate, signal: MomentumSignal) -> bool:
-    """
-    Porovná živý signál s konkrétním uloženým tiketovým výběrem na STEJNÝ
-    zápas. Appka to nehlásí jako "tiket je špatně" — jen že se realita
-    zápasu právě rozchází s tím, na čem byl tiket postaven, a stojí za to
-    se na zápas mrknout.
-    """
-    if signal.signal_type == SignalType.CASHOUT:
-        return True  # červená karta apod. — vždy stojí za upozornění, bez ohledu na trh výběru
-    if selection.market_type == MarketType.MATCH_WINNER:
-        if selection.selection == "home" and signal.team_side == "away":
-            return True
-        if selection.selection == "away" and signal.team_side == "home":
-            return True
-        if selection.selection == "draw":
-            return True  # jakýkoli směrový tlak je v rozporu s předpokladem remízy
-    return False  # over_goals/btts: živý tlak spíš POTVRZUJE, ne odporuje výběru
-
-
-def _check_ticket_contradictions(signal: MomentumSignal, minute: int) -> None:
-    """
-    Projde uložené (a ještě nevyhodnocené) tikety, co obsahují výběr na
-    tenhle konkrétní zápas, a pokud živý signál odporuje některému z nich,
-    zapíše na ten tiket krátké upozornění — appka ho ukáže, hned jak si
-    uživatel historii/tikety otevře (viz /tickets/saved), bez potřeby
-    push notifikací nebo per-uživatelského WebSocketu.
-    """
-    for ticket_id, ticket in repo.get_tickets_for_match(signal.match_id):
-        for selection in ticket.selections:
-            if selection.match_id != signal.match_id:
-                continue
-            if _signal_contradicts_selection(selection, signal):
-                side_label = "domácí" if signal.team_side == "home" else "hosté"
-                repo.set_live_alert(
-                    ticket_id,
-                    f"[{minute}'] Živý signál ({side_label}, {signal.market}) je v rozporu s výběrem "
-                    f"\"{selection.market_type.value} {selection.selection}\" na {selection.home_team} vs "
-                    f"{selection.away_team}. Appka tiket nemění, jen na to upozorňuje — mrkni se na zápas.",
-                )
-                break  # jeden rozpor na tiket stačí, appka ho nepřepisuje dalšími výběry ze stejného zápasu
-
-
-@app.get("/live-signals/track-record")
-def get_track_record():
-    """
-    Agregovaná úspěšnost živých signálů: kolik z odeslaných entry signálů
-    skutečně vedlo ke gólu dané strany do SIGNAL_FOLLOWUP_MINUTES minut.
-    Pozn.: žije jen v paměti procesu — restart serveru track record vynuluje.
-    """
-    return repo.get_track_record()
-
-
-# Baseline kurzu při PRVNÍM pozorování pro daný (zápas, strana) — proti
-# němu appka porovnává každé další pozorování, aby poznala, jestli se
-# trh hýbe ve prospěch signálu, nebo proti němu. Žije jen po dobu běhu
-# procesu (restart serveru ho vynuluje) — to je v pořádku, baseline má
-# smysl jen v rámci jednoho live zápasu.
-_live_odds_baseline: dict[tuple, float] = {}
-MARKET_CONFIRM_SHORTEN_PCT = 0.03    # kurz se zkrátil o 3 %+ -> trh signál potvrzuje
-MARKET_DISAGREE_LENGTHEN_PCT = 0.03  # kurz se prodloužil o 3 %+ -> trh nesouhlasí, appka signál potlačí
-
-
-def _enrich_with_live_odds_and_check_market(provider, signal) -> Optional[bool]:
-    """
-    Doplní signal.odds reálnou live cenou na trh 'Next Goal' z API-Football
-    a porovná ji s první zaznamenanou cenou pro tenhle zápas+stranu:
-
-    - kurz se mezitím o MARKET_CONFIRM_SHORTEN_PCT a víc zkrátil -> trh
-      signál potvrzuje, appka k odůvodnění přidá poznámku, vrací True.
-    - kurz se naopak o MARKET_DISAGREE_LENGTHEN_PCT a víc prodloužil ->
-      trh nesouhlasí, appka signál nepošle, vrací False.
-    - cokoli jiného (žádná data, malý pohyb, první pozorování) -> appka
-      signál pošle normálně beze změny, vrací None.
-
-    Bez živých kurzů (beta endpoint /odds/live nedostupný na tvém účtu)
-    appka tiše vrací None — tahle vrstva NIKDY appku neshodí ani nezablokuje
-    základní fungování čistě na matematice.
-    """
-    try:
-        live_odds_raw = provider.get_live_odds(signal.match_id)
-        odds = data_provider.adapt_live_odds_for_signal(live_odds_raw, signal.team_side)
-        if data_provider.is_live_market_blocked(live_odds_raw):
-            signal.reasoning += " Pozn.: bookmaker zrovna live sázení na tenhle zápas pozastavil, kurz se za pár sekund může změnit."
-    except Exception:
-        odds = None
-
-    if odds is None:
-        return None
-
-    signal.odds = odds
-    key = (signal.match_id, signal.team_side)
-    baseline = _live_odds_baseline.get(key)
-    if baseline is None:
-        _live_odds_baseline[key] = odds
-        return None  # první pozorování pro tenhle zápas+stranu, nemáme s čím srovnat
-
-    movement_pct = (baseline - odds) / baseline  # kladné = kurz se zkrátil
-    if movement_pct >= MARKET_CONFIRM_SHORTEN_PCT:
-        signal.reasoning += (
-            f" Živý kurz se od začátku tlaku zkrátil o {round(movement_pct * 100, 1)} % "
-            f"— trh tlak potvrzuje nezávisle na našem modelu."
-        )
-        return True
-    if movement_pct <= -MARKET_DISAGREE_LENGTHEN_PCT:
-        return False
-    return None
-
-
-@app.post("/live-signals/ingest/{match_id}", response_model=Optional[LiveSignalResponse])
-async def ingest_live_tick(match_id: int, tick: LiveStatTickRequest):
-    """
-    Alternativa k /live-signals/poll pro manuální/testovací vstup jedné minuty
-    dat (např. když chceš nahrát historický zápas krok po kroku, nebo máš
-    vlastní zdroj dat místo API-Football).
-    """
-    mf = repo.get_momentum_filter(match_id)
-    snapshot = MatchSnapshot(
-        minute=tick.minute,
-        home_possession=tick.home_possession, away_possession=tick.away_possession,
-        home_shots_on_target=tick.home_shots_on_target, away_shots_on_target=tick.away_shots_on_target,
-        home_dangerous_attacks=tick.home_dangerous_attacks, away_dangerous_attacks=tick.away_dangerous_attacks,
-        home_corners=tick.home_corners, away_corners=tick.away_corners,
-        red_cards_home=tick.red_cards_home, red_cards_away=tick.red_cards_away,
-        home_goals=tick.home_goals, away_goals=tick.away_goals,
-    )
-    signal = mf.ingest(snapshot)
-    if signal is None:
-        return None
-
-    response = LiveSignalResponse.from_domain(signal, tick.home_team, tick.away_team, tick.minute)
-    await ws_manager.broadcast(match_id, response.model_dump(mode="json"))
-    return response
-
-
-@app.websocket("/ws/live-signals/{match_id}")
-async def live_signals_ws(websocket: WebSocket, match_id: int):
-    """Frontend se připojí sem a dostává push notifikace v reálném čase."""
-    await ws_manager.connect(match_id, websocket)
-    try:
-        while True:
-            await websocket.receive_text()  # keep-alive ping z klienta, payload neřešíme
-    except WebSocketDisconnect:
-        ws_manager.disconnect(match_id, websocket)
-
-
-@app.websocket("/ws/live-signals")
-async def live_signals_ws_global(websocket: WebSocket):
-    """
-    Globální verze bez match_id — appka v index.html neví dopředu, jaké
-    zápasy jsou zrovna live, takže se připojuje sem a dostává VŠECHNY
-    signály napříč zápasy (filtr na sport/kategorii řeší sama na klientovi).
-    """
-    await ws_manager.connect(ws_manager.GLOBAL_CHANNEL, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(ws_manager.GLOBAL_CHANNEL, websocket)
 
 
 class TicketGenerateRequestWithExclude(BaseModel):
@@ -1989,20 +1625,12 @@ def update_ticket(ticket_id: int, req: dict = Body(...), user_id: int = Depends(
         raise HTTPException(status_code=404, detail="Tiket nenalezen")
     if owner_id != user_id:
         raise HTTPException(status_code=403, detail="Tenhle tiket není tvůj")
-    
-    # Update total_odds if provided
-    if "total_odds" in req and req["total_odds"] is not None:
-        db.execute(f"""
-            UPDATE tickets SET total_odds = ? WHERE ticket_id = ?
-        """, (req["total_odds"], ticket_id))
-    
-    # Update actual_stake_amount if provided
-    if "actual_stake_amount" in req and req["actual_stake_amount"] is not None:
-        db.execute(f"""
-            UPDATE tickets SET actual_stake_amount = ? WHERE ticket_id = ?
-        """, (req["actual_stake_amount"], ticket_id))
-    
-    db.commit()
+
+    db.update_ticket_fields(
+        ticket_id,
+        total_odds=req.get("total_odds"),
+        actual_stake_amount=req.get("actual_stake_amount"),
+    )
     return {"ticket_id": ticket_id, "status": "updated"}
 
 
