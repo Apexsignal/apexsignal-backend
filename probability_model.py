@@ -673,27 +673,52 @@ class TicketGenerator:
 
         odds_range = TICKET_RANGES[ticket_key]
 
-        # Fallback práh — zkusit postupně 70% → 65% → 60%
-        # DŮLEŽITÉ: Zkoušíme tiket, ne jen pool!
-        FALLBACK_THRESHOLDS = [min_prob, 0.65, 0.60]
+        # Fallback práh — zkusit postupně od nejpřísnějšího po nejvolnější.
+        # DŮLEŽITÉ: Zkoušíme tiket, ne jen pool! (set+sorted, protože u
+        # BOOSTu je min_prob=0.55 nižší než 0.60/0.65 — bez seřazení by se
+        # smyčka zastavila hned na nejvolnějším prahu a nikdy by nezkusila
+        # kvalitnější kandidáty napřed.)
+        FALLBACK_THRESHOLDS = sorted({min_prob, 0.65, 0.60}, reverse=True)
         ticket = None
         used_threshold = min_prob
         candidate_counts = {}
-        
+
         for threshold in FALLBACK_THRESHOLDS:
             pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=threshold)
             used_threshold = threshold
             candidate_counts[int(threshold*100)] = len(pool)
             print(f"[{ticket_key}] {int(threshold*100)}%: {len(pool)} kandidátů")
-            
+
             if not pool:
                 continue  # Žádní kandidáti - zkusit nižší prah
-            
+
             if pool_filter is not None:
                 pool = pool_filter(pool)
-            
-            # Zkusit vybrat tiket z tohoto pool
-            ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
+
+            if ticket_key == "boost":
+                # BOOST skládá 3+ výběrů na dlouhý kurz (10-15) — i malé
+                # systematické nadhodnocení modelu se v takovém kombu
+                # znásobí. U výhry favorita (MATCH_WINNER) appka někdy
+                # nemá žádnou NEZÁVISLOU tržní cenu (ani API-Football, ani
+                # the-odds-api) a kurz si dopočítá sama z vlastní
+                # pravděpodobnosti (viz data_provider.normalize_to_match_input)
+                # — SelectionCandidate.market_probability je pak None.
+                # Appka proto pro BOOST nejdřív zkusí sestavit tiket JEN
+                # z tržně ověřených výběrů; když se to nepovede (moc málo
+                # kandidátů), použije jako záchrannou síť i neověřené, ať
+                # appka pořád něco vygeneruje.
+                validated_pool = [
+                    c for c in pool
+                    if not (c.market_type == MarketType.MATCH_WINNER and c.market_probability is None)
+                ]
+                ticket = self._build_ticket(validated_pool, odds_range, ticket_key, risk_level)
+                if ticket is None and len(validated_pool) < len(pool):
+                    print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
+                    ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
+            else:
+                # Zkusit vybrat tiket z tohoto pool
+                ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
+
             if ticket is not None:
                 if threshold < min_prob:
                     print(f"[{ticket_key}] Tiket sestaven s prahem {int(threshold*100)}%")
