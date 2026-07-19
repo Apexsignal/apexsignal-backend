@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way
+from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator
 from momentum_filter import MatchSnapshot
 
 
@@ -174,6 +174,20 @@ def normalize_to_match_input(
     away_xg = _estimate_expected_goals(away_stats, is_home=False, recency_weighted_avg=away_recent_form, adjustment_factor=away_factor)
     expected_cards = _estimate_expected_cards(home_stats, away_stats)
 
+    # FALLBACK KURZY: Pokud API-Football nevrátil kurzy, estimuj z model pravděpodobnosti
+    favorite_odds = odds_raw.get("match_winner", {}).get("favorite", None)
+    if favorite_odds is None or favorite_odds < 1.01:
+        # API-Football nevrátil kurzy - estimuj z Poissonova modelu (pokud máme data)
+        if home_xg is not None and away_xg is not None and home_xg > 0 and away_xg > 0:
+            try:
+                winner_probs = MarketEvaluator.match_winner_probabilities(home_xg, away_xg)
+                favorite_prob = max(winner_probs.values())  # Nejvyšší pravděpodobnost
+                favorite_odds = round(1.0 / max(favorite_prob, 0.01), 2)  # Převeď na kurz
+            except Exception:
+                favorite_odds = 2.0  # Fallback pokud Poisson selhá
+        else:
+            favorite_odds = 2.0  # Fallback pokud xG data chybí
+
     return MatchInput(
         match_id=fixture["id"],
         sport=sport,
@@ -183,6 +197,7 @@ def normalize_to_match_input(
         country=fixture.get("country", ""),
         league_id=fixture.get("league_id"),
         kickoff_date=(fixture.get("kickoff_time") or "")[:10],  # jen datum (YYYY-MM-DD) z ISO timestampu
+        kickoff_time=(fixture.get("kickoff_time") or "")[11:16],  # čas HH:MM z ISO timestampu
         home_expected_goals=home_xg,
         away_expected_goals=away_xg,
         expected_cards=expected_cards,
@@ -197,7 +212,7 @@ def normalize_to_match_input(
         away_rest_days=away_rest_days,
         home_dead_rubber=home_dead_rubber,
         away_dead_rubber=away_dead_rubber,
-        favorite_win_market_odds=odds_raw.get("match_winner", {}).get("favorite", 1.0),
+        favorite_win_market_odds=favorite_odds,
         over_goals_odds=odds_raw.get("over_goals", {}),     # {2.5: 1.85, 3.5: 2.60, ...}
         btts_yes_odds=odds_raw.get("btts_yes"),
         over_cards_odds=odds_raw.get("over_cards", {}),     # {3.5: 1.90, 4.5: 2.40, ...}
@@ -1649,13 +1664,24 @@ def adapt_api_football_live_stats(minute: int, live_raw: dict) -> dict:
 # Factory — vybere providera dle sportu (definováno až tady, na konci,
 # protože potřebuje znát všechny třídy výše)
 # =======================================================================
+# SINGLETON PROVIDERS — jedinou instanci pro celý lifetime aplikace
+_PROVIDER_CACHE: dict[Sport, SportsDataProvider] = {}
+
+
 def get_provider(sport: Sport) -> SportsDataProvider:
+    if sport in _PROVIDER_CACHE:
+        return _PROVIDER_CACHE[sport]
+
     if sport == Sport.FOOTBALL:
-        return APIFootballProvider()
-    if sport == Sport.BASKETBALL:
-        return APISportsDirectProvider(sport_path="basketball")
-    if sport == Sport.HOCKEY:
-        return APISportsDirectProvider(sport_path="hockey")
-    if sport == Sport.TENNIS:
-        return APITennisProvider()
-    raise NotImplementedError(f"Pro sport '{sport.value}' chybí napojený provider.")
+        provider = APIFootballProvider(cache_ttl_seconds=3600)  # 1 hodina in-memory
+    elif sport == Sport.BASKETBALL:
+        provider = APISportsDirectProvider(sport_path="basketball", cache_ttl_seconds=3600)
+    elif sport == Sport.HOCKEY:
+        provider = APISportsDirectProvider(sport_path="hockey", cache_ttl_seconds=3600)
+    elif sport == Sport.TENNIS:
+        provider = APITennisProvider(cache_ttl_seconds=3600)
+    else:
+        raise NotImplementedError(f"Pro sport '{sport.value}' chybí napojený provider.")
+
+    _PROVIDER_CACHE[sport] = provider
+    return provider
