@@ -1286,34 +1286,6 @@ def _try_settle_ticket(provider, ticket: Ticket, selection_ids: list[int] = None
     return None  # zápas(y) ještě neskončily, nebo appka trh neumí vyhodnotit čistě ze skóre
 
 
-@app.post("/tickets/settle")
-def settle_tickets():
-    """
-    Projde VŠECHNY dosud nevyhodnocené uložené tikety (napříč uživateli)
-    a zkusí je vyhodnotit — viz _try_settle_ticket. V produkci tohle
-    pustíš na časovač (stejně jako /live-signals/poll), např. jednou
-    denně ráno po odehraných zápasech — tak se historie udržuje aktuální
-    i bez toho, aby si uživatel appku zrovna otevřel. (Appka navíc totéž
-    dělá i při čtení historie přes /tickets/saved, viz tam — takže i bez
-    cronu se stav osvěží ve chvíli, kdy si uživatel historii prohlédne.)
-    """
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    settled = 0
-    # get_pending_tickets vrací jen (ticket_id, ticket), potřebuji i selection_ids
-    # Proto si je vezmu z DB query přímo
-    all_pending = db.fetch_ticket_rows(status="pending")
-    for row in all_pending:
-        ticket_id = row["ticket_id"]
-        ticket = row["ticket"]
-        selection_ids = [s.get("id") for s in row.get("selections", [])]
-        new_status = _try_settle_ticket(provider, ticket, selection_ids)
-        if new_status is not None:
-            repo.set_ticket_status(ticket_id, new_status)
-            settled += 1
-
-    return {"settled_this_run": settled, "still_pending": len(repo.get_pending_tickets())}
-
-
 @app.get("/tickets/track-record")
 def get_ticket_track_record(user_id: int = Depends(get_current_user_id)):
     """Agregovaná úspěšnost TVÝCH uložených tiketů — kolik vyhrálo, kolik ne, win rate."""
