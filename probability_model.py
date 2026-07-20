@@ -362,21 +362,11 @@ class Ticket:
 
     @property
     def summary(self) -> str:
-        """Krátké shrnutí celého tiketu — kolik výběrů, jaký kurz, a poznámka, pokud appka korigovala kombinovanou pravděpodobnost za korelaci."""
-        league_counts: dict[str, int] = {}
-        for s in self.selections:
-            if s.league:
-                league_counts[s.league] = league_counts.get(s.league, 0) + 1
-        correlated = any(count > 1 for count in league_counts.values())
-        note = (
-            " Pozn.: některé výběry jsou ze stejné ligy a dne, appka proto kombinovanou "
-            "pravděpodobnost mírně snížila oproti naivnímu výpočtu (viz korelační korekce)."
-            if correlated else ""
-        )
+        """Krátké shrnutí celého tiketu — kolik výběrů, jaký kurz, jaký doporučený vklad."""
         return (
             f"{len(self.selections)} výběrů, celkový kurz {self.total_odds}, kombinovaná "
             f"pravděpodobnost {round(self.combined_probability * 100, 1)} %, doporučený vklad "
-            f"{self.recommended_stake_pct} % bankrollu.{note}"
+            f"{self.recommended_stake_pct} % bankrollu."
         )
 
 
