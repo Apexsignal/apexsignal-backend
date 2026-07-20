@@ -23,6 +23,17 @@
 #                        python3 -c "import secrets; print(secrets.token_hex(32))"
 #                        NIKDY ho neměň po nasazení — všem uživatelům by
 #                        appka token rozplatnila a musely by se znovu přihlásit.
+#      ADMIN_TASK_KEY — sdílený tajný klíč pro POST /admin/daily-tickets
+#                        (automatické denní generování tiketů, viz
+#                        naplánovaná úloha). Appka požaduje hlavičku
+#                        X-Admin-Key s touhle hodnotou, jinak vrátí 403.
+#                        Vygeneruj si ho stejně jako SECRET_KEY.
+#      DAILY_TICKETS_USER_ID — ID účtu appky (users.id v DB), pod který
+#                        se automaticky generované tikety ukládají.
+#      TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID — appka jimi posílá
+#                        automaticky vygenerované tikety do Telegramu
+#                        (viz ticket_telegram.py). Bez nich appka tikety
+#                        jen uloží do historie, Telegram krok přeskočí.
 # 4. Po nasazení dostaneš URL typu https://apexsignal-backend.onrender.com
 #    — tu vlož do API_BASE_URL v index.html.
 #
@@ -64,4 +75,12 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: SECRET_KEY
+        sync: false
+      - key: ADMIN_TASK_KEY
+        sync: false
+      - key: DAILY_TICKETS_USER_ID
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
         sync: false

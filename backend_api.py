@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import os
 import json
@@ -39,6 +40,7 @@ import ai_reviewer
 import db
 import auth
 import rate_limiter
+import ticket_telegram
 
 # Appka zpracovává zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
 # druhém — viz _build_football_matches. Volání čekají hlavně na síť
@@ -1573,6 +1575,112 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
         "pocet_neshod": len(mismatches),
         "neshody": mismatches,
     }
+
+
+# =====================================================================
+# Automatické denní generování tiketů (cron) — appka denně v 9:00 SEČ/SELČ
+# vygeneruje krátký + střední tiket, v úterý a pátek navíc i BOOST, uloží
+# je do historie zadaného účtu a pošle je jako obrázky do Telegramu.
+# Volá se z vnějšku (naplánovaná úloha), ne appka sama ze sebe — proto
+# appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
+# přihlašovacím tokenem konkrétního uživatele.
+# =====================================================================
+DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS]
+DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
+
+
+def _generate_one_ticket_for_cron(
+    user_id: int, risk_level: int, sports: list[Sport], market_types: list[MarketType], time_frame_days: int,
+) -> Optional[Ticket]:
+    """Stejná logika jako /tickets/generate (fetch → vyluč už použité →
+    vyfiltruj minulé zápasy → fallback na širší horizont, pokud je málo
+    zápasů NEBO se z nich nepovede sestavit tiket), jen bez závislosti na
+    přihlášeném uživateli z requestu."""
+    exclude_ids = repo.get_all_saved_match_ids(user_id)
+
+    all_matches = _fetch_candidate_matches(sports, time_frame_days)
+    matches = [m for m in all_matches if m.match_id not in exclude_ids]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+
+    if len(matches) < 3:
+        all_matches = _fetch_candidate_matches(sports, time_frame_days + 3)
+        matches = [m for m in all_matches if m.match_id not in exclude_ids]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+
+    result = ticket_generator.generate(
+        matches, risk_level, sports, market_types, time_frame_days,
+        pool_filter=ai_reviewer.review_candidates,
+    )
+
+    if result["safe"] is None:
+        all_matches = _fetch_candidate_matches(sports, time_frame_days + 3)
+        matches = [m for m in all_matches if m.match_id not in exclude_ids]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+        result = ticket_generator.generate(
+            matches, risk_level, sports, market_types, time_frame_days,
+            pool_filter=ai_reviewer.review_candidates,
+        )
+
+    return result["safe"]
+
+
+def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
+    return {
+        "ticket_id": ticket_id,
+        "ticket_type": ticket.ticket_type,
+        "total_odds": ticket.total_odds,
+        "selections": [
+            {
+                "home_team": s.home_team, "away_team": s.away_team,
+                "league": s.league, "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
+                "odds": s.odds, "probability": s.probability, "selection": s.selection,
+            }
+            for s in ticket.selections
+        ],
+    }
+
+
+@app.post("/admin/daily-tickets")
+def run_daily_tickets(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    # Úterý=1, pátek=4 — BOOST appka posílá jen 2x týdně (5denní horizont
+    # se denně z velké části překrývá se včerejším, denní odesílání by
+    # bylo skoro identické, jen s jinou kombinací nohou).
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    plan = [("kratky", 20, 2), ("stredni", 50, 2)]
+    if today_prague.weekday() in (1, 4):
+        plan.append(("boost", 80, 5))
+
+    results = []
+    for label, risk_level, days in plan:
+        ticket = _generate_one_ticket_for_cron(
+            target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+        )
+        if ticket is None:
+            results.append({"type": label, "status": "failed_to_generate"})
+            continue
+
+        ticket_id = repo.save_ticket(target_user_id, ticket)
+
+        telegram_status = "skipped"
+        if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+            try:
+                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                telegram_status = "sent"
+            except Exception as e:
+                telegram_status = f"error: {e}"
+
+        results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "telegram": telegram_status})
+
+    return {"date": today_prague.isoformat(), "results": results}
 
 
 class TicketAnalysisResponse(BaseModel):
