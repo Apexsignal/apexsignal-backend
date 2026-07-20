@@ -779,6 +779,7 @@ class TicketGenerator:
     }
     MAX_COMBO_LEGS = 10      # bezpečný strop na počet nohou (reálné kurzy nikdy nepotřebují víc)
     MAX_SEARCH_NODES = 50_000  # pojistka proti kombinatorickému výbuchu u velkých poolů
+    MAX_EDGE_RETRIES = 5    # kolikrát appka zkusí kombinaci bez nejslabšího výběru (viz níže)
 
     def _build_ticket(
         self,
@@ -795,29 +796,46 @@ class TicketGenerator:
         min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
         min_odds_hard = self.MIN_ODDS_HARD.get(ticket_type, 2.0)
 
-        selected = self._search_combo(ordered_pool, min_odds, max_odds, min_selections, min_odds_hard)
-        if selected is None:
-            return None
-        running_odds = 1.0
-        for c in selected:
-            running_odds *= c.odds
+        # _search_combo hledá kombinaci jen podle KURZU (padne do odds_range).
+        # To appce může vrátit kombinaci, kde jednotlivé výběry sice prošly
+        # filtrem na model_probability, ale zobrazovaná (tržně-preferovaná)
+        # probability je nižší — takže výsledná kombinovaná pravděpodobnost
+        # ×kurz nedá kladnou hodnotu a Kelly by doporučil vsadit 0 %. Appka
+        # takovou kombinaci nikdy nevrátí jako hotový tiket (bylo by to
+        # matoucí — appka sama tvrdí "nemá to cenu" a přesto ho nabídne) —
+        # zkusí to znovu bez nejslabšího výběru z týhle kombinace.
+        working_pool = ordered_pool
+        for _ in range(self.MAX_EDGE_RETRIES):
+            selected = self._search_combo(working_pool, min_odds, max_odds, min_selections, min_odds_hard)
+            if selected is None:
+                return None
 
-        combined_probability = 1.0
-        for c in selected:
-            combined_probability *= c.probability
-        combined_probability = self._apply_correlation_discount(selected, combined_probability)
+            running_odds = 1.0
+            for c in selected:
+                running_odds *= c.odds
 
-        recommended_stake_pct = round(
-            min(kelly_stake_fraction(combined_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
-        )
+            combined_probability = 1.0
+            for c in selected:
+                combined_probability *= c.probability
+            combined_probability = self._apply_correlation_discount(selected, combined_probability)
 
-        return Ticket(
-            ticket_type=ticket_type,
-            selections=selected,
-            total_odds=round(running_odds, 2),
-            combined_probability=round(combined_probability, 4),
-            recommended_stake_pct=recommended_stake_pct,
-        )
+            recommended_stake_pct = round(
+                min(kelly_stake_fraction(combined_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
+            )
+
+            if recommended_stake_pct > 0:
+                return Ticket(
+                    ticket_type=ticket_type,
+                    selections=selected,
+                    total_odds=round(running_odds, 2),
+                    combined_probability=round(combined_probability, 4),
+                    recommended_stake_pct=recommended_stake_pct,
+                )
+
+            weakest = min(selected, key=lambda c: c.probability)
+            working_pool = [c for c in working_pool if c is not weakest]
+
+        return None
 
     def _search_combo(
         self,
