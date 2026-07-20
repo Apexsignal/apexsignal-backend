@@ -834,6 +834,25 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
         pool_filter=ai_reviewer.review_candidates,
     )
+
+    # Zápasů může být dost (>= 3), a přesto z nich nevzejde tiket — třeba
+    # když jde zrovna o dávku zápasů s malým vzorkem dat (nový tým, začátek
+    # sezóny/poháru), kde appka žádnému nedá dost jasnou důvěru (viz
+    # MIN_SELECTION_PROBABILITY). Dřívější fallback na širší horizont se
+    # díval jen na POČET zápasů, ne na to, jestli z nich vůbec vzešel
+    # tiket — appka proto zkusí širší okno ještě jednou, tentokrát podle
+    # skutečného výsledku generování.
+    if result["safe"] is None:
+        print(f"[generate_tickets] ⚠️ Tiket se z {len(matches)} zápasů nesestavil, zkouším horizont +3 dny navíc...")
+        all_matches = _fetch_candidate_matches(req.sports, req.time_frame_days + 3)
+        matches = [m for m in all_matches if m.match_id not in exclude_ids]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+        print(f"[generate_tickets] Po rozšíření: {len(matches)} zápasů")
+        result = ticket_generator.generate(
+            matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
+            pool_filter=ai_reviewer.review_candidates,
+        )
+
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
 
@@ -868,6 +887,21 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
         pool_filter=ai_reviewer.review_candidates,
     )
+
+    # Viz stejná poznámka v generate_tickets — dost zápasů neznamená dost
+    # KVALITNÍCH kandidátů, takže appka zkusí širší horizont podle
+    # skutečného výsledku, ne jen podle počtu zápasů.
+    if result["safe"] is None:
+        print(f"[regenerate_tickets] ⚠️ Tiket se z {len(matches)} zápasů nesestavil, zkouším horizont +3 dny navíc...")
+        all_matches = _fetch_candidate_matches(req.sports, req.time_frame_days + 3)
+        matches = [m for m in all_matches if m.match_id not in combined_exclude]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+        print(f"[regenerate_tickets] Po rozšíření: {len(matches)} zápasů")
+        result = ticket_generator.regenerate(
+            matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
+            pool_filter=ai_reviewer.review_candidates,
+        )
+
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
 
