@@ -135,14 +135,14 @@ def render_ticket(ticket: dict) -> Image.Image:
     return img
 
 
-def send_to_telegram(image_path: str, caption: str = ""):
+def send_to_telegram(image_path: str):
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     with open(image_path, "rb") as f:
         resp = requests.post(
             url,
-            data={"chat_id": chat_id, "caption": caption},
+            data={"chat_id": chat_id},
             files={"photo": f},
             timeout=30,
         )
@@ -162,8 +162,7 @@ def main():
     out_path = "/tmp/ticket_render.jpg"
     img.save(out_path, "JPEG", quality=92)
 
-    caption = ticket.get("summary", "")
-    result = send_to_telegram(out_path, caption=caption[:1024])
+    result = send_to_telegram(out_path)
     print(json.dumps(result, ensure_ascii=False))
 
 
