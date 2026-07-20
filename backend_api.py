@@ -1504,6 +1504,77 @@ def clear_cache(user_id: int = Depends(get_current_user_id)):
     return {"deleted": count, "status": "cache cleared"}
 
 
+@app.get("/admin/verify-results")
+def verify_results(user_id: int = Depends(get_current_user_id)):
+    """
+    Diagnostický endpoint — appka NEEDITUJE nic v DB, jen zkontroluje.
+    Projde všechny výběry napříč všemi uživateli, co appka označila jako
+    'won'/'lost', a ke KAŽDÉMU dohledá u API-Football skutečné skóre
+    zápasu — pak appka porovná, jestli evaluate_selection_outcome() na
+    tom skóre dá STEJNÝ výsledek, jaký má appka uložený v DB. Používej
+    při podezření, že appka nesprávně vyhodnocuje výhry/prohry (viz
+    Historie a statistika) — místo ručního ověřování pár tiketů appka
+    zkontroluje úplně všechny najednou.
+
+    Zápasy appka mezi výběry sdílí (jeden fetch na match_id, ne na výběr),
+    ale i tak je to dost API volání navíc — appka doporučuje spouštět
+    jen občas, ne po každém vyhodnocení.
+    """
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    rows = db.fetch_ticket_rows()
+
+    match_result_cache: dict[int, dict] = {}
+    checked = 0
+    unverifiable = 0
+    mismatches = []
+
+    for row in rows:
+        ticket = row["ticket"]
+        sel_dicts = row.get("selections", [])
+        for sel_dict, sel_obj in zip(sel_dicts, ticket.selections):
+            claimed = sel_dict.get("result", "pending")
+            if claimed not in ("won", "lost"):
+                continue
+
+            match_id = sel_dict["match_id"]
+            if match_id not in match_result_cache:
+                try:
+                    raw = provider.get_fixture_result(str(match_id))
+                    match_result_cache[match_id] = data_provider.adapt_fixture_result(raw)
+                except Exception as e:
+                    match_result_cache[match_id] = {"is_finished": False, "error": str(e)}
+
+            real = match_result_cache[match_id]
+            if not real.get("is_finished") or real.get("home_goals") is None:
+                unverifiable += 1  # appka zápas nedohledala nebo API selhalo — nelze ověřit
+                continue
+
+            actual_outcome = evaluate_selection_outcome(sel_obj, real["home_goals"], real["away_goals"])
+            if actual_outcome is None:
+                unverifiable += 1  # trh appka neumí vyhodnotit čistě ze skóre (karty apod.)
+                continue
+
+            checked += 1
+            actual_str = "won" if actual_outcome else "lost"
+            if actual_str != claimed:
+                mismatches.append({
+                    "ticket_id": row["ticket_id"],
+                    "match": f"{sel_obj.home_team} vs {sel_obj.away_team}",
+                    "market": sel_obj.market_type.value,
+                    "selection": sel_obj.selection,
+                    "appka_tvrdi": claimed,
+                    "skutecny_vysledek": actual_str,
+                    "skutecne_skore": f"{real['home_goals']}:{real['away_goals']}",
+                })
+
+    return {
+        "zkontrolovano_vyberu": checked,
+        "nelze_overit": unverifiable,
+        "pocet_neshod": len(mismatches),
+        "neshody": mismatches,
+    }
+
+
 class TicketAnalysisResponse(BaseModel):
     selections: list[dict]
     overall: str
