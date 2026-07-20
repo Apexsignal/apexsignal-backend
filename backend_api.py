@@ -164,7 +164,7 @@ class TicketGenerateRequest(BaseModel):
     risk_level: int = Field(ge=0, le=100)
     sports: list[Sport]
     market_types: list[MarketType]
-    time_frame_days: int = Field(ge=1, le=4)  # Horizont: 1-4 dny (už ne konkrétní data)
+    time_frame_days: int = Field(ge=1, le=5)  # Horizont: 1-5 dní (už ne konkrétní data)
 
 
 class SelectionResponse(BaseModel):
