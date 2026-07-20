@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Optional
 
 import psycopg2
@@ -90,6 +91,40 @@ CREATE TABLE IF NOT EXISTS api_cache (
     cache_key VARCHAR(255) PRIMARY KEY,
     payload JSONB NOT NULL,
     expires_at TIMESTAMP NOT NULL
+);
+
+-- Tokenový systém (viz ApexSignal – Tokenomika & Tokenový Model). Stripe
+-- napojení přijde v dalším kroku — tahle vrstva (zůstatek, transakce,
+-- kódy na uplatnění) funguje nezávisle na tom, odkud tokeny přišly.
+CREATE TABLE IF NOT EXISTS user_tokens (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    balance INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS token_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount INTEGER NOT NULL,          -- kladné = příjem (kód, dokup), záporné = útrata (vygenerování tiketu)
+    reason VARCHAR(100) NOT NULL,     -- např. 'UNLOCK_KRATKY', 'REDEEM_CODE:ABC123'
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS redeem_codes (
+    code VARCHAR(64) PRIMARY KEY,
+    tokens INTEGER NOT NULL,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    uses_count INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMP,
+    note VARCHAR(255),
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS redeem_code_uses (
+    code VARCHAR(64) NOT NULL REFERENCES redeem_codes(code) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    used_at TIMESTAMP DEFAULT now(),
+    PRIMARY KEY (code, user_id)
 );
 """
 
@@ -366,5 +401,94 @@ def delete_selection(ticket_id: int, selection_index: int) -> bool:
                 # Poslední selection - smaž tiket
                 cur.execute("DELETE FROM tickets WHERE id = %s", (ticket_id,))
                 return True  # Tiket byl smazán
-        
+
         return False
+
+
+# =====================================================================
+# Tokenový systém
+# =====================================================================
+def get_token_balance(user_id: int) -> int:
+    with get_cursor() as cur:
+        cur.execute("SELECT balance FROM user_tokens WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["balance"] if row else 0
+
+
+def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
+    """
+    Přičte/odečte tokeny (amount může být záporné) a zaloguje transakci —
+    appka appka obojí dělá ve STEJNÉ transakci (get_cursor commituje na
+    konci celého bloku), ať zůstatek a log nikdy nerozjedou. Vrací NOVÝ
+    zůstatek. Nekontroluje, jestli je výsledek záporný — to musí appka
+    ověřit PŘED zavoláním (viz has_enough_tokens), ať se dá odlišit
+    "nedostatek tokenů" od jiné chyby.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_tokens (user_id, balance, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (user_id) DO UPDATE
+                SET balance = user_tokens.balance + EXCLUDED.balance, updated_at = now()
+            RETURNING balance
+            """,
+            (user_id, amount),
+        )
+        new_balance = cur.fetchone()["balance"]
+        cur.execute(
+            "INSERT INTO token_transactions (user_id, amount, reason) VALUES (%s, %s, %s)",
+            (user_id, amount, reason),
+        )
+        return new_balance
+
+
+def create_redeem_code(code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "") -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO redeem_codes (code, tokens, max_uses, expires_at, note) VALUES (%s, %s, %s, %s, %s)",
+            (code, tokens, max_uses, expires_at, note),
+        )
+
+
+def redeem_code(code: str, user_id: int) -> dict:
+    """
+    Uplatní kód pro daného uživatele. Appka v jedné DB transakci: zamkne
+    řádek kódu (FOR UPDATE, ať appka neuplatní stejný kód 2x souběžně nad
+    limit), ověří platnost/limit/že ho tenhle uživatel ještě nepoužil,
+    připíše tokeny a zaloguje použití. Vrací {"ok": True, "tokens": N,
+    "balance": N} nebo {"ok": False, "error": "..."}.
+    """
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM redeem_codes WHERE code = %s FOR UPDATE", (code,))
+        row = cur.fetchone()
+        if row is None:
+            return {"ok": False, "error": "Kód neexistuje"}
+        if row["expires_at"] is not None and row["expires_at"] < datetime.now():
+            return {"ok": False, "error": "Kódu vypršela platnost"}
+        if row["uses_count"] >= row["max_uses"]:
+            return {"ok": False, "error": "Kód už byl vyčerpán"}
+
+        cur.execute("SELECT 1 FROM redeem_code_uses WHERE code = %s AND user_id = %s", (code, user_id))
+        if cur.fetchone() is not None:
+            return {"ok": False, "error": "Tenhle kód jsi už uplatnil"}
+
+        cur.execute("UPDATE redeem_codes SET uses_count = uses_count + 1 WHERE code = %s", (code,))
+        cur.execute("INSERT INTO redeem_code_uses (code, user_id) VALUES (%s, %s)", (code, user_id))
+
+        cur.execute(
+            """
+            INSERT INTO user_tokens (user_id, balance, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (user_id) DO UPDATE
+                SET balance = user_tokens.balance + EXCLUDED.balance, updated_at = now()
+            RETURNING balance
+            """,
+            (user_id, row["tokens"]),
+        )
+        new_balance = cur.fetchone()["balance"]
+        cur.execute(
+            "INSERT INTO token_transactions (user_id, amount, reason) VALUES (%s, %s, %s)",
+            (user_id, row["tokens"], f"REDEEM_CODE:{code}"),
+        )
+        return {"ok": True, "tokens": row["tokens"], "balance": new_balance}
