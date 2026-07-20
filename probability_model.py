@@ -696,22 +696,26 @@ class TicketGenerator:
                 pool = pool_filter(pool)
 
             if ticket_key == "boost":
-                # BOOST skládá 3+ výběrů na dlouhý kurz (10-15) — i malé
-                # systematické nadhodnocení modelu se v takovém kombu
-                # znásobí. U výhry favorita (MATCH_WINNER) appka někdy
+                # BOOST skládá 3+ výběrů na dlouhý kurz (10-15). I s reálnými
+                # tržními kurzy se marže (vig) bookmakera s každou další
+                # nohou násobí a appka navíc snižuje kombinovanou
+                # pravděpodobnost, když víc výběrů sdílí ligu+den (časté u
+                # kvalifikací) — kladný Kelly edge tak u dlouhé kombinace
+                # prakticky nikdy nevyjde, i když jsou zápasy v pořádku. To
+                # je matematická podstata parlaye, ne chyba dat. Kontrola na
+                # kladný edge (viz _build_ticket) proto appka u BOOSTu vůbec
+                # nevyžaduje — jinak by nešlo sestavit skoro žádný BOOST
+                # tiket. U výhry favorita (MATCH_WINNER) appka někdy navíc
                 # nemá žádnou NEZÁVISLOU tržní cenu (ani API-Football, ani
                 # the-odds-api) a kurz si dopočítá sama z vlastní
-                # pravděpodobnosti (viz data_provider.normalize_to_match_input)
-                # — SelectionCandidate.market_probability je pak None.
-                # Appka proto pro BOOST nejdřív zkusí sestavit tiket JEN
-                # z tržně ověřených výběrů; když se to nepovede (moc málo
-                # kandidátů), použije jako záchrannou síť i neověřené, ať
-                # appka pořád něco vygeneruje.
+                # pravděpodobnosti — appka proto nejdřív zkusí sestavit
+                # tiket JEN z tržně ověřených výběrů (kvalitnější), a když
+                # se to nepovede, použije jako záchrannou síť i neověřené.
                 validated_pool = [
                     c for c in pool
                     if not (c.market_type == MarketType.MATCH_WINNER and c.market_probability is None)
                 ]
-                ticket = self._build_ticket(validated_pool, odds_range, ticket_key, risk_level)
+                ticket = self._build_ticket(validated_pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
                 if ticket is None and len(validated_pool) < len(pool):
                     print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
                     ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
