@@ -1587,6 +1587,7 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 # =====================================================================
 DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS]
 DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
+DAILY_TICKETS_STAKE_AMOUNT = 200.0  # Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného tiketu
 
 
 def _generate_one_ticket_for_cron(
@@ -1669,6 +1670,7 @@ def run_daily_tickets(request: Request):
             continue
 
         ticket_id = repo.save_ticket(target_user_id, ticket)
+        repo.set_actual_stake(ticket_id, DAILY_TICKETS_STAKE_AMOUNT, ticket.total_odds)
 
         telegram_status = "skipped"
         if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
