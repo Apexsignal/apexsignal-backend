@@ -68,7 +68,7 @@ def render_ticket(ticket: dict) -> Image.Image:
 
     selections = ticket.get("selections", [])
     row_h = 92
-    header_h = 150
+    header_h = 120
     footer_h = 130
     height = header_h + len(selections) * row_h + footer_h
 
@@ -80,14 +80,9 @@ def render_ticket(ticket: dict) -> Image.Image:
     draw.text((PADDING, PADDING + 44), label, font=f_h2, fill=TEXT)
 
     total_odds = ticket.get("total_odds", 0)
-    stake_pct = ticket.get("recommended_stake_pct", 0)
     draw.text(
         (WIDTH - PADDING, PADDING + 10), f"kurz {total_odds:.2f}",
         font=f_title, fill=GREEN, anchor="ra",
-    )
-    draw.text(
-        (WIDTH - PADDING, PADDING + 54), f"doporučený vklad {stake_pct:.1f}%",
-        font=f_small, fill=SUBTEXT, anchor="ra",
     )
 
     y = header_h
