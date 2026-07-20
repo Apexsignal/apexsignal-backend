@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import os
+import secrets
 import json
 import requests
 import aiohttp
@@ -528,6 +529,87 @@ ticket_generator = TicketGenerator()
 
 
 # =====================================================================
+# Tokenový systém — viz ApexSignal Tokenomika & Tokenový Model. Stripe
+# napojení přijde v dalším kroku; tahle appka zatím jen řídí zůstatek a
+# uplatňování kódů (viz db.py: user_tokens/token_transactions/redeem_codes).
+# =====================================================================
+TOKEN_COSTS = {"kratky": 3, "stredni": 2, "boost": 1}
+
+
+def _ticket_type_for_risk_level(risk_level: int) -> str:
+    """Appka řídí typ tiketu jen podle risk_level, stejně jako
+    TicketGenerator.generate — appka musí znát typ (a tedy cenu v
+    tokenech) JEŠTĚ PŘED samotným generováním, ať zbytečně neplýtvá API
+    kvótou na tiket, který si uživatel stejně nemůže dovolit odemknout."""
+    if risk_level <= 30:
+        return "kratky"
+    elif risk_level <= 60:
+        return "stredni"
+    return "boost"
+
+
+def _check_token_balance(user_id: int, risk_level: int) -> None:
+    ticket_type = _ticket_type_for_risk_level(risk_level)
+    cost = TOKEN_COSTS.get(ticket_type, 0)
+    if cost <= 0:
+        return
+    balance = db.get_token_balance(user_id)
+    if balance < cost:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Nedostatek tokenů — tenhle tiket stojí {cost}, máš {balance}. Uplatni kód nebo dokup tokeny.",
+        )
+
+
+def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
+    cost = TOKEN_COSTS.get(ticket_type, 0)
+    if cost > 0:
+        db.adjust_tokens(user_id, -cost, f"UNLOCK_{ticket_type.upper()}")
+
+
+class RedeemCodeRequest(BaseModel):
+    code: str
+
+
+@app.get("/tokens/balance")
+def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
+    return {"balance": db.get_token_balance(user_id)}
+
+
+@app.post("/tokens/redeem")
+def redeem_token_code(req: RedeemCodeRequest, user_id: int = Depends(get_current_user_id)):
+    code = req.code.strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Zadej kód")
+    result = db.redeem_code(code, user_id)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+class CreateRedeemCodeRequest(BaseModel):
+    tokens: int
+    max_uses: int = 1
+    expires_in_days: Optional[int] = None
+    note: str = ""
+
+
+@app.post("/admin/tokens/create-code")
+def create_redeem_code_endpoint(req: CreateRedeemCodeRequest, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    code = secrets.token_hex(4).upper()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
+        if req.expires_in_days else None
+    )
+    db.create_redeem_code(code, req.tokens, req.max_uses, expires_at, req.note)
+    return {"code": code, "tokens": req.tokens, "max_uses": req.max_uses, "expires_at": expires_at.isoformat() if expires_at else None}
+
+
+# =====================================================================
 # Pomocné funkce — stahují zápasy pro každý sport a skládají MatchInput
 # =====================================================================
 def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lock) -> Optional[MatchInput]:
@@ -822,6 +904,7 @@ def _filter_future_matches(matches: list[MatchInput], buffer_minutes: int = 5) -
 # =====================================================================
 @app.post("/tickets/generate", response_model=TicketPairResponse)
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _check_token_balance(user_id, req.risk_level)
     all_matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     
@@ -865,6 +948,9 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
 
+    if result["safe"] is not None:
+        _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
+
     return TicketPairResponse(
         safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
         aggressive=TicketResponse.from_domain(result["aggressive"]) if result["aggressive"] else None,
@@ -873,6 +959,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
 
 @app.post("/tickets/regenerate", response_model=TicketPairResponse)
 def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _check_token_balance(user_id, req.risk_level)
     all_matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
@@ -913,6 +1000,9 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
 
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
+
+    if result["safe"] is not None:
+        _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
     return TicketPairResponse(
         safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
