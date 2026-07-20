@@ -916,10 +916,17 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # Appka teď tyhle požadavky dělá SOUBĚŽNĚ (víc vláken najednou, viz
 # FIXTURE_ENRICHMENT_WORKERS v backend_api.py), ne sekvenčně — díky tomu
 # appka zvládne víc zápasů v rozumném čase bez rizika timeoutu na
-# straně Render/Cloudflare. 40 zápasů × ~11 volání ≈ 440 požadavků na
-# jedno generování — na Pro plánu (7 500/den) appka snese kolem 15-16
-# takových generování za den, než narazí na denní limit.
-MAX_FIXTURES_PER_REQUEST = 40
+# straně Render/Cloudflare. 150 zápasů × ~11 volání ≈ 1650 požadavků na
+# jedno "studené" generování (bez cache) — na Pro plánu (7 500/den) appka
+# snese cca 4-5 takových za den. Díky cache týmových statistik (24 h) a
+# seznamu zápasů (30 min) jsou DALŠÍ generování ten samý den výrazně
+# levnější — reálně jich appka zvládne o dost víc než 4-5, pokud se
+# přes den generuje opakovaně (typický provoz appky) místo z čisté cache.
+# Pokud budeš zvyšovat dál (300-500), zvaž i vyšší plán API-Football —
+# na 40 zápasech appka narážela na příliš málo kandidátů pro BOOST,
+# ale skok rovnou na 300-500 by na Pro plánu mohl kvótu vyčerpat po
+# jednom až dvou generováních za den.
+MAX_FIXTURES_PER_REQUEST = 150
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
