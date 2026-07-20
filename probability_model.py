@@ -827,8 +827,27 @@ class TicketGenerator:
                 combined_probability *= c.probability
             combined_probability = self._apply_correlation_discount(selected, combined_probability)
 
+            # DŮLEŽITÉ: edge/vklad appka počítá z VLASTNÍHO modelu
+            # (model_probability), ne z zobrazované/tržní pravděpodobnosti
+            # (c.probability = de-vigovaná tržní hodnota, pokud appka má
+            # kurzy). De-vigování z podstaty SNÍŽÍ pravděpodobnost pod
+            # 1/kurz (tím se z implikované pravděpodobnosti odstraňuje
+            # marže bookmakera) — když se pak taková (nižší) pravděpodobnost
+            # znásobí s PŮVODNÍM (marži obsahujícím) kurzem, edge vyjde
+            # téměř vždy lehce záporný, ÚPLNĚ BEZ OHLEDU na to, jestli náš
+            # model s trhem souhlasí nebo ne. Kladný edge tak byl v praxi
+            # nedosažitelný pro naprostou většinu tržně oceněných výběrů —
+            # přesně to, co appka viděla u krátkého/středního tiketu se
+            # stovkou kandidátů a přesto "Tiket se nepovedl". Model_probability
+            # je NAŠE vlastní víra (nezávislá na trhu) — teprve srovnání
+            # NAŠÍ pravděpodobnosti s REÁLNÝM kurzem dává smysluplný edge.
+            edge_probability = 1.0
+            for c in selected:
+                edge_probability *= c.model_probability
+            edge_probability = self._apply_correlation_discount(selected, edge_probability)
+
             recommended_stake_pct = round(
-                min(kelly_stake_fraction(combined_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
+                min(kelly_stake_fraction(edge_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
             )
 
             if recommended_stake_pct > 0 or not require_positive_edge:
