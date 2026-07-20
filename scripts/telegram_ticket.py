@@ -37,7 +37,10 @@ SUBTEXT = (150, 160, 175)
 GREEN = (86, 214, 130)
 LINE = (48, 56, 70)
 
-TICKET_LABELS = {"kratky": "KRÁTKÝ TIKET", "stredni": "STŘEDNÍ TIKET", "boost": "BOOST TIKET"}
+TICKET_LABELS = {
+    "kratky": "KRÁTKÝ TIKET", "stredni": "STŘEDNÍ TIKET", "boost": "BOOST TIKET",
+    "dlouhy": "BOOST TIKET",  # starší název pro BOOST, pořád v uložených datech
+}
 
 
 def wrap(draw, text, font, max_width):
