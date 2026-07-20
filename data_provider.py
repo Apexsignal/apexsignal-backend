@@ -5,15 +5,14 @@ Modul: data_provider.py
 Účel:
     Abstrahuje konkrétního API providera (např. API-Football, Sportradar,
     Betfair Exchange, Pinnacle API...) za jednotné rozhraní, které
-    `probability_model.py` a `momentum_filter.py` konzumují bez znalosti
-    konkrétního externího kontraktu.
+    `probability_model.py` konzumuje bez znalosti konkrétního externího
+    kontraktu.
 
     Obsahuje:
       - SportsDataProvider: abstraktní rozhraní
       - HttpSportsDataProvider: referenční implementace přes obecné REST API
       - InMemoryCache: jednoduchý TTL cache layer (omezuje počet API callů)
       - normalizační funkce -> MatchInput (pro generátor tiketů)
-                              -> MatchSnapshot (pro Momentum Filter)
 
     Pozn.: Reálné API klíče se dosazují přes proměnné prostředí (APISPORTS_KEY,
     APITENNIS_KEY, ODDSAPI_KEY) — nastav je na serveru, kde poběží backend —
@@ -29,8 +28,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way
-from momentum_filter import MatchSnapshot
+from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator
 
 
 # ---------------------------------------------------------------------
@@ -74,11 +72,6 @@ class SportsDataProvider(ABC):
     @abstractmethod
     def get_pre_match_odds(self, match_id: str) -> dict:
         """Vrátí aktuální kurzy pro hlavní trhy (1X2, over/under gólů, karet)."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_live_match_stats(self, match_id: str) -> dict:
-        """Vrátí aktuální minutu-po-minutě statistiku běžícího zápasu."""
         raise NotImplementedError
 
 
@@ -135,10 +128,6 @@ class HttpSportsDataProvider(SportsDataProvider):
         # kurzy se nekešují (nebo jen velmi krátce) — měly by být co nejčerstvější
         return self._request(f"/odds/{match_id}")
 
-    def get_live_match_stats(self, match_id: str) -> dict:
-        # live data se nekešují vůbec — vždy aktuální stav
-        return self._request(f"/live/{match_id}")
-
 
 # ---------------------------------------------------------------------
 # Normalizace: raw API response -> interní datové struktury
@@ -174,6 +163,20 @@ def normalize_to_match_input(
     away_xg = _estimate_expected_goals(away_stats, is_home=False, recency_weighted_avg=away_recent_form, adjustment_factor=away_factor)
     expected_cards = _estimate_expected_cards(home_stats, away_stats)
 
+    # FALLBACK KURZY: Pokud API-Football nevrátil kurzy, estimuj z model pravděpodobnosti
+    favorite_odds = odds_raw.get("match_winner", {}).get("favorite", None)
+    if favorite_odds is None or favorite_odds < 1.01:
+        # API-Football nevrátil kurzy - estimuj z Poissonova modelu (pokud máme data)
+        if home_xg is not None and away_xg is not None and home_xg > 0 and away_xg > 0:
+            try:
+                winner_probs = MarketEvaluator.match_winner_probabilities(home_xg, away_xg)
+                favorite_prob = max(winner_probs.values())  # Nejvyšší pravděpodobnost
+                favorite_odds = round(1.0 / max(favorite_prob, 0.01), 2)  # Převeď na kurz
+            except Exception:
+                favorite_odds = 2.0  # Fallback pokud Poisson selhá
+        else:
+            favorite_odds = 2.0  # Fallback pokud xG data chybí
+
     return MatchInput(
         match_id=fixture["id"],
         sport=sport,
@@ -183,6 +186,7 @@ def normalize_to_match_input(
         country=fixture.get("country", ""),
         league_id=fixture.get("league_id"),
         kickoff_date=(fixture.get("kickoff_time") or "")[:10],  # jen datum (YYYY-MM-DD) z ISO timestampu
+        kickoff_time=(fixture.get("kickoff_time") or "")[11:16],  # čas HH:MM z ISO timestampu
         home_expected_goals=home_xg,
         away_expected_goals=away_xg,
         expected_cards=expected_cards,
@@ -197,7 +201,7 @@ def normalize_to_match_input(
         away_rest_days=away_rest_days,
         home_dead_rubber=home_dead_rubber,
         away_dead_rubber=away_dead_rubber,
-        favorite_win_market_odds=odds_raw.get("match_winner", {}).get("favorite", 1.0),
+        favorite_win_market_odds=favorite_odds,
         over_goals_odds=odds_raw.get("over_goals", {}),     # {2.5: 1.85, 3.5: 2.60, ...}
         btts_yes_odds=odds_raw.get("btts_yes"),
         over_cards_odds=odds_raw.get("over_cards", {}),     # {3.5: 1.90, 4.5: 2.40, ...}
@@ -213,21 +217,6 @@ def normalize_to_match_input(
     )
 
 
-def normalize_to_match_snapshot(match_id: int, live_raw: dict) -> MatchSnapshot:
-    """Převede raw live data na MatchSnapshot konzumovaný MomentumFilter."""
-    return MatchSnapshot(
-        minute=live_raw["minute"],
-        home_possession=live_raw["possession"]["home"],
-        away_possession=live_raw["possession"]["away"],
-        home_shots_on_target=live_raw["shots_on_target"]["home"],
-        away_shots_on_target=live_raw["shots_on_target"]["away"],
-        home_dangerous_attacks=live_raw["dangerous_attacks"]["home"],
-        away_dangerous_attacks=live_raw["dangerous_attacks"]["away"],
-        home_corners=live_raw.get("corners", {}).get("home", 0),
-        away_corners=live_raw.get("corners", {}).get("away", 0),
-        red_cards_home=live_raw.get("red_cards", {}).get("home", 0),
-        red_cards_away=live_raw.get("red_cards", {}).get("away", 0),
-    )
 
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.3  # rozumný univerzální odhad přes evropské ligy
@@ -649,10 +638,6 @@ class APISportsDirectProvider(SportsDataProvider):
         response = self._get("/odds", {"game": match_id})
         return response[0] if response else {}
 
-    def get_live_match_stats(self, match_id: str) -> dict:
-        stats = self._get("/games/statistics/teams", {"id": match_id})
-        return {"statistics": stats}
-
 
 def adapt_apisports_game(game: dict) -> dict:
     """
@@ -748,10 +733,6 @@ class APITennisProvider(SportsDataProvider):
 
     def get_pre_match_odds(self, match_id: str) -> dict:
         response = self._get("get_odds", {"match_key": match_id})
-        return response[0] if response else {}
-
-    def get_live_match_stats(self, match_id: str) -> dict:
-        response = self._get("get_livescore", {"match_key": match_id})
         return response[0] if response else {}
 
 
@@ -935,10 +916,17 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # Appka teď tyhle požadavky dělá SOUBĚŽNĚ (víc vláken najednou, viz
 # FIXTURE_ENRICHMENT_WORKERS v backend_api.py), ne sekvenčně — díky tomu
 # appka zvládne víc zápasů v rozumném čase bez rizika timeoutu na
-# straně Render/Cloudflare. 40 zápasů × ~11 volání ≈ 440 požadavků na
-# jedno generování — na Pro plánu (7 500/den) appka snese kolem 15-16
-# takových generování za den, než narazí na denní limit.
-MAX_FIXTURES_PER_REQUEST = 40
+# straně Render/Cloudflare. 150 zápasů × ~11 volání ≈ 1650 požadavků na
+# jedno "studené" generování (bez cache) — na Pro plánu (7 500/den) appka
+# snese cca 4-5 takových za den. Díky cache týmových statistik (24 h) a
+# seznamu zápasů (30 min) jsou DALŠÍ generování ten samý den výrazně
+# levnější — reálně jich appka zvládne o dost víc než 4-5, pokud se
+# přes den generuje opakovaně (typický provoz appky) místo z čisté cache.
+# Pokud budeš zvyšovat dál (300-500), zvaž i vyšší plán API-Football —
+# na 40 zápasech appka narážela na příliš málo kandidátů pro BOOST,
+# ale skok rovnou na 300-500 by na Pro plánu mohl kvótu vyčerpat po
+# jednom až dvou generováních za den.
+MAX_FIXTURES_PER_REQUEST = 150
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
@@ -1324,26 +1312,6 @@ class APIFootballProvider(SportsDataProvider):
             pass
         return data
 
-    def get_live_match_stats(self, match_id: str) -> dict:
-        stats = self._get("/fixtures/statistics", {"fixture": match_id})
-        events = self._get("/fixtures/events", {"fixture": match_id})
-        return {"statistics": stats, "events": events}
-
-    def get_live_fixtures(self) -> list[dict]:
-        """Vrátí všechny právě běžící zápasy — vstup pro poller Live Signal Engine."""
-        return self._get("/fixtures", {"live": "all"})
-
-    def get_live_odds(self, match_id: str) -> dict:
-        """
-        Živé (in-play) kurzy pro běžící zápas. POZOR: endpoint /odds/live
-        byl u API-Football historicky beta funkce, kterou bylo nutné si
-        zvlášť vyžádat přes chat na dashboard.api-football.com — pokud ho
-        tvůj účet nemá povolený, tahle volání budou vracet prázdno a appka
-        se tiše vrátí k chování bez kurzu (viz adapt_live_odds_for_signal).
-        """
-        response = self._get("/odds/live", {"fixture": match_id})
-        return response[0] if response else {}
-
     def get_fixture_result(self, match_id: str) -> dict:
         """Finální (nebo aktuální) skóre a stav konkrétního zápasu — appka
         to používá k dosettlování tiketů po skončení utkání."""
@@ -1444,35 +1412,6 @@ def is_live_market_blocked(odds_response: dict) -> bool:
     nejistotě umlčela všechny signály).
     """
     return bool(odds_response.get("blocked", False) or odds_response.get("stopped", False))
-
-
-def adapt_live_odds_for_signal(odds_response: dict, team_side: str, bookmaker_name: str = "Bet365") -> Optional[float]:
-    """
-    Z odpovědi get_live_odds() vytáhne kurz na "Next Goal" pro danou stranu
-    (home/away). Vrací None, pokud appka kurz nesežene — ať proto, že
-    /odds/live na tvém účtu není povolený (viz poznámka u get_live_odds),
-    nebo proto, že bookmaker zrovna live sázení na tenhle trh pozastavil
-    (status "blocked": true v API-Football odpovědi).
-    """
-    bookmakers = odds_response.get("bookmakers", [])
-    if not bookmakers:
-        return None
-    target = next((b for b in bookmakers if b.get("name") == bookmaker_name), bookmakers[0])
-
-    next_goal_bet = next(
-        (bet for bet in target.get("bets", []) if "next goal" in bet.get("name", "").lower()), None
-    )
-    if not next_goal_bet:
-        return None
-
-    wanted_label = "home" if team_side == "home" else "away"
-    for value in next_goal_bet.get("values", []):
-        if wanted_label in value.get("value", "").lower():
-            try:
-                return float(value["odd"])
-            except (KeyError, ValueError, TypeError):
-                return None
-    return None
 
 
 def _median(values: list[float]) -> Optional[float]:
@@ -1584,78 +1523,28 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
     return result
 
 
-def adapt_api_football_live_stats(minute: int, live_raw: dict) -> dict:
-    """
-    live_raw = {'statistics': [...], 'events': [...]} z get_live_match_stats().
-
-    Pozn.: API-Football nemá nativní metriku 'dangerous attacks' (na rozdíl
-    od Sportmonks/SofaScore). Jako proxy používáme 'Shots insidebox' — není
-    to identické, ale koreluje s reálným ohrožením branky lépe než např.
-    celkový počet střel. Pokud chceš přesnější metriku, zvaž doplňkové
-    API specificky pro 'momentum'/'attack danger' data.
-    """
-    stats_by_team: dict[str, dict] = {}
-    for team_block in live_raw.get("statistics", []):
-        team_name = team_block["team"]["name"]
-        stats_by_team[team_name] = {
-            item["type"]: item["value"] for item in team_block.get("statistics", [])
-        }
-
-    teams = list(stats_by_team.keys())
-    home_name, away_name = (teams[0], teams[1]) if len(teams) == 2 else (None, None)
-    home_stats = stats_by_team.get(home_name, {})
-    away_stats = stats_by_team.get(away_name, {})
-
-    def _num(v):
-        if v is None:
-            return 0
-        if isinstance(v, str) and v.endswith("%"):
-            return int(v.replace("%", "") or 0)
-        return int(v) if v else 0
-
-    red_cards_home = sum(
-        1 for e in live_raw.get("events", [])
-        if e.get("type") == "Card" and e.get("detail") == "Red Card" and e.get("team", {}).get("name") == home_name
-    )
-    red_cards_away = sum(
-        1 for e in live_raw.get("events", [])
-        if e.get("type") == "Card" and e.get("detail") == "Red Card" and e.get("team", {}).get("name") == away_name
-    )
-    # Pozn.: vlastní gól (Own Goal) API-Football typicky přiřadí k týmu
-    # hráče, co ho dal, ne k týmu, kterému gól prospěl — pro účel "poznat,
-    # že se skóre změnilo a appka má resetovat okno tlaku" (viz
-    # MomentumFilter._handle_goal_change) tahle drobná nepřesnost nevadí.
-    goals_home = sum(
-        1 for e in live_raw.get("events", [])
-        if e.get("type") == "Goal" and e.get("team", {}).get("name") == home_name
-    )
-    goals_away = sum(
-        1 for e in live_raw.get("events", [])
-        if e.get("type") == "Goal" and e.get("team", {}).get("name") == away_name
-    )
-
-    return {
-        "minute": minute,
-        "possession": {"home": _num(home_stats.get("Ball Possession")), "away": _num(away_stats.get("Ball Possession"))},
-        "shots_on_target": {"home": _num(home_stats.get("Shots on Goal")), "away": _num(away_stats.get("Shots on Goal"))},
-        "dangerous_attacks": {"home": _num(home_stats.get("Shots insidebox")), "away": _num(away_stats.get("Shots insidebox"))},
-        "corners": {"home": _num(home_stats.get("Corner Kicks")), "away": _num(away_stats.get("Corner Kicks"))},
-        "red_cards": {"home": red_cards_home, "away": red_cards_away},
-        "goals": {"home": goals_home, "away": goals_away},
-    }
-
-
 # =======================================================================
 # Factory — vybere providera dle sportu (definováno až tady, na konci,
 # protože potřebuje znát všechny třídy výše)
 # =======================================================================
+# SINGLETON PROVIDERS — jedinou instanci pro celý lifetime aplikace
+_PROVIDER_CACHE: dict[Sport, SportsDataProvider] = {}
+
+
 def get_provider(sport: Sport) -> SportsDataProvider:
+    if sport in _PROVIDER_CACHE:
+        return _PROVIDER_CACHE[sport]
+
     if sport == Sport.FOOTBALL:
-        return APIFootballProvider()
-    if sport == Sport.BASKETBALL:
-        return APISportsDirectProvider(sport_path="basketball")
-    if sport == Sport.HOCKEY:
-        return APISportsDirectProvider(sport_path="hockey")
-    if sport == Sport.TENNIS:
-        return APITennisProvider()
-    raise NotImplementedError(f"Pro sport '{sport.value}' chybí napojený provider.")
+        provider = APIFootballProvider(cache_ttl_seconds=3600)  # 1 hodina in-memory
+    elif sport == Sport.BASKETBALL:
+        provider = APISportsDirectProvider(sport_path="basketball", cache_ttl_seconds=3600)
+    elif sport == Sport.HOCKEY:
+        provider = APISportsDirectProvider(sport_path="hockey", cache_ttl_seconds=3600)
+    elif sport == Sport.TENNIS:
+        provider = APITennisProvider(cache_ttl_seconds=3600)
+    else:
+        raise NotImplementedError(f"Pro sport '{sport.value}' chybí napojený provider.")
+
+    _PROVIDER_CACHE[sport] = provider
+    return provider
