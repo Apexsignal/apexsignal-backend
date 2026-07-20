@@ -132,7 +132,27 @@ def render_ticket(ticket: dict) -> Image.Image:
         font=f_small, fill=SUBTEXT,
     )
 
+    watermark_text = f"ApexSignal · #{ticket.get('ticket_id')}" if ticket.get("ticket_id") else "ApexSignal"
+    img = add_watermark(img, watermark_text)
+
     return img
+
+
+def add_watermark(base_img: Image.Image, text: str) -> Image.Image:
+    """Jemný opakující se diagonální vodoznak — nezabrání sdílení, ale
+    kdo obrázek přeposílá dál, je z něj dohledatelný."""
+    tile = Image.new("RGBA", (320, 160), (0, 0, 0, 0))
+    tdraw = ImageDraw.Draw(tile)
+    tfont = ImageFont.truetype(FONT_REGULAR, 16)
+    tdraw.text((10, 70), text, font=tfont, fill=(255, 255, 255, 34))
+    tile = tile.rotate(24, expand=True)
+
+    overlay = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
+    for y in range(0, base_img.height, tile.height):
+        for x in range(0, base_img.width, tile.width):
+            overlay.alpha_composite(tile, (x, y))
+
+    return Image.alpha_composite(base_img.convert("RGBA"), overlay).convert("RGB")
 
 
 def send_to_telegram(image_path: str):
