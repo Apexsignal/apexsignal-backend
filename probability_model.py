@@ -725,7 +725,8 @@ class TicketGenerator:
                 break  # Tiket se povedl! Skončit.
 
         if ticket is None:
-            print(f"[{ticket_key}] Tiket se nepovedl. Kandidáti: 70%={candidate_counts.get(70, 0)}, 65%={candidate_counts.get(65, 0)}, 60%={candidate_counts.get(60, 0)}")
+            counts_str = ", ".join(f"{pct}%={n}" for pct, n in sorted(candidate_counts.items(), reverse=True))
+            print(f"[{ticket_key}] Tiket se nepovedl. Kandidáti: {counts_str}")
 
         return {"safe": ticket, "aggressive": None}
 
