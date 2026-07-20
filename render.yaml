@@ -2,8 +2,8 @@
 #
 # Jak na to:
 # 1. Vytvoř si GitHub repozitář a nahraj do něj tyto soubory:
-#    backend_api.py, probability_model.py, momentum_filter.py,
-#    data_provider.py, db.py, requirements.txt, render.yaml
+#    backend_api.py, probability_model.py, data_provider.py, db.py,
+#    requirements.txt, render.yaml
 # 2. Na render.com: New + → Blueprint → vyber svůj GitHub repozitář.
 #    Render tento soubor automaticky najde a navrhne službu i databázi
 #    najednou — DATABASE_URL appka dostane automaticky, nemusíš nic
@@ -16,9 +16,8 @@
 #      ODDSAPI_KEY    — the-odds-api.com (živé kurzy napříč sporty, volitelné
 #                        ale silně doporučené — bez něj appka jede jen na
 #                        vlastním heuristickém odhadu, ne na reálné tržní ceně)
-#      ANTHROPIC_API_KEY — console.anthropic.com (AI kontrola tiketů i
-#                        živých signálů — appka bez něj funguje, jen bez
-#                        téhle vrstvy)
+#      ANTHROPIC_API_KEY — console.anthropic.com (AI kontrola tiketů —
+#                        appka bez něj funguje, jen bez téhle vrstvy)
 #      SECRET_KEY — appka tím podepisuje přihlašovací tokeny (viz auth.py).
 #                        Vygeneruj si náhodný dlouhý řetězec, např.:
 #                        python3 -c "import secrets; print(secrets.token_hex(32))"
