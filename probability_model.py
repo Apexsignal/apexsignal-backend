@@ -714,7 +714,7 @@ class TicketGenerator:
                 ticket = self._build_ticket(validated_pool, odds_range, ticket_key, risk_level)
                 if ticket is None and len(validated_pool) < len(pool):
                     print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
-                    ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
+                    ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
             else:
                 # Zkusit vybrat tiket z tohoto pool
                 ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
@@ -787,6 +787,7 @@ class TicketGenerator:
         odds_range: tuple[float, float],
         ticket_type: str,
         risk_level: int,
+        require_positive_edge: bool = True,
     ) -> Optional[Ticket]:
         min_odds, max_odds = odds_range
 
@@ -804,8 +805,20 @@ class TicketGenerator:
         # takovou kombinaci nikdy nevrátí jako hotový tiket (bylo by to
         # matoucí — appka sama tvrdí "nemá to cenu" a přesto ho nabídne) —
         # zkusí to znovu bez nejslabšího výběru z týhle kombinace.
+        #
+        # VÝJIMKA: require_positive_edge=False appka použije pro BOOSTovu
+        # záchrannou (tržně-neověřenou) várku kandidátů — tam appka kurz
+        # dopočítává sama jako 1/model_probability, takže edge je z podstaty
+        # ~0 a korelační sleva (časté zápasy stejnou ligu+den) ho posune do
+        # mírně záporných čísel u KAŽDÉ možné kombinace. Kontrola na kladný
+        # edge by tak zahazovala úplně všechny kombinace bez ohledu na počet
+        # kandidátů — appka by nikdy nic nevygenerovala, i když měla desítky
+        # validních zápasů. Bez tržní ceny appka edge stejně nemůže ověřit,
+        # tak tiket vrátí rovnou (recommended_stake_pct pak zobrazí 0 %,
+        # ale appka nabídku nezablokuje).
         working_pool = ordered_pool
-        for _ in range(self.MAX_EDGE_RETRIES):
+        retries = self.MAX_EDGE_RETRIES if require_positive_edge else 1
+        for _ in range(retries):
             selected = self._search_combo(working_pool, min_odds, max_odds, min_selections, min_odds_hard)
             if selected is None:
                 return None
@@ -823,7 +836,7 @@ class TicketGenerator:
                 min(kelly_stake_fraction(combined_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
             )
 
-            if recommended_stake_pct > 0:
+            if recommended_stake_pct > 0 or not require_positive_edge:
                 return Ticket(
                     ticket_type=ticket_type,
                     selections=selected,
