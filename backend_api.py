@@ -67,6 +67,13 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health():
+    """Appka tohle používá jen na 'probuzení' serveru (Render free plán po
+    nečinnosti usíná) — žádné vedlejší účinky, žádný přístup k DB/cache."""
+    return {"status": "ok"}
+
+
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -1490,13 +1497,6 @@ def _evaluate_selection(sel: dict, result: dict) -> Optional[bool]:
         return home_score > 0 and away_score > 0
 
     return None
-
-
-@app.get("/admin/clear-cache")
-def clear_cache_get():
-    """Vymaže celou API cache — jednorázové použití po opravě formátu dat. GET pro snadné volání z prohlížeče."""
-    count = db.cache_clear_all()
-    return {"deleted": count, "status": "cache cleared"}
 
 
 @app.delete("/admin/cache")
