@@ -133,22 +133,36 @@ def ensure_schema() -> None:
     """Vytvoří tabulky, pokud ještě neexistují."""
     with get_cursor() as cur:
         cur.execute(SCHEMA)
-        # Pokusit se smazat starý CHECK constraint pokud existuje
-        try:
+
+    # DŮLEŽITÉ: každá kompatibilitní úprava níže běží ve VLASTNÍ transakci
+    # (vlastní get_cursor() blok), ne ve stejné transakci jako SCHEMA výše.
+    # Dřív byly všechny v JEDNÉ transakci — jakmile "ALTER TABLE ... ADD
+    # COLUMN" spadl (protože sloupec už existoval, ob obvyklý stav na
+    # produkci po prvním úspěšném přidání), Postgres tím celou transakci
+    # označí jako "aborted". Try/except kolem cur.execute() sice zachytí
+    # PYTHONOVOU výjimku, ale SQL transakce zůstane otrávená — a finální
+    # conn.commit() na konci get_cursor() bloku pak TICHO (bez chyby)
+    # celou transakci rollbackne, včetně předtím úspěšně provedeného
+    # cur.execute(SCHEMA)! Nové tabulky (CREATE TABLE IF NOT EXISTS) se
+    # tak nikdy reálně neuložily — při každém restartu appka "úspěšně"
+    # odešla z ensure_schema(), ale v DB nic nepřibylo.
+    try:
+        with get_cursor() as cur:
             cur.execute("ALTER TABLE tickets DROP CONSTRAINT IF EXISTS tickets_ticket_type_check")
-        except Exception:
-            pass  # Constraint neexistuje nebo se nedá smazat, ignoruj
-        
-        # Přidej nové sloupce pokud neexistují
-        try:
-            cur.execute("ALTER TABLE ticket_selections ADD COLUMN kickoff_time VARCHAR(50)")
-        except Exception:
-            pass  # Sloupec už existuje
-        
-        try:
-            cur.execute("ALTER TABLE ticket_selections ADD COLUMN country VARCHAR(255)")
-        except Exception:
-            pass  # Sloupec už existuje
+    except Exception:
+        pass  # Constraint neexistuje nebo se nedá smazat, ignoruj
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE ticket_selections ADD COLUMN IF NOT EXISTS kickoff_time VARCHAR(50)")
+    except Exception:
+        pass
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE ticket_selections ADD COLUMN IF NOT EXISTS country VARCHAR(255)")
+    except Exception:
+        pass
 
 
 def cache_get(key: str) -> Optional[list]:
