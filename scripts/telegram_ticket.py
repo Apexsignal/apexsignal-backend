@@ -69,7 +69,7 @@ def render_ticket(ticket: dict) -> Image.Image:
     selections = ticket.get("selections", [])
     row_h = 92
     header_h = 120
-    footer_h = 130
+    footer_h = 90
     height = header_h + len(selections) * row_h + footer_h
 
     img = Image.new("RGB", (WIDTH, height), BG)
@@ -117,14 +117,9 @@ def render_ticket(ticket: dict) -> Image.Image:
 
     footer_y = height - footer_h + 20
     draw.line([(PADDING, footer_y - 14), (WIDTH - PADDING, footer_y - 14)], fill=LINE, width=2)
-    combined_prob = ticket.get("combined_probability", 0) * 100
     draw.text(
-        (PADDING, footer_y), f"Kombinovaná pravděpodobnost: {combined_prob:.1f}%",
+        (PADDING, footer_y), f"{len(selections)} výběrů · vygenerováno {datetime.now().strftime('%d.%m.%Y %H:%M')}",
         font=f_body, fill=TEXT,
-    )
-    draw.text(
-        (PADDING, footer_y + 32), f"{len(selections)} výběrů · vygenerováno {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-        font=f_small, fill=SUBTEXT,
     )
 
     watermark_text = f"ApexSignal · #{ticket.get('ticket_id')}" if ticket.get("ticket_id") else "ApexSignal"
