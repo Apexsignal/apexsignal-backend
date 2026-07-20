@@ -766,6 +766,20 @@ class TicketGenerator:
         pool.sort(key=lambda c: c.probability, reverse=True)
         return pool
 
+    # Minimální počet výběrů a minimální kurz podle typu tiketu
+    MIN_SELECTIONS = {
+        "kratky": 2,    # Minimálně 2 výběry
+        "stredni": 2,   # Minimálně 2 výběry
+        "boost": 3,     # Minimálně 3 výběry
+    }
+    MIN_ODDS_HARD = {
+        "kratky": 2.0,   # KRÁTKÝ: min 2.0 (dolní limit 2.0-3.0)
+        "stredni": 3.0,  # STŘEDNÍ: min 3.0 (dolní limit 3.0-6.0)
+        "boost": 10.0,   # BOOST: min 10.0 (dolní limit 10.0-15.0)
+    }
+    MAX_COMBO_LEGS = 10      # bezpečný strop na počet nohou (reálné kurzy nikdy nepotřebují víc)
+    MAX_SEARCH_NODES = 50_000  # pojistka proti kombinatorickému výbuchu u velkých poolů
+
     def _build_ticket(
         self,
         pool: list[SelectionCandidate],
@@ -778,38 +792,15 @@ class TicketGenerator:
         # Vždy řaď sestupně podle pravděpodobnosti — chceme nejjistější výběry
         ordered_pool = sorted(pool, key=lambda c: c.probability, reverse=True)
 
-        selected: list[SelectionCandidate] = []
-        used_matches: set[int] = set()
-        running_odds = 1.0
+        min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
+        min_odds_hard = self.MIN_ODDS_HARD.get(ticket_type, 2.0)
 
-        for candidate in ordered_pool:
-            if candidate.match_id in used_matches:
-                continue
-            projected = running_odds * candidate.odds
-            if projected > max_odds and selected:
-                continue  # přesáhli bychom horní hranici
-            selected.append(candidate)
-            used_matches.add(candidate.match_id)
-            running_odds = projected
-            if min_odds <= running_odds <= max_odds:
-                break
-
-        # Minimální počet výběrů a minimální kurz
-        MIN_SELECTIONS = {
-            "kratky": 2,    # Minimálně 2 výběry
-            "stredni": 2,   # Minimálně 2 výběry
-            "boost": 3,     # Minimálně 3 výběry
-        }
-        MIN_ODDS_HARD = {
-            "kratky": 2.0,   # KRÁTKÝ: min 2.0 (dolní limit 2.0-3.0)
-            "stredni": 3.0,  # STŘEDNÍ: min 3.0 (dolní limit 3.0-6.0)
-            "boost": 10.0,   # BOOST: min 10.0 (dolní limit 10.0-15.0)
-        }
-        min_selections = MIN_SELECTIONS.get(ticket_type, 2)
-        min_odds_hard = MIN_ODDS_HARD.get(ticket_type, 2.0)
-
-        if len(selected) < min_selections or running_odds < min_odds_hard or not (min_odds <= running_odds <= max_odds):
+        selected = self._search_combo(ordered_pool, min_odds, max_odds, min_selections, min_odds_hard)
+        if selected is None:
             return None
+        running_odds = 1.0
+        for c in selected:
+            running_odds *= c.odds
 
         combined_probability = 1.0
         for c in selected:
@@ -827,6 +818,83 @@ class TicketGenerator:
             combined_probability=round(combined_probability, 4),
             recommended_stake_pct=recommended_stake_pct,
         )
+
+    def _search_combo(
+        self,
+        ordered_pool: list[SelectionCandidate],
+        min_odds: float,
+        max_odds: float,
+        min_selections: int,
+        min_odds_hard: float,
+    ) -> Optional[list[SelectionCandidate]]:
+        """
+        Najde KOMBINACI výběrů z ordered_pool (ne nutně souvislý úsek —
+        libovolnou podmnožinu), jejíž součin kurzů padne do [min_odds,
+        max_odds]. Prostý greedy průchod seřazeným poolem (jak appka dělala
+        dřív) občas o jeden výběr "přestřelí" horní hranici, výběr zahodí
+        a už se k němu nikdy nevrátí — i když jiná kombinace ze STEJNÝCH
+        kandidátů by do rozsahu trefila. To appce zbytečně shazovalo tikety,
+        i když měla dost kvalitních zápasů.
+
+        DFS s prořezáváním (branch & bound) prochází možnosti v pořadí
+        klesající pravděpodobnosti (ordered_pool je už seřazený, takže
+        větev "zahrnout" appka zkouší dřív než "přeskočit") — první nalezené
+        řešení je tak zpravidla i to nejjistější. Dvě prořezávací podmínky
+        drží prohledávání rychlé i pro desítky kandidátů:
+          1) jakmile running_odds > max_odds, žádné DALŠÍ přidání ho nikdy
+             nesníží (kurzy jsou vždy > 1) — větev je mrtvá, appka se
+             nevrací.
+          2) pokud by ani vynásobení VŠECH zbývajících kurzů nestačilo na
+             min_odds, větev appka rovnou zahodí (suffix_max = optimistický
+             horní odhad, ignoruje kolize stejného match_id — bezpečné,
+             protože jen zmenšuje, ne zvětšuje, prořezávání).
+        """
+        n = len(ordered_pool)
+        suffix_max = [1.0] * (n + 1)
+        for i in range(n - 1, -1, -1):
+            suffix_max[i] = suffix_max[i + 1] * ordered_pool[i].odds
+
+        nodes = 0
+        chosen: list[SelectionCandidate] = []
+        used_matches: set[int] = set()
+
+        def dfs(idx: int, running_odds: float) -> Optional[list[SelectionCandidate]]:
+            # "Přeskoč kandidáta" appka řeší smyčkou, ne rekurzí — hloubka
+            # rekurze tak závisí jen na počtu VYBRANÝCH noh (<= MAX_COMBO_LEGS),
+            # ne na velikosti poolu. S pooly v řádu stovek/tisíců kandidátů
+            # (viz zvýšený MAX_FIXTURES_PER_REQUEST) by rekurze jedna úroveň
+            # na kandidáta klidně mohla narazit na limit rekurze Pythonu.
+            nonlocal nodes
+            while True:
+                nodes += 1
+                if nodes > self.MAX_SEARCH_NODES:
+                    return None
+                if running_odds > max_odds:
+                    return None  # tahle větev už nikdy neklesne zpátky do rozsahu
+                if (
+                    len(chosen) >= min_selections
+                    and running_odds >= min_odds_hard
+                    and min_odds <= running_odds <= max_odds
+                ):
+                    return list(chosen)
+                if idx >= n or len(chosen) >= self.MAX_COMBO_LEGS:
+                    return None
+                if running_odds * suffix_max[idx] < min_odds:
+                    return None  # ani se vším zbývajícím by appka na min_odds nedosáhla
+
+                candidate = ordered_pool[idx]
+                if candidate.match_id not in used_matches:
+                    used_matches.add(candidate.match_id)
+                    chosen.append(candidate)
+                    result = dfs(idx + 1, running_odds * candidate.odds)
+                    chosen.pop()
+                    used_matches.discard(candidate.match_id)
+                    if result is not None:
+                        return result
+
+                idx += 1  # kandidáta appka nezahrnula — jede dál ve smyčce, ne rekurzí
+
+        return dfs(0, 1.0)
 
     @staticmethod
     def _apply_correlation_discount(selected: list[SelectionCandidate], combined_probability: float) -> float:
