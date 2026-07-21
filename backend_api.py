@@ -533,7 +533,8 @@ ticket_generator = TicketGenerator()
 # napojení přijde v dalším kroku; tahle appka zatím jen řídí zůstatek a
 # uplatňování kódů (viz db.py: user_tokens/token_transactions/redeem_codes).
 # =====================================================================
-TOKEN_COSTS = {"kratky": 3, "stredni": 2, "boost": 1}
+TOKEN_KC_VALUE = 20  # 1 token = 20 Kč — appka to appce i frontendu drží na jednom místě
+TOKEN_COSTS = {"kratky": 6, "stredni": 11, "boost": 30}  # ceny podle potenciálu výhry (kurzu), ne podle spolehlivosti — BOOST je nejdražší
 
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
@@ -574,6 +575,19 @@ class RedeemCodeRequest(BaseModel):
 @app.get("/tokens/balance")
 def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
     return {"balance": db.get_token_balance(user_id)}
+
+
+@app.get("/tokens/prices")
+def get_token_prices():
+    """Appka odsud bere ceny tiketů v tokenech i hodnotu tokenu v Kč —
+    žádné přihlášení netřeba, appka to zobrazuje i nepřihlášeným (viz
+    onboarding). Jedno místo pravdy pro frontend, ať appka časem
+    nezapomene přepočítat obě strany zvlášť."""
+    return {
+        "token_value_kc": TOKEN_KC_VALUE,
+        "costs": TOKEN_COSTS,
+        "costs_kc": {k: v * TOKEN_KC_VALUE for k, v in TOKEN_COSTS.items()},
+    }
 
 
 @app.post("/tokens/redeem")
