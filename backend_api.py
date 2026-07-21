@@ -43,6 +43,7 @@ import auth
 import rate_limiter
 import ticket_telegram
 import email_service
+import stripe
 
 # Appka zpracovává zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
 # druhém — viz _build_football_matches. Volání čekají hlavně na síť
@@ -634,6 +635,11 @@ ticket_generator = TicketGenerator()
 # =====================================================================
 TOKEN_KC_VALUE = 20  # 1 token = 20 Kč — appka to appce i frontendu drží na jednom místě
 TOKEN_COSTS = {"kratky": 6, "stredni": 11, "boost": 30}  # ceny podle potenciálu výhry (kurzu), ne podle spolehlivosti — BOOST je nejdražší
+TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
+MIN_CUSTOM_TOKENS = 1
+MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
+
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
@@ -686,7 +692,76 @@ def get_token_prices():
         "token_value_kc": TOKEN_KC_VALUE,
         "costs": TOKEN_COSTS,
         "costs_kc": {k: v * TOKEN_KC_VALUE for k, v in TOKEN_COSTS.items()},
+        "packages": [{"tokens": t, "price_kc": t * TOKEN_KC_VALUE} for t in TOKEN_PACKAGES],
+        "min_custom_tokens": MIN_CUSTOM_TOKENS,
+        "max_custom_tokens": MAX_CUSTOM_TOKENS,
     }
+
+
+class CreateCheckoutSessionRequest(BaseModel):
+    tokens: int
+
+
+@app.post("/payments/create-checkout-session")
+def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = Depends(get_current_user_id)):
+    if req.tokens < MIN_CUSTOM_TOKENS or req.tokens > MAX_CUSTOM_TOKENS:
+        raise HTTPException(status_code=400, detail=f"Počet tokenů musí být mezi {MIN_CUSTOM_TOKENS} a {MAX_CUSTOM_TOKENS}")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    price_kc = req.tokens * TOKEN_KC_VALUE
+    frontend_url = os.environ.get("FRONTEND_URL", "https://cheerful-tarsier-f89a91.netlify.app")
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "czk",
+                    "product_data": {"name": f"{req.tokens} tokenů — ApexSignal"},
+                    "unit_amount": price_kc * 100,  # Stripe počítá v haléřích
+                },
+                "quantity": 1,
+            }],
+            metadata={"user_id": str(user_id), "tokens": str(req.tokens)},
+            success_url=f"{frontend_url}/?payment=success",
+            cancel_url=f"{frontend_url}/?payment=cancelled",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return {"checkout_url": session.url}
+
+
+@app.post("/payments/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Appka tokeny připisuje TADY (server-side, po ověřeném webhooku), ne
+    hned po přesměrování na success_url — ten frontend uživatel může
+    zavřít/obejít, kdežto webhook appka dostane přímo od Stripe a jde mu
+    věřit jen po ověření podpisu (STRIPE_WEBHOOK_SECRET).
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if not webhook_secret:
+        raise HTTPException(status_code=500, detail="Webhook není nastavený")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Neplatný webhook: {e}")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        if db.mark_stripe_event_if_new(event["id"]):
+            metadata = session.get("metadata") or {}
+            user_id = int(metadata.get("user_id", 0))
+            tokens = int(metadata.get("tokens", 0))
+            if user_id and tokens:
+                db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{session['id']}")
+
+    return {"status": "ok"}
 
 
 @app.post("/tokens/redeem")

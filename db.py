@@ -127,6 +127,11 @@ CREATE TABLE IF NOT EXISTS redeem_code_uses (
     PRIMARY KEY (code, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS stripe_events (
+    event_id VARCHAR(255) PRIMARY KEY,
+    processed_at TIMESTAMP DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
     token VARCHAR(64) PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -518,6 +523,21 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
             (user_id, amount, reason),
         )
         return new_balance
+
+
+def mark_stripe_event_if_new(event_id: str) -> bool:
+    """
+    Stripe může kvůli chybějícímu/pomalému 200 OK doručit stejnou webhook
+    událost víckrát — appka si eventy pamatuje, ať tokeny nepřipíše
+    2x za jednu platbu. Vrací True jen když je to POPRVÉ (appka je má
+    zpracovat), False při duplicitním doručení.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO stripe_events (event_id) VALUES (%s) ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+            (event_id,),
+        )
+        return cur.fetchone() is not None
 
 
 def create_redeem_code(code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "") -> None:
