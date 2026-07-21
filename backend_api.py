@@ -216,6 +216,31 @@ def reset_password(req: ResetPasswordRequest):
     return {"status": "Heslo bylo změněno"}
 
 
+class AdminSetPasswordRequest(BaseModel):
+    email: str
+    new_password: str
+
+
+@app.post("/admin/set-password")
+def admin_set_password(req: AdminSetPasswordRequest, request: Request):
+    """
+    Ruční nastavení hesla testovacímu účtu bez e-mailového reset flow —
+    appka ho používá jen appka administrátorem chráněné (X-Admin-Key),
+    pro účty s neznámým/ztraceným heslem testovacích schránek jako
+    test3@test.cz, kam appka reálně e-mail doručit nemůže.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Heslo musí mít aspoň 8 znaků")
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Uživatel nenalezen")
+    db.update_password_hash(user["id"], auth.hash_password(req.new_password))
+    return {"status": "Heslo nastaveno"}
+
+
 class DeleteAccountRequest(BaseModel):
     password: str
 
