@@ -1746,12 +1746,20 @@ def run_daily_tickets(request: Request):
     # se denně z velké části překrývá se včerejším, denní odesílání by
     # bylo skoro identické, jen s jinou kombinací nohou).
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
     plan = [("kratky", 20, 2), ("stredni", 50, 2)]
     if today_prague.weekday() in (1, 4):
         plan.append(("boost", 80, 5))
 
     results = []
     for label, risk_level, days in plan:
+        # Pojistka proti duplicitnímu spuštění (retry po timeoutu na
+        # klientovi, zatímco server první běh pořád dokončuje na pozadí) —
+        # appka tenhle typ tiketu přeskočí, pokud už dnes jeden vznikl.
+        if db.has_ticket_since(target_user_id, label, today_start_utc_naive):
+            results.append({"type": label, "status": "already_generated_today"})
+            continue
+
         ticket = _generate_one_ticket_for_cron(
             target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
         )

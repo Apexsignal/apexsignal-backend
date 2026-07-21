@@ -216,6 +216,20 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
         return cur.fetchone()
 
 
+def has_ticket_since(user_id: int, ticket_type: str, since) -> bool:
+    """Appka tohle používá jako pojistku proti duplicitnímu spuštění
+    denní automatiky (viz /admin/daily-tickets) — když appku někdo/něco
+    spustí 2x za sebou (retry po timeoutu na klientovi, zatímco server
+    první běh dál dokončuje na pozadí), druhé spuštění tenhle typ tiketu
+    přeskočí, místo aby appka vygenerovala a poslala duplicitní tiket."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM tickets WHERE user_id = %s AND ticket_type = %s AND created_at >= %s LIMIT 1",
+            (user_id, ticket_type, since),
+        )
+        return cur.fetchone() is not None
+
+
 def insert_ticket(user_id: int, ticket) -> int:
     """ticket je objekt Ticket z probability_model"""
     # Validace - ticket_type musí být povolený typ
