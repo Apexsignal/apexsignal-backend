@@ -216,6 +216,26 @@ def reset_password(req: ResetPasswordRequest):
     return {"status": "Heslo bylo změněno"}
 
 
+class DeleteAccountRequest(BaseModel):
+    password: str
+
+
+@app.delete("/account")
+def delete_account(req: DeleteAccountRequest, user_id: int = Depends(get_current_user_id)):
+    """
+    Appka pro smazání účtu vyžaduje znovu zadané heslo (nestačí jen
+    platný přihlašovací token) — je to nevratná akce, appka appku chrání
+    proti smazání kvůli ukradenému/zapomenutému odhlášení na cizím
+    zařízení. Smaže se rovnou vše navázané (tikety, tokeny...) přes
+    ON DELETE CASCADE — viz db.delete_user.
+    """
+    user = db.get_user_by_id(user_id)
+    if not user or not auth.verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Špatné heslo")
+    db.delete_user(user_id)
+    return {"status": "Účet byl smazán"}
+
+
 # =====================================================================
 # Pydantic schémata (request/response kontrakty)
 # =====================================================================

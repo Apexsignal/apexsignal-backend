@@ -229,6 +229,18 @@ def update_password_hash(user_id: int, password_hash: str) -> None:
         cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
 
 
+def delete_user(user_id: int) -> None:
+    """
+    Smaže účet i všechna navázaná data — tickets, ticket_selections,
+    user_tokens, token_transactions, redeem_code_uses i
+    password_reset_tokens appka smaže automaticky přes ON DELETE CASCADE
+    (viz cizí klíče v SCHEMA výše), appka tu maže jen samotný řádek
+    users.
+    """
+    with get_cursor() as cur:
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+
+
 def create_password_reset_token(token: str, user_id: int, expires_at) -> None:
     with get_cursor() as cur:
         cur.execute(
