@@ -606,6 +606,7 @@ class CreateRedeemCodeRequest(BaseModel):
     max_uses: int = 1
     expires_in_days: Optional[int] = None
     note: str = ""
+    code: Optional[str] = None  # vlastní text kódu (např. "BOOST") — jinak appka vygeneruje náhodný
 
 
 @app.post("/admin/tokens/create-code")
@@ -614,7 +615,7 @@ def create_redeem_code_endpoint(req: CreateRedeemCodeRequest, request: Request):
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    code = secrets.token_hex(4).upper()
+    code = req.code.strip().upper() if req.code else secrets.token_hex(4).upper()
     expires_at = (
         datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
         if req.expires_in_days else None
