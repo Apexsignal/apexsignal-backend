@@ -654,6 +654,21 @@ def _ticket_type_for_risk_level(risk_level: int) -> str:
     return "boost"
 
 
+def _pool_filter_for_risk(risk_level: int):
+    """
+    AI kontrola čerstvých zpráv (viz ai_reviewer.review_candidates) je
+    zdaleka nejpomalejší krok generování — appka na ni čeká, protože
+    prochází web pro KAŽDÉHO kandidáta. U krátkého a středního tiketu
+    (nižší kurz, méně riskantní) appka tenhle krok přeskočí a spolehne
+    se jen na statistický model — u BOOSTu (dlouhá kombinace, appka na
+    ni neuplatňuje kontrolu kladného edge) je to naopak jediná pojistka
+    proti zastaralým datům, tam kontrola zůstává.
+    """
+    if risk_level > 60:
+        return ai_reviewer.review_candidates
+    return None
+
+
 def _check_token_balance(user_id: int, risk_level: int) -> None:
     ticket_type = _ticket_type_for_risk_level(risk_level)
     cost = TOKEN_COSTS.get(ticket_type, 0)
@@ -1113,7 +1128,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     
     result = ticket_generator.generate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
-        pool_filter=ai_reviewer.review_candidates,
+        pool_filter=_pool_filter_for_risk(req.risk_level),
     )
 
     # Zápasů může být dost (>= 3), a přesto z nich nevzejde tiket — třeba
@@ -1131,7 +1146,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
         print(f"[generate_tickets] Po rozšíření: {len(matches)} zápasů")
         result = ticket_generator.generate(
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
-            pool_filter=ai_reviewer.review_candidates,
+            pool_filter=_pool_filter_for_risk(req.risk_level),
         )
 
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
@@ -1170,7 +1185,7 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
     
     result = ticket_generator.regenerate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
-        pool_filter=ai_reviewer.review_candidates,
+        pool_filter=_pool_filter_for_risk(req.risk_level),
     )
 
     # Viz stejná poznámka v generate_tickets — dost zápasů neznamená dost
@@ -1184,7 +1199,7 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
         print(f"[regenerate_tickets] Po rozšíření: {len(matches)} zápasů")
         result = ticket_generator.regenerate(
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
-            pool_filter=ai_reviewer.review_candidates,
+            pool_filter=_pool_filter_for_risk(req.risk_level),
         )
 
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
@@ -1324,13 +1339,17 @@ def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
     a prohlížet si cizí tikety.
     """
     provider = data_provider.get_provider(Sport.FOOTBALL)
-    pending_count = 0
-    for row in repo.get_saved_tickets(user_id):
-        if row["status"] == "pending":
-            pending_count += 1
-            ticket_id = row["ticket_id"]
-            selection_ids = [s.get("id") for s in row.get("selections", [])]
-            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+    pending_rows = [row for row in repo.get_saved_tickets(user_id) if row["status"] == "pending"]
+
+    def _settle_row(row):
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        return row["ticket_id"], _try_settle_ticket(provider, row["ticket"], selection_ids)
+
+    # Appka víc nevyřešených tiketů appka řeší SOUBĚŽNĚ — appka to dřív
+    # dělala jeden po druhém, což při víc rozehraných tiketech zbytečně
+    # natahovalo dobu, než se Historie vůbec zobrazila.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for ticket_id, new_status in executor.map(_settle_row, pending_rows):
             if new_status is not None:
                 repo.set_ticket_status(ticket_id, new_status)
                 repo.set_live_alert(ticket_id, None)
@@ -1448,6 +1467,55 @@ def get_real_results(user_id: int = Depends(get_current_user_id)):
     return repo.get_real_results_report(user_id)
 
 
+SETTLE_LEG_WORKERS = 8
+
+
+def _settle_one_leg(provider, i: int, selection, selection_id: Optional[int]) -> Optional[bool]:
+    """Vyhodnotí JEDNU nohu tiketu — appka tohle volá souběžně pro
+    všechny nohy najednou (viz _try_settle_ticket), protože jednotlivá
+    volání na sobě nijak nezávisí a čekají hlavně na síť, ne na appku."""
+    # Zápas, co ještě ani nezačal, JISTĚ neskončil — appka na to nemusí
+    # volat externí API. Bez tyhle zkratky appka při každém otevření
+    # Historie volala API pro KAŽDOU nohu KAŽDÉHO nevyřešeného tiketu,
+    # i když většina zápasů ještě ani nekopla do míče — reálně to
+    # dělalo Historii zbytečně pomalou.
+    try:
+        kickoff_str = f"{selection.kickoff_date}T{selection.kickoff_time}:00Z"
+        kickoff_dt = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+        if kickoff_dt > datetime.now(timezone.utc):
+            if selection_id is not None:
+                db.update_selection_result(selection_id, "pending")
+            return None
+    except (ValueError, AttributeError, TypeError):
+        pass  # kickoff appka nedokázala rozparsovat — bezpečně pokračuj na API dotaz
+
+    try:
+        raw_result = provider.get_fixture_result(selection.match_id)
+        result = data_provider.adapt_fixture_result(raw_result)
+        print(f"  [{i}] {selection.home_team} vs {selection.away_team}: finished={result.get('is_finished')}, goals={result.get('home_goals')}-{result.get('away_goals')}")
+    except Exception as e:
+        print(f"  [{i}] API ERROR: {str(e)}")
+        if selection_id is not None:
+            db.update_selection_result(selection_id, "pending")
+            print(f"      → saved pending (API error) id={selection_id}")
+        return None
+
+    if not result["is_finished"] or result["home_goals"] is None:
+        print(f"      → Match NOT finished, saving pending")
+        if selection_id is not None:
+            db.update_selection_result(selection_id, "pending")
+            print(f"      → saved pending id={selection_id}")
+        return None
+
+    outcome = evaluate_selection_outcome(selection, result["home_goals"], result["away_goals"])
+    print(f"      → Match finished, outcome={outcome}")
+    if selection_id is not None:
+        result_str = "won" if outcome is True else "lost" if outcome is False else "pending"
+        db.update_selection_result(selection_id, result_str)
+        print(f"      → saved {result_str} id={selection_id}")
+    return outcome
+
+
 def _try_settle_ticket(provider, ticket: Ticket, selection_ids: list[int] = None) -> Optional[str]:
     """
     Zkusí vyhodnotit JEDEN tiket podle aktuálních/finálních výsledků
@@ -1457,59 +1525,15 @@ def _try_settle_ticket(provider, ticket: Ticket, selection_ids: list[int] = None
     tenis, basketbal). Tiket appka vrátí jako vyhraný jen tehdy, když
     VŠECHNY nohy potvrzeně vyhrály. Vrací nový status ("won"/"lost"),
     nebo None, pokud zůstává nejasný (appka ho nemá měnit).
-    
+
     selection_ids: seznam ID selectionů z DB — pokud je předán, uloží výsledky pro každý
     """
-    
-    leg_results: list[Optional[bool]] = []
-    for i, selection in enumerate(ticket.selections):
-        # Zápas, co ještě ani nezačal, JISTĚ neskončil — appka na to nemusí
-        # volat externí API. Bez tyhle zkratky appka při každém otevření
-        # Historie volala API pro KAŽDOU nohu KAŽDÉHO nevyřešeného tiketu,
-        # i když většina zápasů ještě ani nekopla do míče — reálně to
-        # dělalo Historii zbytečně pomalou.
-        try:
-            kickoff_str = f"{selection.kickoff_date}T{selection.kickoff_time}:00Z"
-            kickoff_dt = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
-            if kickoff_dt > datetime.now(timezone.utc):
-                leg_results.append(None)
-                if selection_ids and i < len(selection_ids):
-                    db.update_selection_result(selection_ids[i], "pending")
-                continue
-        except (ValueError, AttributeError, TypeError):
-            pass  # kickoff appka nedokázala rozparsovat — bezpečně pokračuj na API dotaz
-
-        try:
-            raw_result = provider.get_fixture_result(selection.match_id)
-            result = data_provider.adapt_fixture_result(raw_result)
-            print(f"  [{i}] {selection.home_team} vs {selection.away_team}: finished={result.get('is_finished')}, goals={result.get('home_goals')}-{result.get('away_goals')}")
-        except Exception as e:
-            print(f"  [{i}] API ERROR: {str(e)}")
-            leg_results.append(None)
-            if selection_ids and i < len(selection_ids):
-                db.update_selection_result(selection_ids[i], "pending")
-                print(f"      → saved pending (API error) id={selection_ids[i]}")
-            continue
-        
-        # Určit výsledek nebo pending
-        if not result["is_finished"] or result["home_goals"] is None:
-            print(f"      → Match NOT finished, saving pending")
-            leg_results.append(None)
-            if selection_ids and i < len(selection_ids):
-                db.update_selection_result(selection_ids[i], "pending")
-                print(f"      → saved pending id={selection_ids[i]}")
-            continue
-        
-        outcome = evaluate_selection_outcome(selection, result["home_goals"], result["away_goals"])
-        leg_results.append(outcome)
-        print(f"      → Match finished, outcome={outcome}")
-        
-        # Ulož výsledek zápasu v DB
-        if selection_ids and i < len(selection_ids):
-            selection_id = selection_ids[i]
-            result_str = "won" if outcome is True else "lost" if outcome is False else "pending"
-            db.update_selection_result(selection_id, result_str)
-            print(f"      → saved {result_str} id={selection_id}")
+    with ThreadPoolExecutor(max_workers=SETTLE_LEG_WORKERS) as executor:
+        futures = [
+            executor.submit(_settle_one_leg, provider, i, selection, selection_ids[i] if selection_ids and i < len(selection_ids) else None)
+            for i, selection in enumerate(ticket.selections)
+        ]
+        leg_results = [f.result() for f in futures]
 
     if any(r is False for r in leg_results):
         return "lost"
@@ -1563,7 +1587,7 @@ def replace_selection(req: TicketGenerateRequestWithExclude, user_id: int = Depe
     matches = [m for m in matches if m.match_id not in set(req.exclude_match_ids)]
     result = ticket_generator.generate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
-        pool_filter=ai_reviewer.review_candidates,
+        pool_filter=_pool_filter_for_risk(req.risk_level),
     )
     return TicketPairResponse(
         safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
@@ -1905,7 +1929,7 @@ def _generate_one_ticket_for_cron(
 
     result = ticket_generator.generate(
         matches, risk_level, sports, market_types, time_frame_days,
-        pool_filter=ai_reviewer.review_candidates,
+        pool_filter=_pool_filter_for_risk(risk_level),
     )
 
     if result["safe"] is None:
@@ -1914,7 +1938,7 @@ def _generate_one_ticket_for_cron(
         matches = _filter_future_matches(matches, buffer_minutes=5)
         result = ticket_generator.generate(
             matches, risk_level, sports, market_types, time_frame_days,
-            pool_filter=ai_reviewer.review_candidates,
+            pool_filter=_pool_filter_for_risk(risk_level),
         )
 
     return result["safe"]
