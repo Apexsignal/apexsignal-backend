@@ -1,47 +1,52 @@
 """
-Odesílání e-mailů (uvítací při registraci, obnova hesla) přes obyčejné
-SMTP — appka tím nezávisí na konkrétní třetí straně (Gmail, SendGrid,
-Mailgun, Resend...), stačí zadat SMTP údaje dané služby jako proměnné
-prostředí:
+Odesílání e-mailů (uvítací při registraci, obnova hesla) přes Brevo HTTP
+API (https://api.brevo.com) — appka běží na Renderu, který na free plánu
+blokuje veškerý odchozí provoz na SMTP porty (25/465/587), takže obyčejné
+SMTP tam nejde použít. Brevo API jede přes běžné HTTPS (port 443), to
+blokované není.
 
-    SMTP_HOST, SMTP_PORT (výchozí 587), SMTP_USER, SMTP_PASSWORD,
-    SMTP_FROM_EMAIL (výchozí SMTP_USER), SMTP_FROM_NAME (výchozí "ApexSignal")
+Proměnné prostředí:
+    BREVO_API_KEY, BREVO_FROM_EMAIL (musí být ověřená adresa v Brevo),
+    BREVO_FROM_NAME (výchozí "ApexSignal")
 
-Appka bez nastaveného SMTP e-maily jen vypíše do logu, nezhroutí se kvůli
-nim — registrace/reset hesla appce funguje i bez e-mailu, jen se
+Appka bez nastaveného API klíče e-maily jen vypíše do logu, nezhroutí se
+kvůli nim — registrace/reset hesla appce funguje i bez e-mailu, jen se
 uživatel o tom nedozví hned.
 """
 import os
-import smtplib
-from email.mime.text import MIMEText
+import requests
+
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 
-def _smtp_configured() -> bool:
-    return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASSWORD"))
+def _brevo_configured() -> bool:
+    return bool(os.environ.get("BREVO_API_KEY") and os.environ.get("BREVO_FROM_EMAIL"))
 
 
 def send_email(to_email: str, subject: str, html_body: str) -> bool:
-    if not _smtp_configured():
-        print(f"[email_service] SMTP není nastavené, e-mail se neposílá (adresát: {to_email}, předmět: {subject})")
+    if not _brevo_configured():
+        print(f"[email_service] Brevo API není nastavené, e-mail se neposílá (adresát: {to_email}, předmět: {subject})")
         return False
 
-    host = os.environ["SMTP_HOST"]
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ["SMTP_USER"]
-    password = os.environ["SMTP_PASSWORD"]
-    from_email = os.environ.get("SMTP_FROM_EMAIL", user)
-    from_name = os.environ.get("SMTP_FROM_NAME", "ApexSignal")
-
-    msg = MIMEText(html_body, "html", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = f"{from_name} <{from_email}>"
-    msg["To"] = to_email
+    api_key = os.environ["BREVO_API_KEY"]
+    from_email = os.environ["BREVO_FROM_EMAIL"]
+    from_name = os.environ.get("BREVO_FROM_NAME", "ApexSignal")
 
     try:
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            server.starttls()
-            server.login(user, password)
-            server.sendmail(from_email, [to_email], msg.as_string())
+        resp = requests.post(
+            BREVO_API_URL,
+            headers={"api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"},
+            json={
+                "sender": {"email": from_email, "name": from_name},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "htmlContent": html_body,
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 300:
+            print(f"[email_service] Odeslání e-mailu selhalo ({to_email}): {resp.status_code} {resp.text}")
+            return False
         return True
     except Exception as e:
         print(f"[email_service] Odeslání e-mailu selhalo ({to_email}): {e}")
