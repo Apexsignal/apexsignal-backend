@@ -126,6 +126,14 @@ CREATE TABLE IF NOT EXISTS redeem_code_uses (
     used_at TIMESTAMP DEFAULT now(),
     PRIMARY KEY (code, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token VARCHAR(64) PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP DEFAULT now()
+);
 """
 
 
@@ -214,6 +222,35 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         return cur.fetchone()
+
+
+def update_password_hash(user_id: int, password_hash: str) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+
+
+def create_password_reset_token(token: str, user_id: int, expires_at) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token, user_id, expires_at),
+        )
+
+
+def consume_password_reset_token(token: str) -> Optional[int]:
+    """
+    Ověří token (existuje, nevypršel, ještě nebyl použitý) a rovnou ho
+    appka označí jako použitý — appka to dělá v jedné transakci se
+    zamčením řádku (FOR UPDATE), ať nejde stejný token uplatnit dvakrát
+    souběžně. Vrátí user_id, nebo None, když token neplatí.
+    """
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM password_reset_tokens WHERE token = %s FOR UPDATE", (token,))
+        row = cur.fetchone()
+        if row is None or row["used"] or row["expires_at"] < datetime.now():
+            return None
+        cur.execute("UPDATE password_reset_tokens SET used = true WHERE token = %s", (token,))
+        return row["user_id"]
 
 
 def has_ticket_since(user_id: int, ticket_type: str, since) -> bool:
