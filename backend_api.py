@@ -42,6 +42,7 @@ import db
 import auth
 import rate_limiter
 import ticket_telegram
+import email_service
 
 # Appka zpracovává zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
 # druhém — viz _build_football_matches. Volání čekají hlavně na síť
@@ -148,6 +149,10 @@ def register(req: RegisterRequest, request: Request):
         raise HTTPException(status_code=409, detail="Tenhle e-mail už je zaregistrovaný")
     user_id = db.create_user(req.email, auth.hash_password(req.password))
     rate_limiter.record_success(req.email, client_ip)
+    try:
+        email_service.send_welcome_email(req.email)
+    except Exception as e:
+        print(f"[register] Uvítací e-mail se nepodařilo odeslat: {e}")
     return AuthResponse(token=auth.create_token(user_id), user_id=user_id, email=req.email, is_new_user=True)
 
 
@@ -165,6 +170,50 @@ def login(req: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Špatný e-mail nebo heslo")
     rate_limiter.record_success(req.email, client_ip)
     return AuthResponse(token=auth.create_token(user["id"]), user_id=user["id"], email=user["email"])
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(req: ForgotPasswordRequest, request: Request):
+    client_ip = _client_ip(request)
+    if rate_limiter.is_locked_out(req.email, client_ip):
+        raise HTTPException(status_code=429, detail="Příliš mnoho pokusů. Zkus to znovu za chvíli.")
+    rate_limiter.record_failed_attempt(req.email, client_ip)  # appka to počítá jako "pokus", ať appku nejde spamovat e-maily
+
+    user = db.get_user_by_email(req.email)
+    if user:
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+        db.create_password_reset_token(token, user["id"], expires_at)
+        frontend_url = os.environ.get("FRONTEND_URL", "https://cheerful-tarsier-f89a91.netlify.app")
+        reset_link = f"{frontend_url}/reset-password.html?token={token}"
+        try:
+            email_service.send_password_reset_email(req.email, reset_link)
+        except Exception as e:
+            print(f"[forgot_password] E-mail se nepodařilo odeslat: {e}")
+
+    # Appka VŽDY vrátí stejnou odpověď, ať existuje e-mail v appce nebo ne
+    # — jinak by appka útočníkovi prozradila, které e-maily jsou zaregistrované.
+    return {"status": "Pokud e-mail existuje, poslali jsme na něj odkaz na obnovení hesla."}
+
+
+@app.post("/auth/reset-password")
+def reset_password(req: ResetPasswordRequest):
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Heslo musí mít aspoň 8 znaků")
+    user_id = db.consume_password_reset_token(req.token)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Odkaz na obnovení hesla je neplatný nebo vypršel")
+    db.update_password_hash(user_id, auth.hash_password(req.new_password))
+    return {"status": "Heslo bylo změněno"}
 
 
 # =====================================================================
