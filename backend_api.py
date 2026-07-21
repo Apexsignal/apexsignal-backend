@@ -231,7 +231,12 @@ def delete_account(req: DeleteAccountRequest, user_id: int = Depends(get_current
     """
     user = db.get_user_by_id(user_id)
     if not user or not auth.verify_password(req.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Špatné heslo")
+        # 403, ne 401 — appka na frontendu bere JAKÝKOLIV 401 jako
+        # vypršelou session a automaticky appku odhlásí (viz authFetch).
+        # Tady jde o špatně zadané heslo k potvrzení akce, ne o neplatný
+        # přihlašovací token — 401 by appku nechtěně odhlásilo místo
+        # zobrazení chyby.
+        raise HTTPException(status_code=403, detail="Špatné heslo")
     db.delete_user(user_id)
     return {"status": "Účet byl smazán"}
 
