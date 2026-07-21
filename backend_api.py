@@ -1463,6 +1463,22 @@ def _try_settle_ticket(provider, ticket: Ticket, selection_ids: list[int] = None
     
     leg_results: list[Optional[bool]] = []
     for i, selection in enumerate(ticket.selections):
+        # Zápas, co ještě ani nezačal, JISTĚ neskončil — appka na to nemusí
+        # volat externí API. Bez tyhle zkratky appka při každém otevření
+        # Historie volala API pro KAŽDOU nohu KAŽDÉHO nevyřešeného tiketu,
+        # i když většina zápasů ještě ani nekopla do míče — reálně to
+        # dělalo Historii zbytečně pomalou.
+        try:
+            kickoff_str = f"{selection.kickoff_date}T{selection.kickoff_time}:00Z"
+            kickoff_dt = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+            if kickoff_dt > datetime.now(timezone.utc):
+                leg_results.append(None)
+                if selection_ids and i < len(selection_ids):
+                    db.update_selection_result(selection_ids[i], "pending")
+                continue
+        except (ValueError, AttributeError, TypeError):
+            pass  # kickoff appka nedokázala rozparsovat — bezpečně pokračuj na API dotaz
+
         try:
             raw_result = provider.get_fixture_result(selection.match_id)
             result = data_provider.adapt_fixture_result(raw_result)
