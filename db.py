@@ -363,6 +363,19 @@ def has_ticket_since(user_id: int, ticket_type: str, since) -> bool:
         return cur.fetchone() is not None
 
 
+def count_tickets_since(user_id: int, ticket_type: str, since) -> int:
+    """Appka tohle používá pro denní automatiku, co má za den vygenerovat
+    VÍC tiketů stejného typu (viz /admin/daily-tickets) — na rozdíl od
+    has_ticket_since appka nechce blokovat po prvním, jen zjistit kolik
+    už jich dnes je, aby dogenerovala jen chybějící počet."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM tickets WHERE user_id = %s AND ticket_type = %s AND created_at >= %s",
+            (user_id, ticket_type, since),
+        )
+        return cur.fetchone()["n"]
+
+
 def insert_ticket(user_id: int, ticket) -> int:
     """ticket je objekt Ticket z probability_model"""
     # Validace - ticket_type musí být povolený typ
