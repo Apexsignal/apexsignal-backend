@@ -772,9 +772,46 @@ class OddsAPIProvider:
     BASE_URL = "https://api.the-odds-api.com/v4"
 
     # the-odds-api nemá jeden obecný klíč pro "fotbal" — každá soutěž má
-    # vlastní sport_key. Doplň/uprav podle lig, které chceš sledovat.
+    # vlastní sport_key. Seznam appka drží v souladu s TIPSPORT_LEAGUE_IDS
+    # (soutěže appka vybírá zápasy z nich) — předtím appka měla nastavené
+    # jen 2 soutěže (EPL, Liga mistrů), takže naprostá většina appkou
+    # vybraných zápasů neměla žádný skutečný tržní kurz k porovnání a
+    # appka si kurz dopočítávala sama ze svého odhadu. Seznam appka
+    # ověřila živě přes /v4/sports, ne podle zastaralé dokumentace.
+    # Zahrnuté evropské poháry appka teď (mimo sezónu) může vracet
+    # prázdné, na podzim se ale appce rozjedou znovu.
     SPORT_KEYS: dict[Sport, list[str]] = {
-        Sport.FOOTBALL: ["soccer_epl", "soccer_uefa_champs_league"],
+        Sport.FOOTBALL: [
+            "soccer_epl", "soccer_efl_champ", "soccer_england_league1", "soccer_england_league2",
+            "soccer_england_efl_cup",
+            "soccer_germany_bundesliga", "soccer_germany_bundesliga2", "soccer_germany_liga3", "soccer_germany_dfb_pokal",
+            "soccer_italy_serie_a",
+            "soccer_spain_la_liga",
+            "soccer_france_ligue_one",
+            "soccer_netherlands_eredivisie",
+            "soccer_belgium_first_div",
+            "soccer_spl",
+            "soccer_switzerland_superleague",
+            "soccer_sweden_allsvenskan", "soccer_sweden_superettan",
+            "soccer_norway_eliteserien",
+            "soccer_denmark_superliga",
+            "soccer_finland_veikkausliiga",
+            "soccer_russia_premier_league",
+            "soccer_poland_ekstraklasa",
+            "soccer_brazil_campeonato", "soccer_brazil_serie_b",
+            "soccer_argentina_primera_division",
+            "soccer_chile_campeonato",
+            "soccer_usa_mls",
+            "soccer_mexico_ligamx",
+            "soccer_korea_kleague1",
+            "soccer_china_superleague",
+            "soccer_league_of_ireland",
+            "soccer_austria_bundesliga",
+            "soccer_greece_super_league",
+            "soccer_uefa_champs_league", "soccer_uefa_champs_league_qualification",
+            "soccer_uefa_europa_league", "soccer_uefa_europa_conference_league",
+            "soccer_conmebol_copa_libertadores", "soccer_conmebol_copa_sudamericana",
+        ],
         Sport.BASKETBALL: ["basketball_nba"],
         Sport.HOCKEY: ["icehockey_nhl"],
         Sport.TENNIS: [],  # turnajové klíče se mění (např. "tennis_atp_french_open") — doplň aktuální
