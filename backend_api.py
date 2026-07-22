@@ -2129,6 +2129,7 @@ def run_daily_tickets(request: Request):
         plan.append(("boost", 80, 5, 1))
 
     results = []
+    generated_today: list[tuple[Ticket, int]] = []
     for label, risk_level, days, target_count in plan:
         already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
         to_generate = target_count - already_today
@@ -2156,6 +2157,7 @@ def run_daily_tickets(request: Request):
             ticket_id = repo.save_ticket(target_user_id, ticket)
             stake = random.choice(DAILY_TICKETS_STAKE_CHOICES)
             repo.set_actual_stake(ticket_id, stake, ticket.total_odds)
+            generated_today.append((ticket, ticket_id))
 
             telegram_status = "skipped"
             if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
@@ -2166,6 +2168,20 @@ def run_daily_tickets(request: Request):
                     telegram_status = f"error: {e}"
 
             results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": stake, "telegram": telegram_status})
+
+    # Appka navíc denně pošle výběr TOP 4 (podle nejvyšší kombinované
+    # pravděpodobnosti ze všech dnes vygenerovaných) na druhý, samostatně
+    # nastavený Telegram chat (TELEGRAM_CHAT_ID_WIFE) — appka posílá jen
+    # kopii nejlepších tiketů, nic v appce se kvůli tomu jinak nemění.
+    wife_chat_id = os.environ.get("TELEGRAM_CHAT_ID_WIFE")
+    if wife_chat_id and os.environ.get("TELEGRAM_BOT_TOKEN") and generated_today:
+        top4 = sorted(generated_today, key=lambda t: t[0].combined_probability, reverse=True)[:4]
+        for ticket, ticket_id in top4:
+            try:
+                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id), chat_id=wife_chat_id)
+                results.append({"type": "top4_wife", "status": "sent", "ticket_id": ticket_id})
+            except Exception as e:
+                results.append({"type": "top4_wife", "status": f"error: {e}", "ticket_id": ticket_id})
 
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
