@@ -824,6 +824,13 @@ class OddsAPIProvider:
         self._cache = InMemoryCache(ttl_seconds=cache_ttl_seconds)
 
     def get_odds(self, sport: Sport, markets: str = "h2h,totals", regions: str = "eu") -> list[dict]:
+        """
+        Chyba na JEDNÉ lize (výpadek, došlá kvóta...) nesmí shodit celé
+        generování tiketu — appka takovou ligu jen přeskočí a jede dál.
+        Při 401 (neplatný klíč nebo došlá kvóta) appka navíc rovnou
+        ukončí celou smyčku — další ligy by selhaly úplně stejně, nemá
+        smysl na ně plýtvat dalšími voláními.
+        """
         events: list[dict] = []
         for sport_key in self.SPORT_KEYS.get(sport, []):
             cache_key = f"odds:{sport_key}:{markets}"
@@ -831,12 +838,24 @@ class OddsAPIProvider:
             if cached is not None:
                 events.extend(cached)
                 continue
-            resp = requests.get(
-                f"{self.BASE_URL}/sports/{sport_key}/odds",
-                params={"apiKey": self.api_key, "regions": regions, "markets": markets, "oddsFormat": "decimal"},
-                timeout=8,
-            )
-            resp.raise_for_status()
+            try:
+                resp = requests.get(
+                    f"{self.BASE_URL}/sports/{sport_key}/odds",
+                    params={"apiKey": self.api_key, "regions": regions, "markets": markets, "oddsFormat": "decimal"},
+                    timeout=8,
+                )
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                print(f"[odds-api] {sport_key}: {e}")
+                if e.response is not None and e.response.status_code == 401:
+                    # neplatný klíč NEBO došlá kvóta appky — appka appku dál
+                    # nebude volat, výsledek by byl stejný appky pro každou
+                    # další ligu
+                    break
+                continue
+            except requests.exceptions.RequestException as e:
+                print(f"[odds-api] {sport_key}: {e}")
+                continue
             data = resp.json()
             self._cache.set(cache_key, data)
             events.extend(data)
