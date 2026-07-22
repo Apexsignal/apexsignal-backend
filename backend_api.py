@@ -419,8 +419,8 @@ class Repo:
 
     # --- Tikety: persistované, viz db.py -------------------------------
 
-    def save_ticket(self, user_id: int, ticket: Ticket) -> int:
-        return db.insert_ticket(user_id, ticket)
+    def save_ticket(self, user_id: int, ticket: Ticket, created_at=None) -> int:
+        return db.insert_ticket(user_id, ticket, created_at=created_at)
 
     def set_actual_stake(self, ticket_id: int, stake_amount: float, odds: float) -> bool:
         """
@@ -2137,9 +2137,18 @@ def run_daily_tickets(request: Request):
             continue
 
         for _ in range(to_generate):
-            ticket = _generate_one_ticket_for_cron(
-                target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
-            )
+            # 12+ tiketů v jednom běhu appce zvyšuje šanci, že jedno
+            # generování narazí na dočasný výpadek/rate-limit u
+            # externího API — appka to zaloguje a zkusí další typ, místo
+            # aby appka jednou chybou shodila CELÝ zbytek běhu (500).
+            try:
+                ticket = _generate_one_ticket_for_cron(
+                    target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                )
+            except Exception as e:
+                print(f"[daily-tickets] {label}: generování selhalo: {e}")
+                results.append({"type": label, "status": "generation_error", "error": str(e)})
+                break
             if ticket is None:
                 results.append({"type": label, "status": "failed_to_generate"})
                 break  # appka pro tenhle typ zjevně došly použitelné zápasy, další pokus by zase selhal
@@ -2159,6 +2168,63 @@ def run_daily_tickets(request: Request):
             results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": stake, "telegram": telegram_status})
 
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+
+
+class AdminSeedShowcaseRequest(BaseModel):
+    ticket_type: str
+    selections: list[SaveSelectionRequest]
+    total_odds: float
+    combined_probability: float = 0.0
+    recommended_stake_pct: float = 0.0
+    stake_amount: float
+    created_at: Optional[str] = None  # ISO datetime — appka zachová reálné datum starší výhry
+
+
+@app.post("/admin/showcase/seed")
+def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
+    """
+    Appka tímhle ručně přidá do výkladní skříně (/showcase/tickets) starší
+    JIŽ VYHRANÉ tikety appky (nejčastěji z testovacích účtů) — appka je
+    zkopíruje pod DAILY_TICKETS_USER_ID účet se zachovaným datem, appka
+    nemění nic na tom, co se reálně stalo (appka tikety zkopíruje 1:1,
+    jen appka je fyzicky přesune pod účet, ze kterého veřejná appka čte).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    # "dlouhy" je starší appky vlastní název pro BOOST, pořád se objevuje
+    # ve starších uložených datech appky — insert_ticket ho ale nepustí
+    # (validace appky zná jen kratky/stredni/boost).
+    ticket_type = "boost" if req.ticket_type == "dlouhy" else req.ticket_type
+
+    domain_selections = [
+        SelectionCandidate(
+            match_id=s.match_id, home_team=s.home_team, away_team=s.away_team,
+            sport=Sport.FOOTBALL,
+            market_type=MarketType(s.market_type) if s.market_type in [m.value for m in MarketType] else MarketType.MATCH_WINNER,
+            selection=s.selection,
+            probability=s.probability, odds=s.odds,
+            model_probability=s.model_probability, market_probability=s.market_probability,
+            reasoning=s.reasoning, data_quality=s.data_quality,
+            league=s.league, country=s.country, kickoff_date=s.kickoff_date,
+        ) for s in req.selections
+    ]
+    ticket = Ticket(
+        ticket_type=ticket_type, selections=domain_selections,
+        total_odds=req.total_odds, combined_probability=req.combined_probability,
+        recommended_stake_pct=req.recommended_stake_pct,
+    )
+    created_at_dt = datetime.fromisoformat(req.created_at) if req.created_at else None
+    ticket_id = repo.save_ticket(target_user_id, ticket, created_at=created_at_dt)
+    repo.set_actual_stake(ticket_id, req.stake_amount, req.total_odds)
+    repo.set_ticket_status(ticket_id, "won")
+    return {"ticket_id": ticket_id, "status": "seeded"}
 
 
 @app.get("/showcase/tickets")
