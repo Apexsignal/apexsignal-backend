@@ -259,6 +259,41 @@ def get_user_by_email(email: str) -> Optional[dict]:
         return cur.fetchone()
 
 
+def has_transaction_with_reason(user_id: int, reason: str) -> bool:
+    """Appka tohle používá jako pojistku proti dvojité refundaci stejné platby."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM token_transactions WHERE user_id = %s AND reason = %s LIMIT 1",
+            (user_id, reason),
+        )
+        return cur.fetchone() is not None
+
+
+def get_stripe_payments_for_user(user_id: int) -> list[dict]:
+    """Appka odsud bere seznam Stripe plateb konkrétního uživatele pro
+    podporu (reklamace/refundace) — appka platby pozná podle reason
+    prefixu 'STRIPE_PAYMENT:', za dvojtečkou je Stripe Checkout session ID."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, amount, reason, created_at FROM token_transactions
+            WHERE user_id = %s AND reason LIKE 'STRIPE_PAYMENT:%%'
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "transaction_id": r["id"],
+                "tokens": r["amount"],
+                "session_id": r["reason"].split(":", 1)[1],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+
 def get_user_by_id(user_id: int) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
