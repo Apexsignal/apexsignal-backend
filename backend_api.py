@@ -2175,7 +2175,18 @@ def run_daily_tickets(request: Request):
     # kopii nejlepších tiketů, nic v appce se kvůli tomu jinak nemění.
     wife_chat_id = os.environ.get("TELEGRAM_CHAT_ID_WIFE")
     if wife_chat_id and os.environ.get("TELEGRAM_BOT_TOKEN") and generated_today:
-        top4 = sorted(generated_today, key=lambda t: t[0].combined_probability, reverse=True)[:4]
+        # Čistě podle kombinované pravděpodobnosti by "stredni" typ (víc
+        # nohou, nižší součin) skoro nikdy neprošel proti "kratky" — appka
+        # proto pro ni vždycky rezervuje aspoň 1 místo na nejlepší
+        # dostupný stredni tiket, zbytek dorovná nejlepšími ze všech typů.
+        top4 = []
+        stredni_candidates = [t for t in generated_today if t[0].ticket_type == "stredni"]
+        if stredni_candidates:
+            top4.append(max(stredni_candidates, key=lambda t: t[0].combined_probability))
+        remaining = [t for t in generated_today if t not in top4]
+        remaining.sort(key=lambda t: t[0].combined_probability, reverse=True)
+        top4.extend(remaining[:4 - len(top4)])
+
         for ticket, ticket_id in top4:
             try:
                 ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id), chat_id=wife_chat_id)
