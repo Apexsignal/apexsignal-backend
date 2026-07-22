@@ -823,14 +823,14 @@ class OddsAPIProvider:
             raise RuntimeError("Chybí ODDSAPI_KEY (proměnná prostředí).")
         self._cache = InMemoryCache(ttl_seconds=cache_ttl_seconds)
 
-    # Nový klíč má rozpočet jen 500 requestů/den — appka volá ~35 lig na
-    # jedno generování, takže bez sdílené, dlouho platné cache by appka
-    # kvótu vyčerpala během pár desítek requestů (a in-memory cache stejně
-    # umře při každém uspání/restartu Render free tier). Appka proto
-    # kešuje kurzy i do DB na 4 hodiny — sdíleno napříč VŠEMI požadavky a
-    # přežije restart. 35 lig × 6 obnovení/den = ~210 requestů/den, což
-    # nechává appce rezervu i pro víc ticket-typů a víc uživatelů najednou.
-    DB_CACHE_TTL_SECONDS = 4 * 60 * 60
+    # Nový klíč má rozpočet jen 500 KREDITŮ/MĚSÍC (ne za den!) a appka bere
+    # 2 trhy (h2h+totals) × 1 region (eu) = 2 kredity za jeden request.
+    # Jeden plný průchod ~35 lig tak stojí ~70 kreditů — při refreshi
+    # každé 4h by appka vyčerpala měsíční kvótu za 2-3 DNY. Appka proto
+    # kešuje kurzy do DB na celý týden — sdíleno napříč VŠEMI požadavky a
+    # přežije restart. 35 lig × ~4,3 obnovení/měsíc × 2 kredity ≈ 300
+    # kreditů/měsíc, což nechává rozumnou rezervu.
+    DB_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
     def get_odds(self, sport: Sport, markets: str = "h2h,totals", regions: str = "eu") -> list[dict]:
         """
