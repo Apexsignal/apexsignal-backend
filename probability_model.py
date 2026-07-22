@@ -710,8 +710,15 @@ class TicketGenerator:
                     print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
                     ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
             else:
-                # Zkusit vybrat tiket z tohoto pool
-                ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level)
+                # Appka požadavek na kladný edge (model lepší než trh)
+                # nevyžaduje ani tady — v praxi appka málokdy porazí
+                # efektivní tržní kurz na nejjistějších zápasech, takže
+                # by appka jinak tikety negenerovala skoro nikdy, i s
+                # velkým poolem kvalitních kandidátů. Appka pořád staví
+                # kombinaci z nejjistějších výběrů podle VLASTNÍHO modelu
+                # (min_prob filtr zůstává) — jen appka po ní nechce navíc
+                # dokázat, že je chytřejší než bookmaker.
+                ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
 
             if ticket is not None:
                 if threshold < min_prob:
@@ -816,7 +823,6 @@ class TicketGenerator:
         for _ in range(retries):
             selected = self._search_combo(working_pool, min_odds, max_odds, min_selections, min_odds_hard)
             if selected is None:
-                print(f"[build-ticket-debug] {ticket_type}: _search_combo nenašel žádnou kombinaci z {len(working_pool)} kandidátů (odds_range={odds_range})")
                 return None
 
             running_odds = 1.0
@@ -882,7 +888,6 @@ class TicketGenerator:
                     recommended_stake_pct=recommended_stake_pct,
                 )
 
-            print(f"[build-ticket-debug] {ticket_type}: kombinace nalezena (odds={running_odds:.2f}), ale edge check selhal, {len(verified)} ověřených noh")
             weakest = min(verified, key=lambda c: c.probability)
             working_pool = [c for c in working_pool if c is not weakest]
 
