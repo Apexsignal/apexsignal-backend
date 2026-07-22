@@ -1126,6 +1126,8 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
 
     events = odds_provider.get_odds(sport)
     by_pair = {(e["home_team"], e["away_team"]): e for e in events}
+    matched = sum(1 for m in matches if (m.home_team, m.away_team) in by_pair)
+    print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched}/{len(matches)} zápasů napárováno jménem")
     totals_market = {
         Sport.FOOTBALL: MarketType.OVER_GOALS, Sport.HOCKEY: MarketType.OVER_GOALS,
         Sport.BASKETBALL: MarketType.OVER_POINTS, Sport.TENNIS: MarketType.OVER_GAMES,
