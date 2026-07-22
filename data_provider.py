@@ -823,6 +823,15 @@ class OddsAPIProvider:
             raise RuntimeError("Chybí ODDSAPI_KEY (proměnná prostředí).")
         self._cache = InMemoryCache(ttl_seconds=cache_ttl_seconds)
 
+    # Nový klíč má rozpočet jen 500 requestů/den — appka volá ~35 lig na
+    # jedno generování, takže bez sdílené, dlouho platné cache by appka
+    # kvótu vyčerpala během pár desítek requestů (a in-memory cache stejně
+    # umře při každém uspání/restartu Render free tier). Appka proto
+    # kešuje kurzy i do DB na 4 hodiny — sdíleno napříč VŠEMI požadavky a
+    # přežije restart. 35 lig × 6 obnovení/den = ~210 requestů/den, což
+    # nechává appce rezervu i pro víc ticket-typů a víc uživatelů najednou.
+    DB_CACHE_TTL_SECONDS = 4 * 60 * 60
+
     def get_odds(self, sport: Sport, markets: str = "h2h,totals", regions: str = "eu") -> list[dict]:
         """
         Chyba na JEDNÉ lize (výpadek, došlá kvóta...) nesmí shodit celé
@@ -838,6 +847,17 @@ class OddsAPIProvider:
             if cached is not None:
                 events.extend(cached)
                 continue
+
+            try:
+                import db as _db
+                db_cached = _db.cache_get(cache_key)
+            except Exception:
+                db_cached = None
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                events.extend(db_cached)
+                continue
+
             try:
                 resp = requests.get(
                     f"{self.BASE_URL}/sports/{sport_key}/odds",
@@ -858,6 +878,11 @@ class OddsAPIProvider:
                 continue
             data = resp.json()
             self._cache.set(cache_key, data)
+            try:
+                import db as _db
+                _db.cache_set(cache_key, data, ttl_seconds=self.DB_CACHE_TTL_SECONDS)
+            except Exception as e:
+                print(f"[odds-api] Uložení do DB cache selhalo: {e}")
             events.extend(data)
         return events
 
