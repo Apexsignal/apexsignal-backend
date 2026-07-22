@@ -177,6 +177,42 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_gift_claimed BOOLEAN NOT NULL DEFAULT false")
+    except Exception:
+        pass
+
+
+def claim_welcome_gift(user_id: int, tokens: int) -> bool:
+    """
+    Appka dárek při prvním spuštění appky připíše jen JEDNOU na účet —
+    appka řádek appky uzamkne (FOR UPDATE), ať appka neproblikne dvěma
+    souběžnými požadavky (např. dvě otevřené karty appky). Vrací True,
+    pokud appka dárek právě teď připsala, False pokud ho appka uživatel
+    už dřív vybral.
+    """
+    with get_cursor() as cur:
+        cur.execute("SELECT welcome_gift_claimed FROM users WHERE id = %s FOR UPDATE", (user_id,))
+        row = cur.fetchone()
+        if row is None or row["welcome_gift_claimed"]:
+            return False
+        cur.execute("UPDATE users SET welcome_gift_claimed = true WHERE id = %s", (user_id,))
+        cur.execute(
+            """
+            INSERT INTO user_tokens (user_id, balance, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (user_id) DO UPDATE
+                SET balance = user_tokens.balance + EXCLUDED.balance, updated_at = now()
+            """,
+            (user_id, tokens),
+        )
+        cur.execute(
+            "INSERT INTO token_transactions (user_id, amount, reason) VALUES (%s, %s, %s)",
+            (user_id, tokens, "WELCOME_GIFT"),
+        )
+        return True
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
