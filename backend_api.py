@@ -697,6 +697,15 @@ def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
     return {"balance": db.get_token_balance(user_id)}
 
 
+WELCOME_GIFT_TOKENS = 17  # 1 krátký (6) + 1 střední (11) tiket zdarma
+
+
+@app.post("/tokens/claim-welcome-gift")
+def claim_welcome_gift_endpoint(user_id: int = Depends(get_current_user_id)):
+    claimed = db.claim_welcome_gift(user_id, WELCOME_GIFT_TOKENS)
+    return {"claimed": claimed, "tokens": WELCOME_GIFT_TOKENS, "balance": db.get_token_balance(user_id)}
+
+
 @app.get("/tokens/prices")
 def get_token_prices():
     """Appka odsud bere ceny tiketů v tokenech i hodnotu tokenu v Kč —
