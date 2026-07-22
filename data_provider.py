@@ -22,8 +22,11 @@ Modul: data_provider.py
 from __future__ import annotations
 
 import os
+import re
 import time
 import threading
+import unicodedata
+import difflib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -885,6 +888,96 @@ class OddsAPIProvider:
                 print(f"[odds-api] Uložení do DB cache selhalo: {e}")
             events.extend(data)
         return events
+
+
+# the-odds-api a API-Football appce dávají jméno stejného týmu často jinak
+# napsané (diakritika, klubové zkratky, "Utd" vs "United"...) — přesná shoda
+# stringů proto párovala jen ~5-10 % zápasů, i když appka reálné kurzy měla.
+# Appka teď normalizuje (diakritika pryč, jen generické klubové zkratky typu
+# "FC"/"AFC" pryč — NIKDY slova co odlišují kluby jako "United"/"City"/"Real",
+# to by naopak dvě různé mužstva slilo v jedno) a pak hledá nejlepší fuzzy
+# shodu podle podobnosti stringu. Kvůli riziku špatného spárování kurzu k
+# JINÉMU zápasu appka radši nepáruje nic, než aby si nebyla dost jistá —
+# vyžaduje vysoký práh podobnosti NA OBOU jménech zároveň, navíc omezuje
+# hledání jen na zápasy ve stejný den (commence_time appka porovná s
+# kickoff_date), a když je druhá nejlepší shoda skoro stejně dobrá jako
+# první (nejednoznačnost), appku radši zahodí obě.
+_TEAM_NAME_GENERIC_SUFFIXES = {
+    "fc", "cf", "afc", "cfc", "sc", "ac", "sk", "fk", "bk", "if", "ff", "ifk", "ud", "cd",
+    "as", "us", "ss", "ssd", "asd",
+}
+# Různí provideři appce dávají stejné město anglicky vs. místním jazykem
+# (běžné hlavně u zápasů appkou vybraných z ne-anglických lig) — bez
+# překladu appka tyhle případy fuzzy shodou nechytí (přílišné snížení
+# _NAME_MATCH_THRESHOLD by naopak začalo plést jinak podobné, ale RŮZNÉ
+# kluby jako "Manchester United"/"Manchester City").
+_TEAM_NAME_ALIASES = {
+    "praha": "prague", "munchen": "munich", "wien": "vienna", "warszawa": "warsaw",
+    "moskva": "moscow", "kobenhavn": "copenhagen", "goteborg": "gothenburg",
+    "roma": "rome", "torino": "turin", "milano": "milan", "napoli": "naples",
+    "sevilla": "seville", "athen": "athens", "beograd": "belgrade",
+    "koln": "cologne", "brasil": "brazil", "utd": "united",
+}
+_NAME_MATCH_THRESHOLD = 0.84
+_NAME_MATCH_MARGIN = 0.05
+
+
+def _normalize_team_name(name: str) -> str:
+    if not name:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_name = "".join(c for c in nfkd if not unicodedata.combining(c))
+    ascii_name = ascii_name.lower()
+    ascii_name = re.sub(r"[^a-z0-9\s]", " ", ascii_name)
+    words = [
+        _TEAM_NAME_ALIASES.get(w, w)
+        for w in ascii_name.split()
+        if w not in _TEAM_NAME_GENERIC_SUFFIXES
+    ]
+    return " ".join(words) if words else ascii_name.strip()
+
+
+def _name_similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def find_matching_odds_event(events: list[dict], home_team: str, away_team: str, kickoff_date: Optional[str] = None) -> Optional[dict]:
+    """
+    Najde v `events` (odpověď the-odds-api) ten, co nejlíp fuzzy-odpovídá
+    zadanému zápasu. Vrátí None, pokud si appka není dost jistá — viz
+    komentář u konstant výše.
+    """
+    norm_home, norm_away = _normalize_team_name(home_team), _normalize_team_name(away_team)
+    if not norm_home or not norm_away:
+        return None
+
+    scored: list[tuple[float, dict]] = []
+    for event in events:
+        if kickoff_date:
+            commence = event.get("commence_time", "")
+            if commence:
+                event_date = commence[:10]
+                # Tolerance ±1 den kvůli časovým pásmům/půlnoci
+                try:
+                    d1 = datetime.fromisoformat(kickoff_date)
+                    d2 = datetime.fromisoformat(event_date)
+                    if abs((d1 - d2).days) > 1:
+                        continue
+                except ValueError:
+                    pass
+
+        home_score = _name_similarity(norm_home, _normalize_team_name(event.get("home_team", "")))
+        away_score = _name_similarity(norm_away, _normalize_team_name(event.get("away_team", "")))
+        combined = min(home_score, away_score)
+        if home_score >= _NAME_MATCH_THRESHOLD and away_score >= _NAME_MATCH_THRESHOLD:
+            scored.append((combined, event))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    if len(scored) > 1 and (scored[0][0] - scored[1][0]) < _NAME_MATCH_MARGIN:
+        return None  # nejednoznačné — dva zápasy skoro stejně podobné, appka radši nic nepáruje
+    return scored[0][1]
 
 
 def adapt_odds_api_event(event: dict) -> dict:

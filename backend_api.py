@@ -1116,8 +1116,9 @@ def _build_tennis_matches(provider, raw_fixtures: list[dict]) -> list[MatchInput
 def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     """
     Doplní reálné kurzy a de-vigované pravděpodobnosti z the-odds-api.com,
-    napárované na zápas podle přesné shody jména týmu/hráče. Tichá no-op,
-    pokud ODDSAPI_KEY není nastaven — appka pak běží jen na vlastním odhadu.
+    napárované na zápas fuzzy shodou jména týmu (viz find_matching_odds_event).
+    Tichá no-op, pokud ODDSAPI_KEY není nastaven — appka pak běží jen na
+    vlastním odhadu.
     """
     try:
         odds_provider = data_provider.OddsAPIProvider()
@@ -1125,18 +1126,17 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
         return
 
     events = odds_provider.get_odds(sport)
-    by_pair = {(e["home_team"], e["away_team"]): e for e in events}
-    matched = sum(1 for m in matches if (m.home_team, m.away_team) in by_pair)
-    print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched}/{len(matches)} zápasů napárováno jménem")
     totals_market = {
         Sport.FOOTBALL: MarketType.OVER_GOALS, Sport.HOCKEY: MarketType.OVER_GOALS,
         Sport.BASKETBALL: MarketType.OVER_POINTS, Sport.TENNIS: MarketType.OVER_GAMES,
     }[sport]
 
+    matched_count = 0
     for match in matches:
-        event = by_pair.get((match.home_team, match.away_team))
+        event = data_provider.find_matching_odds_event(events, match.home_team, match.away_team, match.kickoff_date)
         if not event:
             continue
+        matched_count += 1
         adapted = data_provider.adapt_odds_api_event(event)
         if adapted["favorite_win_market_odds"]:
             match.favorite_win_market_odds = adapted["favorite_win_market_odds"]
@@ -1160,6 +1160,8 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
                 MarketType.OVER_GAMES: match.over_games_odds,
             }[totals_market]
             target_dict[threshold] = odds
+
+    print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched_count}/{len(matches)} zápasů napárováno")
 
 
 def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int) -> list[MatchInput]:
