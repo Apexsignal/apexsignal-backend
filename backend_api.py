@@ -59,12 +59,15 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="ApexSignal API", version="0.1.0")
 
-# Povolí volání z frontendu hostovaného jinde (Netlify, lokální vývoj...).
-# Pro produkci doporučuju zúžit allow_origins na konkrétní doménu tvého
-# Netlify webu místo "*" — jakmile budeš znát finální URL.
+# Appka teď bere skutečné platby, takže appka backend nesmí volat
+# libovolná cizí stránka — jen appce vlastní frontend (Netlify).
+ALLOWED_ORIGINS = [
+    "https://apexsignal-app.netlify.app",
+    "https://cheerful-tarsier-f89a91.netlify.app",  # starší doména appky, appka ji nechává pro jistotu funkční
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -786,6 +789,69 @@ async def stripe_webhook(request: Request):
                 db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{session['id']}")
 
     return {"status": "ok"}
+
+
+@app.get("/admin/user-payments")
+def admin_user_payments(email: str, request: Request):
+    """Appka tohle appce admin ukáže historii Stripe nákupů konkrétního
+    uživatele (podle e-mailu) — appka to appce potřebuje, aby věděla,
+    KTERÝ session_id refundovat přes /admin/refund."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    user = db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Uživatel nenalezen")
+    return {"user_id": user["id"], "payments": db.get_stripe_payments_for_user(user["id"])}
+
+
+class RefundRequest(BaseModel):
+    email: str
+    session_id: str
+    deduct_tokens: bool = True
+
+
+@app.post("/admin/refund")
+def admin_refund(req: RefundRequest, request: Request):
+    """
+    Vrátí peníze za konkrétní Stripe nákup zpět na kartu/účet zákazníka
+    a (pokud deduct_tokens) mu odečte tokeny z toho nákupu — appka
+    vklad appka nekontroluje na dostatečný zůstatek (uživatel je mohl
+    mezitím spotřebovat), zůstatek klidně appka nechá jít do mínusu, ať
+    refundace neselže jen kvůli tomu, že appka tokeny mezitím "utratila".
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Uživatel nenalezen")
+
+    refund_reason = f"REFUND:{req.session_id}"
+    if db.has_transaction_with_reason(user["id"], refund_reason):
+        raise HTTPException(status_code=400, detail="Tahle platba už byla refundována")
+
+    try:
+        session = stripe.checkout.Session.retrieve(req.session_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Stripe session nenalezena: {e}")
+
+    if not session.get("payment_intent"):
+        raise HTTPException(status_code=400, detail="K téhle platbě appka nenašla payment_intent (nebyla dokončena?)")
+
+    try:
+        refund = stripe.Refund.create(payment_intent=session["payment_intent"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe refundace selhala: {e}")
+
+    new_balance = None
+    if req.deduct_tokens:
+        tokens = int((session.get("metadata") or {}).get("tokens", 0))
+        if tokens:
+            new_balance = db.adjust_tokens(user["id"], -tokens, refund_reason)
+
+    return {"status": "Refundováno", "stripe_refund_id": refund["id"], "new_balance": new_balance}
 
 
 @app.post("/tokens/redeem")
