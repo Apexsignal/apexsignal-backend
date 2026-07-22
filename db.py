@@ -257,6 +257,51 @@ def get_stripe_payments_for_user(user_id: int) -> list[dict]:
         ]
 
 
+def get_conversion_funnel(days: int = 30) -> dict:
+    """
+    Appka appce ukazuje, kde lidi ubývají mezi registrací a placením:
+    kolik se jich zaregistrovalo, kolik z nich appce uložilo aspoň jeden
+    tiket (appka to bere jako 'reálně appku vyzkoušeli'), a kolik z nich
+    appce aspoň jednou zaplatilo. `days` appka omezí jen na nedávné
+    registrace, ať appka appce neukazuje historicky zkreslené číslo
+    kombinující starý i nový provoz appky.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE created_at > now() - %s * interval '1 day'",
+            (days,),
+        )
+        registered = cur.fetchone()["n"]
+
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT u.id) AS n FROM users u
+            JOIN tickets t ON t.user_id = u.id
+            WHERE u.created_at > now() - %s * interval '1 day'
+            """,
+            (days,),
+        )
+        saved_ticket = cur.fetchone()["n"]
+
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT u.id) AS n FROM users u
+            JOIN token_transactions tt ON tt.user_id = u.id
+            WHERE u.created_at > now() - %s * interval '1 day'
+              AND tt.reason LIKE 'STRIPE_PAYMENT:%%'
+            """,
+            (days,),
+        )
+        paid = cur.fetchone()["n"]
+
+        return {
+            "period_days": days,
+            "registered": registered,
+            "saved_first_ticket": saved_ticket,
+            "paid": paid,
+        }
+
+
 def get_user_by_id(user_id: int) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))

@@ -43,6 +43,8 @@ import auth
 import rate_limiter
 import ticket_telegram
 import email_service
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 import stripe
 
 # Appka zpracovává zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
@@ -174,6 +176,50 @@ def login(req: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Špatný e-mail nebo heslo")
     rate_limiter.record_success(req.email, client_ip)
     return AuthResponse(token=auth.create_token(user["id"]), user_id=user["id"], email=user["email"])
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str  # ID token appka dostane z Google Identity Services na frontendu
+
+
+@app.post("/auth/google", response_model=AuthResponse)
+def google_auth(req: GoogleAuthRequest):
+    """
+    Appka ověří Google ID token appka appce (podpis appka i cílový klient
+    appka appka appka ověří knihovnou google-auth, appka appce nedůvěřuje
+    ničemu, co appka nedostane přímo od Google) a podle e-mailu z něj buď
+    najde existující účet, nebo appka založí nový — appka novým Google
+    účtům nastaví náhodné, nikdy nepoužité heslo (appka appka appce
+    ho nikdy neřekne), appka běžné přihlášení heslem appce zůstane
+    funkční, pokud si ho appka appka appka někdy appka nastaví přes
+    zapomenuté heslo.
+    """
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    if not client_id:
+        raise HTTPException(status_code=500, detail="Přihlášení přes Google zatím není nastavené")
+    try:
+        idinfo = google_id_token.verify_oauth2_token(req.credential, google_requests.Request(), client_id)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Neplatný Google token: {e}")
+
+    email = idinfo.get("email", "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google účet nemá e-mail")
+
+    user = db.get_user_by_email(email)
+    is_new_user = False
+    if not user:
+        random_password = secrets.token_urlsafe(32)
+        user_id = db.create_user(email, auth.hash_password(random_password))
+        is_new_user = True
+        try:
+            email_service.send_welcome_email(email)
+        except Exception as e:
+            print(f"[google_auth] Uvítací e-mail se nepodařilo odeslat: {e}")
+    else:
+        user_id = user["id"]
+
+    return AuthResponse(token=auth.create_token(user_id), user_id=user_id, email=email, is_new_user=is_new_user)
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -794,6 +840,14 @@ def admin_user_payments(email: str, request: Request):
     if not user:
         raise HTTPException(status_code=404, detail="Uživatel nenalezen")
     return {"user_id": user["id"], "payments": db.get_stripe_payments_for_user(user["id"])}
+
+
+@app.get("/admin/conversion-funnel")
+def admin_conversion_funnel(request: Request, days: int = 30):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return db.get_conversion_funnel(days)
 
 
 class RefundRequest(BaseModel):
