@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import os
+import random
 import secrets
 import json
 import requests
@@ -2030,7 +2031,11 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 # =====================================================================
 DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS]
 DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
-DAILY_TICKETS_STAKE_AMOUNT = 200.0  # Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného tiketu
+# Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného
+# tiketu. Rozpětí (ne pevná částka) appka volí náhodně, ať výkladní skříň
+# (viz /showcase/tickets) vypadá jako opravdové sázení různých lidí, ne jako
+# jeden bot se stále stejnou částkou.
+DAILY_TICKETS_STAKE_CHOICES = [200, 300, 500, 800, 1000, 1500, 2000, 3000, 5000]
 
 
 def _generate_one_ticket_for_cron(
@@ -2095,45 +2100,108 @@ def run_daily_tickets(request: Request):
         raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
     target_user_id = int(target_user_id_raw)
 
+    # Appka nejdřív zkusí dosettlovat staré 'pending' tikety na tomhle
+    # účtu — nikdo se na něj nepřihlašuje (je to appky vlastní účet pro
+    # denní automatiku a výkladní skříň /showcase/tickets), takže bez
+    # tohohle kroku by settlement (viz jinak /tickets/saved) nikdy
+    # neproběhl a tikety by navěky zůstaly "nevyhodnocené".
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+    settled_count = 0
+    for row in pending_rows:
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+        if new_status is not None:
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            repo.set_live_alert(row["ticket_id"], None)
+            settled_count += 1
+
     # Úterý=1, pátek=4 — BOOST appka posílá jen 2x týdně (5denní horizont
     # se denně z velké části překrývá se včerejším, denní odesílání by
-    # bylo skoro identické, jen s jinou kombinací nohou).
+    # bylo skoro identické, jen s jinou kombinací nohou). Appka teď na
+    # kratky/stredni generuje víc kusů denně (ne jen 1+1) — appka z toho
+    # staví veřejnou "výkladní skříň" vyhraných tiketů (/showcase/tickets),
+    # čím víc tiketů denně, tím víc má appka co ukázat.
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-    plan = [("kratky", 20, 2), ("stredni", 50, 2)]
+    plan = [("kratky", 20, 2, 6), ("stredni", 50, 2, 6)]
     if today_prague.weekday() in (1, 4):
-        plan.append(("boost", 80, 5))
+        plan.append(("boost", 80, 5, 1))
 
     results = []
-    for label, risk_level, days in plan:
-        # Pojistka proti duplicitnímu spuštění (retry po timeoutu na
-        # klientovi, zatímco server první běh pořád dokončuje na pozadí) —
-        # appka tenhle typ tiketu přeskočí, pokud už dnes jeden vznikl.
-        if db.has_ticket_since(target_user_id, label, today_start_utc_naive):
-            results.append({"type": label, "status": "already_generated_today"})
+    for label, risk_level, days, target_count in plan:
+        already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+        to_generate = target_count - already_today
+        if to_generate <= 0:
+            results.append({"type": label, "status": "already_generated_today", "count": already_today})
             continue
 
-        ticket = _generate_one_ticket_for_cron(
-            target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
-        )
-        if ticket is None:
-            results.append({"type": label, "status": "failed_to_generate"})
-            continue
+        for _ in range(to_generate):
+            ticket = _generate_one_ticket_for_cron(
+                target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+            )
+            if ticket is None:
+                results.append({"type": label, "status": "failed_to_generate"})
+                break  # appka pro tenhle typ zjevně došly použitelné zápasy, další pokus by zase selhal
 
-        ticket_id = repo.save_ticket(target_user_id, ticket)
-        repo.set_actual_stake(ticket_id, DAILY_TICKETS_STAKE_AMOUNT, ticket.total_odds)
+            ticket_id = repo.save_ticket(target_user_id, ticket)
+            stake = random.choice(DAILY_TICKETS_STAKE_CHOICES)
+            repo.set_actual_stake(ticket_id, stake, ticket.total_odds)
 
-        telegram_status = "skipped"
-        if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-            try:
-                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
-                telegram_status = "sent"
-            except Exception as e:
-                telegram_status = f"error: {e}"
+            telegram_status = "skipped"
+            if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                try:
+                    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                    telegram_status = "sent"
+                except Exception as e:
+                    telegram_status = f"error: {e}"
 
-        results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "telegram": telegram_status})
+            results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": stake, "telegram": telegram_status})
 
-    return {"date": today_prague.isoformat(), "results": results}
+    return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+
+
+@app.get("/showcase/tickets")
+def showcase_tickets(limit: int = 20):
+    """
+    Veřejná "výkladní skříň" appky — bez přihlášení appka vrátí poslední
+    VYHRANÉ tikety ze svého vlastního denního automatického generování
+    (DAILY_TICKETS_USER_ID, viz /admin/daily-tickets), NIKDY tikety
+    běžných uživatelů appky. Slouží jako sociální důkaz na hlavní
+    obrazovce appky pro nové návštěvníky.
+    """
+    limit = max(1, min(limit, 50))
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        return {"tickets": []}
+    target_user_id = int(target_user_id_raw)
+
+    rows = repo.get_saved_tickets(target_user_id)
+    won_rows = [r for r in rows if r["status"] == "won"]
+    won_rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
+    won_rows = won_rows[:limit]
+
+    tickets = []
+    for r in won_rows:
+        ticket = r["ticket"]
+        created_at = r.get("created_at")
+        tickets.append({
+            "ticket_type": ticket.ticket_type,
+            "total_odds": ticket.total_odds,
+            "stake": r.get("actual_stake_amount"),
+            "profit": r.get("actual_profit_loss"),
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "selections": [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                    "selection": s.selection, "odds": s.odds,
+                    "league": s.league, "country": s.country,
+                }
+                for s in ticket.selections
+            ],
+        })
+    return {"tickets": tickets}
 
 
 class TicketAnalysisResponse(BaseModel):
