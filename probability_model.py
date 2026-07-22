@@ -850,7 +850,29 @@ class TicketGenerator:
                 min(kelly_stake_fraction(edge_probability, running_odds) * 100, MAX_RECOMMENDED_STAKE_PCT), 1
             )
 
-            if recommended_stake_pct > 0 or not require_positive_edge:
+            # Appka kontrolu na kladný edge dělá jen na výběrech s OVĚŘENÝM
+            # tržním kurzem (c.market_probability not None) — u neověřených
+            # appka odds nastavuje na 1/model_probability (viz
+            # normalize_to_match_input), takže jejich vlastní příspěvek
+            # k edge je z podstaty přesně nulový (ani kladný, ani záporný)
+            # a nemá smysl appku kvůli nim blokovat — appka jim věří stejně
+            # jako modelu, bez umělého navyšování jistoty. Když appka NEMÁ
+            # v kombinaci ani jeden ověřený výběr, nemá s čím porovnávat —
+            # kontrolu appka přeskočí úplně (běží čistě na vlastním modelu).
+            verified = [c for c in selected if c.market_probability is not None]
+            if require_positive_edge and verified:
+                v_running_odds = 1.0
+                for c in verified:
+                    v_running_odds *= c.odds
+                v_edge_probability = 1.0
+                for c in verified:
+                    v_edge_probability *= c.model_probability
+                v_edge_probability = self._apply_correlation_discount(verified, v_edge_probability)
+                edge_ok = kelly_stake_fraction(v_edge_probability, v_running_odds) > 0
+            else:
+                edge_ok = True
+
+            if edge_ok:
                 return Ticket(
                     ticket_type=ticket_type,
                     selections=selected,
@@ -859,7 +881,7 @@ class TicketGenerator:
                     recommended_stake_pct=recommended_stake_pct,
                 )
 
-            weakest = min(selected, key=lambda c: c.probability)
+            weakest = min(verified, key=lambda c: c.probability)
             working_pool = [c for c in working_pool if c is not weakest]
 
         return None
