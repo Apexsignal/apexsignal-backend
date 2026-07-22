@@ -1279,13 +1279,28 @@ class APIFootballProvider(SportsDataProvider):
         return {"x-apisports-key": self.api_key}
 
     def _get(self, path: str, params: dict) -> list:
-        _api_football_rate_limiter.wait()
-        resp = requests.get(f"{API_FOOTBALL_BASE_URL}{path}", headers=self._headers(), params=params, timeout=8)
-        resp.raise_for_status()
-        payload = resp.json()
-        if payload.get("errors"):
-            raise RuntimeError(f"API-Football vrátilo chybu: {payload['errors']}")
-        return payload.get("response", [])
+        # Denní cron appky teď generuje 12+ tiketů v jednom běhu (viz
+        # /admin/daily-tickets), což i s _api_football_rate_limiter
+        # občas krátce překročí limit požadavků za minutu appky u
+        # API-Football (429). Appka to zkusí pár krát znovu s prodlevou,
+        # než to appka celé vzdá — jedno 429 uprostřed běhu appku dřív
+        # celou shodilo (HTTP 500), i když šlo jen o dočasné zpomalení.
+        last_error = None
+        for attempt in range(3):
+            _api_football_rate_limiter.wait()
+            resp = requests.get(f"{API_FOOTBALL_BASE_URL}{path}", headers=self._headers(), params=params, timeout=8)
+            if resp.status_code == 429:
+                last_error = requests.exceptions.HTTPError(f"429 Client Error: Too Many Requests for url: {resp.url}", response=resp)
+                retry_after = resp.headers.get("Retry-After")
+                wait_seconds = float(retry_after) if retry_after else 3.0 * (attempt + 1)
+                time.sleep(wait_seconds)
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("errors"):
+                raise RuntimeError(f"API-Football vrátilo chybu: {payload['errors']}")
+            return payload.get("response", [])
+        raise last_error
 
     def get_upcoming_matches(self, sport: Sport, days_ahead: int,
                              custom_date: Optional[str] = None,

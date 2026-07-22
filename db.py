@@ -376,19 +376,29 @@ def count_tickets_since(user_id: int, ticket_type: str, since) -> int:
         return cur.fetchone()["n"]
 
 
-def insert_ticket(user_id: int, ticket) -> int:
-    """ticket je objekt Ticket z probability_model"""
+def insert_ticket(user_id: int, ticket, created_at=None) -> int:
+    """ticket je objekt Ticket z probability_model. created_at appka nastaví
+    jen výjimečně (viz /admin/showcase/seed — appka tam ručně přidává
+    STARŠÍ vyhrané tikety a chce appce zachovat jejich reálné datum, ne
+    now())."""
     # Validace - ticket_type musí být povolený typ
     allowed_types = {'kratky', 'stredni', 'boost'}
     if ticket.ticket_type not in allowed_types:
         raise ValueError(f"Invalid ticket_type: {ticket.ticket_type}. Allowed: {allowed_types}")
-    
+
     with get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO tickets (user_id, ticket_type, total_odds, combined_probability, recommended_stake_pct)
-               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-            (user_id, ticket.ticket_type, ticket.total_odds, ticket.combined_probability, ticket.recommended_stake_pct),
-        )
+        if created_at is not None:
+            cur.execute(
+                """INSERT INTO tickets (user_id, ticket_type, total_odds, combined_probability, recommended_stake_pct, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                (user_id, ticket.ticket_type, ticket.total_odds, ticket.combined_probability, ticket.recommended_stake_pct, created_at),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO tickets (user_id, ticket_type, total_odds, combined_probability, recommended_stake_pct)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                (user_id, ticket.ticket_type, ticket.total_odds, ticket.combined_probability, ticket.recommended_stake_pct),
+            )
         ticket_id = cur.fetchone()["id"]
         for s in ticket.selections:
             cur.execute(
