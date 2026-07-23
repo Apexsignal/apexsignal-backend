@@ -710,15 +710,16 @@ class TicketGenerator:
                     print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
                     ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
             else:
-                # Appka požadavek na kladný edge (model lepší než trh)
-                # nevyžaduje ani tady — v praxi appka málokdy porazí
-                # efektivní tržní kurz na nejjistějších zápasech, takže
-                # by appka jinak tikety negenerovala skoro nikdy, i s
-                # velkým poolem kvalitních kandidátů. Appka pořád staví
-                # kombinaci z nejjistějších výběrů podle VLASTNÍHO modelu
-                # (min_prob filtr zůstává) — jen appka po ní nechce navíc
-                # dokázat, že je chytřejší než bookmaker.
-                ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
+                # Kladný edge (model_probability oproti reálnému kurzu,
+                # viz _build_ticket) appka u kratky/stredni VYŽADUJE —
+                # bez týhle kontroly appka nabízela tikety čistě podle
+                # vlastní jistoty modelu, bez ohledu na to, jestli s tím
+                # trh souhlasí (viz #48 — zrušeno po propadu stredni na
+                # 0 % výher několik dní po sobě). Appka radši někdy tiket
+                # nevygeneruje (FALLBACK_THRESHOLDS a MAX_EDGE_RETRIES v
+                # _build_ticket to zkusí zmírnit), než aby nabídla sázku
+                # bez prokázané výhody nad bookmakerem.
+                ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=True)
 
             if ticket is not None:
                 if threshold < min_prob:
