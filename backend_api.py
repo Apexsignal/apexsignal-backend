@@ -1190,7 +1190,18 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int) -> list[
         except (NotImplementedError, RuntimeError):
             continue
 
-        raw_items = provider.get_upcoming_matches(sport, time_frame_days)
+        try:
+            raw_items = provider.get_upcoming_matches(sport, time_frame_days)
+        except RuntimeError as e:
+            # Appka na tohle dřív spadla nezachycenou 500 (typicky vyčerpaná
+            # denní kvóta API-Football, viz "You have reached the request
+            # limit for the day") — appka teď daný sport přeskočí (ostatní
+            # sporty/zdroje dat zkusí dál) místo shození celého požadavku.
+            # Volající (/tickets/generate apod.) na prázdný/menší seznam
+            # zápasů už reaguje existujícím "Tiket se nepovedl" chováním.
+            print(f"[_fetch_candidate_matches] {sport}: nepodařilo se stáhnout zápasy: {e}")
+            continue
+
         sport_matches = builders[sport](provider, raw_items)
 
         _enrich_with_market_odds(sport_matches, sport)
