@@ -377,13 +377,14 @@ class TicketResponse(BaseModel):
     actual_odds: Optional[float] = None           # za jaký kurz to reálně vsadil
     actual_profit_loss: Optional[float] = None    # appka to spočítá, jen když má actual_stake_amount A tiket je vyhodnocený
     created_at: Optional[str] = None  # ISO datetime string - kdy byl tiket vytvořen
+    horizon_note: Optional[str] = None  # appka to vyplní, jen když musela hledat mimo uživatelem vybraný časový rámec (viz generate_tickets/regenerate_tickets)
     selections: list[SelectionResponse]
 
     @classmethod
     def from_domain(cls, ticket: Ticket, ticket_id: Optional[int] = None, status: str = "pending",
                      live_alert: Optional[str] = None, actual_stake_amount: Optional[float] = None,
                      actual_odds: Optional[float] = None, actual_profit_loss: Optional[float] = None,
-                     created_at: Optional[str] = None) -> "TicketResponse":
+                     created_at: Optional[str] = None, horizon_note: Optional[str] = None) -> "TicketResponse":
         return cls(
             ticket_id=ticket_id,
             ticket_type=ticket.ticket_type,
@@ -397,6 +398,7 @@ class TicketResponse(BaseModel):
             actual_odds=actual_odds,
             actual_profit_loss=actual_profit_loss,
             created_at=created_at,
+            horizon_note=horizon_note,
             selections=[SelectionResponse.from_domain(s) for s in ticket.selections],
         )
 
@@ -1254,17 +1256,34 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     # FILTR: Odstranit zápasy v MINULOSTI (NEW!)
     matches = _filter_future_matches(matches, buffer_minutes=5)
 
-    # appka DŘÍV tady sama (potichu) rozšiřovala časový rámec o +3 dny,
-    # když měla málo zápasů/kandidátů — uživatel si ale vybral konkrétní
-    # časový rámec (třeba "1 den") a dostal zpátky tiket se zápasy klidně
-    # 4 dny dopředu, aniž by o tom appka řekla jediné slovo. Appka teď
-    # vybraný rámec respektuje striktně — když z něj nejde sestavit
-    # tiket, appka to poctivě řekne (viz "Tiket se nepovedl" hláška) a
-    # rozšíření nechá NA UŽIVATELI (tlačítka 2/3/4 dny), ne na sobě potichu.
+    horizon_note = None
     result = ticket_generator.generate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
         pool_filter=_pool_filter_for_risk(req.risk_level),
     )
+
+    # Appka dřív tohle rozšíření dělala TICHOU — uživatel si vybral "1 den"
+    # a dostal zpátky tiket se zápasy klidně 4 dny dopředu, aniž by o tom
+    # appka řekla jediné slovo. Teď to appka pořád zkusí (ať appka nenechá
+    # uživatele zbytečně čekat na "nic nenašla", i když je opravdu ochotná
+    # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
+    # co appka reálně udělala.
+    if result["safe"] is None:
+        wider_days = req.time_frame_days + 3
+        wider_matches = _fetch_candidate_matches(req.sports, wider_days)
+        wider_matches = [m for m in wider_matches if m.match_id not in exclude_ids]
+        wider_matches = _filter_future_matches(wider_matches, buffer_minutes=5)
+        wider_result = ticket_generator.generate(
+            wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
+            pool_filter=_pool_filter_for_risk(req.risk_level),
+        )
+        if wider_result["safe"] is not None:
+            result = wider_result
+            horizon_note = (
+                f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
+                f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+            )
 
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
@@ -1273,8 +1292,8 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
         _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
     return TicketPairResponse(
-        safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
-        aggressive=TicketResponse.from_domain(result["aggressive"]) if result["aggressive"] else None,
+        safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
+        aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
     )
 
 
@@ -1292,12 +1311,30 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
     # FILTR: Odstranit zápasy v MINULOSTI (NEW!)
     matches = _filter_future_matches(matches, buffer_minutes=5)
 
-    # Appka stejně jako v generate_tickets vybraný časový rámec striktně
-    # respektuje, žádné tiché rozšiřování o +3 dny — viz komentář tam.
+    horizon_note = None
     result = ticket_generator.regenerate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
         pool_filter=_pool_filter_for_risk(req.risk_level),
     )
+
+    # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
+    # zkusí, ale vždycky to řekne přes horizon_note.
+    if result["safe"] is None:
+        wider_days = req.time_frame_days + 3
+        wider_matches = _fetch_candidate_matches(req.sports, wider_days)
+        wider_matches = [m for m in wider_matches if m.match_id not in combined_exclude]
+        wider_matches = _filter_future_matches(wider_matches, buffer_minutes=5)
+        wider_result = ticket_generator.regenerate(
+            wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
+            pool_filter=_pool_filter_for_risk(req.risk_level),
+        )
+        if wider_result["safe"] is not None:
+            result = wider_result
+            horizon_note = (
+                f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
+                f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+            )
 
     used_ids = [s.match_id for t in result.values() if t for s in t.selections]
     repo.set_last_batch(user_id, used_ids)
@@ -1306,8 +1343,8 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
         _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
     return TicketPairResponse(
-        safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
-        aggressive=TicketResponse.from_domain(result["aggressive"]) if result["aggressive"] else None,
+        safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
+        aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
     )
 
 
