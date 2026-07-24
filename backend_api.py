@@ -1465,30 +1465,20 @@ def check_duplicate_matches(req: dict = Body(...), user_id: int = Depends(get_cu
 @app.get("/tickets/saved", response_model=list[TicketResponse])
 def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
     """
-    Appka před vrácením historie zkusí dosettlovat tikety uživatele, co
-    jsou ještě 'pending' — takže i bez čekání na cron (/tickets/settle)
-    uvidíš čerstvý stav, hned jak si historii otevřeš PO skončení zápasů.
+    Appka VRACÍ historii přímo z DB, bez čekání na kontrolu živých
+    zápasů — dřív appka před vrácením odpovědi dosettlovávala VŠECHNY
+    pending tikety synchronně (volání API-Football pro každou nohu
+    každého nevyřešeného tiketu), což při víc rozehraných tiketech
+    natahovalo načtení Historie na několik sekund i víc. Appka teď
+    settlování dělá odděleně (viz POST /tickets/settle, appka ho volá
+    z frontendu na pozadí, nebo pravidelný cron) — Historie se díky
+    tomu vždycky zobrazí okamžitě, i když stav pár posledních tiketů
+    může být pár minut starý.
 
     user_id appka bere VÝHRADNĚ z přihlašovacího tokenu — nikdy ne z
     parametru v URL, jinak by si kdokoli mohl jen změnit číslo v adrese
     a prohlížet si cizí tikety.
     """
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    pending_rows = [row for row in repo.get_saved_tickets(user_id) if row["status"] == "pending"]
-
-    def _settle_row(row):
-        selection_ids = [s.get("id") for s in row.get("selections", [])]
-        return row["ticket_id"], _try_settle_ticket(provider, row["ticket"], selection_ids)
-
-    # Appka víc nevyřešených tiketů appka řeší SOUBĚŽNĚ — appka to dřív
-    # dělala jeden po druhém, což při víc rozehraných tiketech zbytečně
-    # natahovalo dobu, než se Historie vůbec zobrazila.
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for ticket_id, new_status in executor.map(_settle_row, pending_rows):
-            if new_status is not None:
-                repo.set_ticket_status(ticket_id, new_status)
-                repo.set_live_alert(ticket_id, None)
-
     saved_rows = repo.get_saved_tickets(user_id)
     print(f"[DEBUG] /tickets/saved: Backend vrací CELKEM {len(saved_rows)} tiketů pro user_id={user_id}")
     pending_in_response = [r for r in saved_rows if r["status"] == "pending"]
@@ -1843,114 +1833,31 @@ def update_selection_result(selection_id: int, req: SelectionResultRequest, user
 @app.post("/tickets/settle")
 def settle_tickets(user_id: int = Depends(get_current_user_id)):
     """
-    Projde pending tikety uživatele a vyhodnotí je podle výsledků z API-Football.
-    Volá se automaticky při otevření záložky Historie.
+    Zkusí dosettlovat pending tikety uživatele podle aktuálních výsledků
+    zápasů z API-Football. Appka tohle dřív dělala synchronně přímo
+    uvnitř GET /tickets/saved (viz komentář tam) — teď appka Historii
+    vrací okamžitě z DB a tohle volá zvlášť/na pozadí, aby se stav
+    postupně dohnal na živé výsledky, aniž by blokoval načtení stránky.
+    Stejná paralelní logika, jakou dřív používalo jen /tickets/saved
+    (viz _try_settle_ticket) — appka ji dřív duplikovala tady zvlášť,
+    pomalejší a bez paralelizace.
     """
     provider = data_provider.get_provider(Sport.FOOTBALL)
-    pending_rows = db.fetch_ticket_rows(user_id=user_id, status="pending")
+    pending_rows = [row for row in repo.get_saved_tickets(user_id) if row["status"] == "pending"]
+
+    def _settle_row(row):
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        return row["ticket_id"], _try_settle_ticket(provider, row["ticket"], selection_ids)
+
     settled = 0
-
-    for row in pending_rows:
-        ticket_id = row["ticket_id"]
-        selections = row.get("selections", [])
-        if not selections:
-            continue
-
-        all_won = True
-        any_lost = False
-        all_finished = True
-
-        for sel in selections:
-            match_id = sel.get("match_id")
-            if not match_id or match_id == 0:
-                all_finished = False
-                continue
-            try:
-                fixture = provider.get_fixture_result(str(match_id))
-                if not fixture:
-                    all_finished = False
-                    continue
-
-                # API-Football vrací skóre v fixture["goals"]["home"] / ["away"]
-                # Status: FT = konec, 1H/2H/HT = probíhá, NS = nezačal
-                status = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
-                if status not in ("FT", "AET", "PEN"):
-                    all_finished = False
-                    continue
-
-                home_score = fixture.get("goals", {}).get("home")
-                away_score = fixture.get("goals", {}).get("away")
-
-                if home_score is None or away_score is None:
-                    all_finished = False
-                    continue
-
-                sel_won = _evaluate_selection(sel, {"home_score": home_score, "away_score": away_score})
-                if sel_won is None:
-                    all_finished = False
-                elif not sel_won:
-                    any_lost = True
-                    all_won = False
-
-                # Ulož výsledek jednotlivého výběru — hledej id různými způsoby
-                sel_id = sel.get("id") or sel.get("selection_id")
-                if sel_id:
-                    sel_result = "won" if sel_won is True else "lost" if sel_won is False else "pending"
-                    db.update_selection_result(int(sel_id), sel_result)
-                else:
-                    pass  # Selection bez ID - nelze uložit
-            
-            except Exception as e:
-                all_finished = False
-
-        if all_finished:
-            new_status = "won" if (all_won and not any_lost) else "lost"
-            db.update_ticket_status(ticket_id, new_status)
-            if row.get("actual_stake_amount"):
-                db.update_ticket_profit_loss(
-                    ticket_id,
-                    row["actual_stake_amount"],
-                    row.get("actual_odds") or row.get("total_odds", 1),
-                    new_status
-                )
-            settled += 1
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for ticket_id, new_status in executor.map(_settle_row, pending_rows):
+            if new_status is not None:
+                repo.set_ticket_status(ticket_id, new_status)
+                repo.set_live_alert(ticket_id, None)
+                settled += 1
 
     return {"settled": settled, "checked": len(pending_rows)}
-
-
-def _evaluate_selection(sel: dict, result: dict) -> Optional[bool]:
-    """Vyhodnotí jeden výběr podle výsledku zápasu. Vrátí True/False/None (neznámý)."""
-    market = sel.get("market_type", "")
-    selection = sel.get("selection", "")
-    home_score = result.get("home_score")
-    away_score = result.get("away_score")
-
-    if home_score is None or away_score is None:
-        return None
-
-    total_goals = home_score + away_score
-
-    if market == "match_winner":
-        if selection == "home":
-            return home_score > away_score
-        elif selection == "away":
-            return away_score > home_score
-        elif selection in ("draw", "x"):
-            return home_score == away_score
-
-    elif market == "over_goals":
-        try:
-            line = float(selection.replace("over_", "").replace("under_", "").replace("over ", "").replace("under ", ""))
-            if selection.startswith("under"):
-                return total_goals < line
-            return total_goals > line
-        except Exception:
-            return None
-
-    elif market == "btts":
-        return home_score > 0 and away_score > 0
-
-    return None
 
 
 @app.delete("/admin/cache")
