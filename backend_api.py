@@ -2458,6 +2458,31 @@ def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
     return {"copied_count": len(copied), "skipped_duplicates": len(rows) - len(copied), "copied": copied}
 
 
+@app.get("/admin/export-db")
+def admin_export_db(request: Request):
+    """
+    Nouzový export celé databáze jako JSON (všechny tabulky, syrové řádky).
+    Appka běží na Renderu, kde je Postgres port zablokovaný pro spojení
+    zvenčí appčina vývojového prostředí — přímý pg_dump odtud nejde, tenhle
+    endpoint appce umožní stáhnout zálohu přes obyčejné HTTPS.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    tables = [
+        "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
+        "token_transactions", "redeem_codes", "redeem_code_uses",
+        "stripe_events", "password_reset_tokens", "telegram_subscribers",
+    ]
+    dump = {}
+    with db.get_cursor() as cur:
+        for table in tables:
+            cur.execute(f"SELECT * FROM {table}")
+            dump[table] = [dict(row) for row in cur.fetchall()]
+    return json.loads(json.dumps(dump, default=str))
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
