@@ -1502,27 +1502,103 @@ class APIFootballProvider(SportsDataProvider):
         return data
 
     def get_fixture_result(self, match_id: str) -> dict:
-        """Finální (nebo aktuální) skóre a stav konkrétního zápasu — appka
-        to používá k dosettlování tiketů po skončení utkání."""
+        """
+        Finální (nebo aktuální) skóre a stav konkrétního zápasu — appka
+        to používá k dosettlování tiketů po skončení utkání. Volá se pro
+        KAŽDOU nohu KAŽDÉHO nevyřešeného tiketu při KAŽDÉM otevření
+        Historie (viz /tickets/saved) — bez cache appka tenhle jeden
+        zápas zjišťovala znovu při každém dalším otevření appky (u
+        libovolného uživatele, co ho má v tiketu), i kdyby se od
+        posledního dotazu vůbec nic nezměnilo. Krátké TTL (appka chce
+        včasný výsledek po skončení zápasu, ne zastaralý o hodiny).
+        """
+        cache_key = f"fixture_result:{match_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                result = db_cached[0] if isinstance(db_cached, list) and db_cached else db_cached if isinstance(db_cached, dict) else {}
+                self._cache.set(cache_key, result)
+                return result
+        except Exception:
+            pass
         response = self._get("/fixtures", {"id": match_id})
-        return response[0] if response else {}
+        data = response[0] if response else {}
+        self._cache.set(cache_key, data)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, [data] if data else [], ttl_seconds=10 * 60)  # 10 minut — appka chce brzy vidět čerstvý výsledek, ne ho jen šetřit navěky
+        except Exception:
+            pass
+        return data
 
     def get_injuries(self, match_id: str) -> list[dict]:
         """
         Hráči nahlášení jako zranění/vyloučení pro konkrétní zápas. POZOR:
         appka z toho umí spočítat jen POČET jmen, ne jejich důležitost pro
-        tým — viz injury_goal_adjustment_factor.
+        tým — viz injury_goal_adjustment_factor. Volá se při KAŽDÉM
+        generování tiketu pro KAŽDÉHO kandidáta zvlášť, bez cache appka
+        tohle zjišťovala znovu při každém požadavku, i napříč různými
+        uživateli se stejným zápasem v poolu.
         """
-        return self._get("/injuries", {"fixture": match_id})
+        cache_key = f"injuries:{match_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        data = self._get("/injuries", {"fixture": match_id})
+        self._cache.set(cache_key, data)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, data, ttl_seconds=3 * 3600)  # sestava/zranění se do zápasu obvykle nemění po hodinách
+        except Exception:
+            pass
+        return data
 
     def get_standings(self, league_id: str, season: int) -> list[dict]:
-        """Aktuální tabulka soutěže — appka to používá k odhadu, jestli
-        už pro některý z týmů nejde "o nic" (viz adapt_standings_for_motivation)."""
+        """
+        Aktuální tabulka soutěže — appka to používá k odhadu, jestli už
+        pro některý z týmů nejde "o nic" (viz adapt_standings_for_motivation).
+        Volá se při KAŽDÉM generování tiketu pro každou ligu v poolu
+        (appka to sice v rámci JEDNOHO požadavku sdílí přes standings_cache
+        v backend_api.py, ale bez tyhle DB cache appka tabulku znovu
+        stahovala při KAŽDÉM DALŠÍM požadavku i pro tu samou ligu). Tabulka
+        soutěže se mění jen po odehraných kolech, ne v řádu hodin.
+        """
+        cache_key = f"standings:{league_id}:{season}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
         response = self._get("/standings", {"league": league_id, "season": season})
         try:
-            return response[0]["league"]["standings"][0]
+            data = response[0]["league"]["standings"][0]
         except (IndexError, KeyError, TypeError):
-            return []
+            data = []
+        self._cache.set(cache_key, data)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, data, ttl_seconds=24 * 3600)  # tabulka se mění jen po odehraných kolech
+        except Exception:
+            pass
+        return data
 
 
 # ---------------------------------------------------------------------
