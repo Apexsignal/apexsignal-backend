@@ -495,10 +495,25 @@ def fetch_ticket_rows(user_id: Optional[int] = None, status: Optional[str] = Non
     with get_cursor() as cur:
         cur.execute(f"SELECT * FROM tickets {where_sql} ORDER BY id", params)
         ticket_rows = cur.fetchall()
+
+        # Appka dřív natahovala selections JEDNÍM dotazem PRO KAŽDÝ tiket
+        # zvlášť (N+1) — appka místo toho natáhne všechny naráz jedním
+        # dotazem a rozdělí je v Pythonu podle ticket_id. U historie
+        # s desítkami tiketů to appce ušetří desítky zbytečných DB
+        # roundtripů na každé volání.
+        ticket_ids = [trow["id"] for trow in ticket_rows]
+        sel_by_ticket: dict[int, list[dict]] = {tid: [] for tid in ticket_ids}
+        if ticket_ids:
+            cur.execute(
+                "SELECT * FROM ticket_selections WHERE ticket_id = ANY(%s) ORDER BY ticket_id, id",
+                (ticket_ids,),
+            )
+            for sr in cur.fetchall():
+                sel_by_ticket[sr["ticket_id"]].append(sr)
+
         result = []
         for trow in ticket_rows:
-            cur.execute("SELECT * FROM ticket_selections WHERE ticket_id = %s ORDER BY id", (trow["id"],))
-            sel_rows = cur.fetchall()
+            sel_rows = sel_by_ticket[trow["id"]]
             row_dict = _row_to_dict(trow, sel_rows)
             row_dict["selections"] = [
                 {
