@@ -2139,6 +2139,142 @@ def run_daily_tickets(request: Request):
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
 
+TRANSPARENCY_STAKE = 500.0
+
+
+@app.post("/admin/transparency-daily-tickets")
+def run_transparency_daily_tickets(request: Request):
+    """
+    Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
+    denně vygeneruje 1 kratky + 1 stredni tiket (v pátek navíc 1 boost),
+    na každý appka automaticky vsadí pevných 500 Kč — appka tenhle účet
+    nikdy nemaskuje ani neupravuje, jde čistě o transparentní ukázku
+    appčina výkonu (viz GET /public/transparency). Odděleno od
+    DAILY_TICKETS_USER_ID (appky vlastní účet pro Telegram/showcase) —
+    appka tenhle nový účet nemíchá s tím starým.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="TRANSPARENCY_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    # Nikdo se na tenhle účet nepřihlašuje, takže appka musí dosettlovat
+    # stará pending sama — jinak by se tikety navěky nevyhodnotily
+    # (viz stejná poznámka u run_daily_tickets výše).
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+    settled_count = 0
+    for row in pending_rows:
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+        if new_status is not None:
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            repo.set_live_alert(row["ticket_id"], None)
+            settled_count += 1
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+    plan = [("kratky", 20, 2), ("stredni", 50, 2)]
+    if today_prague.weekday() == 4:  # pátek
+        plan.append(("boost", 80, 5))
+
+    results = []
+    for label, risk_level, days in plan:
+        already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+        if already_today > 0:
+            results.append({"type": label, "status": "already_generated_today"})
+            continue
+        try:
+            ticket = _generate_one_ticket_for_cron(
+                target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+            )
+        except Exception as e:
+            print(f"[transparency-daily-tickets] {label}: generování selhalo: {e}")
+            results.append({"type": label, "status": "generation_error", "error": str(e)})
+            continue
+        if ticket is None:
+            results.append({"type": label, "status": "failed_to_generate"})
+            continue
+
+        ticket_id = repo.save_ticket(target_user_id, ticket)
+        repo.set_actual_stake(ticket_id, TRANSPARENCY_STAKE, ticket.total_odds)
+        results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE})
+
+    return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+
+
+@app.get("/public/transparency")
+def public_transparency(limit: int = 100):
+    """
+    Zcela veřejný, bez přihlášení dostupný přehled appčina transparentního
+    účtu (TRANSPARENCY_USER_ID) — appka ukazuje ÚPLNĚ VŠECHNY tikety, i
+    prohrané (na rozdíl od /showcase/tickets, co ukazuje jen výhry) —
+    smysl je transparentnost, ne reklama. Appka ale u tiketů, co ještě
+    nejsou vyhodnocené (pending/live), NEUKAZUJE konkrétní zápasy ani
+    výběry — jen kolik tipů tiket má, jaký má kurz a kolik je vsazeno.
+    Jakmile appka tiket vyhodnotí (výhra/prohra), výběry appka odhalí
+    natrvalo. Appka tohle dělá, aby nikdo nemohl z appky "okopírovat"
+    tip dřív, než appka sama rozhodne o výsledku.
+    """
+    limit = max(1, min(limit, 200))
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        return {"tickets": [], "stats": None}
+    target_user_id = int(target_user_id_raw)
+
+    rows = repo.get_saved_tickets(target_user_id)
+    rows.sort(key=lambda r: r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    rows = rows[:limit]
+
+    tickets = []
+    for r in rows:
+        ticket = r["ticket"]
+        created_at = r.get("created_at")
+        status = r["status"]
+        resolved = status in ("won", "lost")
+        entry = {
+            "ticket_id": r["ticket_id"],
+            "ticket_type": ticket.ticket_type,
+            "status": status,
+            "total_odds": ticket.total_odds,
+            "stake": r.get("actual_stake_amount"),
+            "profit": r.get("actual_profit_loss") if resolved else None,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "selection_count": len(ticket.selections),
+        }
+        if resolved:
+            entry["selections"] = [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                    "selection": s.selection, "odds": s.odds,
+                    "league": s.league, "country": s.country,
+                }
+                for s in ticket.selections
+            ]
+        else:
+            entry["selections"] = None  # appka výběry schválně skrývá, dokud tiket neskončí
+        tickets.append(entry)
+
+    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r.get("actual_stake_amount") is not None]
+    won_rows = [r for r in resolved_rows if r["status"] == "won"]
+    total_staked = sum(r["actual_stake_amount"] for r in resolved_rows)
+    total_profit = sum(r.get("actual_profit_loss") or 0 for r in resolved_rows)
+    stats = {
+        "resolved_count": len(resolved_rows),
+        "won_count": len(won_rows),
+        "win_rate_pct": round(len(won_rows) / len(resolved_rows) * 100, 1) if resolved_rows else None,
+        "total_staked": total_staked,
+        "total_profit": round(total_profit, 2),
+        "roi_pct": round(total_profit / total_staked * 100, 1) if total_staked else None,
+    }
+    return {"tickets": tickets, "stats": stats}
+
+
 def _todays_client_picks(target_user_id: int) -> list[dict]:
     """Vybere z dnešních uložených tiketů appkina automatického účtu
     (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni, v pátek
