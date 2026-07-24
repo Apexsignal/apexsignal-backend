@@ -2205,31 +2205,89 @@ def run_daily_tickets(request: Request):
             except Exception as e:
                 results.append({"type": "top4_wife", "status": f"error: {e}", "ticket_id": ticket_id})
 
-    # Odběratelé, co appce napsali /start na Telegramu (viz /telegram/webhook)
-    # — každému appka denně pošle 1 nejlepší kratky + 1 nejlepší stredni,
-    # v pátek navíc nejlepší boost. Nezávislé na manželčině TOP4 výběru
-    # výše (jiný účel: pravidelný předplacený balíček pro klienty).
-    subscriber_chat_ids = db.get_active_telegram_subscribers()
-    if subscriber_chat_ids and generated_today:
-        def _best(ticket_type):
-            candidates = [t for t in generated_today if t[0].ticket_type == ticket_type]
-            return max(candidates, key=lambda t: t[0].combined_probability) if candidates else None
-
-        client_picks = [p for p in (_best("kratky"), _best("stredni")) if p is not None]
-        if today_prague.weekday() == 4:  # pátek
-            boost_pick = _best("boost")
-            if boost_pick is not None:
-                client_picks.append(boost_pick)
-
-        for chat_id in subscriber_chat_ids:
-            for ticket, ticket_id in client_picks:
-                try:
-                    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id), chat_id=chat_id)
-                    results.append({"type": "client_subscriber", "status": "sent", "ticket_id": ticket_id, "chat_id": chat_id})
-                except Exception as e:
-                    results.append({"type": "client_subscriber", "status": f"error: {e}", "chat_id": chat_id})
+    # Odběratelům z Telegram webhooku appka NEPOSÍLÁ nic automaticky —
+    # per rozhodnutí appka nejdřív čeká na ruční schválení (viz
+    # /admin/client-tickets-preview a /admin/client-tickets-send níže),
+    # ať jde vždycky zkontrolovat, co se klientovi pošle, PŘED odesláním.
 
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+
+
+def _todays_client_picks(target_user_id: int) -> list[dict]:
+    """Vybere z dnešních uložených tiketů appkina automatického účtu
+    (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni, v pátek
+    navíc nejlepší boost — stejný výběr pro náhled i pro odeslání."""
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+
+    rows = [r for r in repo.get_saved_tickets(target_user_id) if r["created_at"] >= today_start_utc_naive]
+
+    def _best(ticket_type):
+        candidates = [r for r in rows if r["ticket"].ticket_type == ticket_type]
+        return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
+
+    picks = [p for p in (_best("kratky"), _best("stredni")) if p is not None]
+    if today_prague.weekday() == 4:  # pátek
+        boost_pick = _best("boost")
+        if boost_pick is not None:
+            picks.append(boost_pick)
+    return picks
+
+
+@app.get("/admin/client-tickets-preview")
+def client_tickets_preview(request: Request):
+    """Ukáže, co by appka DNES poslala odběratelům (bez odeslání) — ke
+    kontrole před /admin/client-tickets-send."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+
+    picks = _todays_client_picks(int(target_user_id_raw))
+    subscriber_count = len(db.get_active_telegram_subscribers())
+    return {
+        "subscriber_count": subscriber_count,
+        "picks": [
+            {
+                "ticket_id": r["ticket_id"],
+                "ticket_type": r["ticket"].ticket_type,
+                "total_odds": r["ticket"].total_odds,
+                "combined_probability": r["ticket"].combined_probability,
+                "selections": [f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds})" for s in r["ticket"].selections],
+            }
+            for r in picks
+        ],
+    }
+
+
+@app.post("/admin/client-tickets-send")
+def client_tickets_send(request: Request):
+    """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle
+    dnešní výběr všem aktivním odběratelům z Telegram webhooku."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+
+    picks = _todays_client_picks(int(target_user_id_raw))
+    subscriber_chat_ids = db.get_active_telegram_subscribers()
+
+    results = []
+    for chat_id in subscriber_chat_ids:
+        for r in picks:
+            try:
+                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id)
+                results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": "sent"})
+            except Exception as e:
+                results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": f"error: {e}"})
+
+    return {"picks_sent": [r["ticket_id"] for r in picks], "results": results}
 
 
 TELEGRAM_WELCOME_MESSAGE = (
