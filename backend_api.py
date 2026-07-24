@@ -52,9 +52,9 @@ import stripe
 # druhém — viz _build_football_matches. Volání čekají hlavně na síť
 # (API-Football, Open-Meteo), ne na CPU appky, takže vlákna appce reálně
 # zkrátí celkový čas bez zvýšení spotřeby denní kvóty API (appka udělá
-# stejný POČET volání, jen je nedělá postupně). 8 vláken je kompromis —
+# stejný POČET volání, jen je nedělá postupně). Appka teď zkouší 16 —
 # víc by zase mohlo narazit na limit požadavků za minutu u API-Football.
-FIXTURE_ENRICHMENT_WORKERS = 8
+FIXTURE_ENRICHMENT_WORKERS = 16
 
 # Logger setup
 logger = logging.getLogger("apexsignal")
