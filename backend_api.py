@@ -2458,26 +2458,58 @@ def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
     return {"copied_count": len(copied), "skipped_duplicates": len(rows) - len(copied), "copied": copied}
 
 
+ALL_DB_TABLES = [
+    "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
+    "token_transactions", "redeem_codes", "redeem_code_uses",
+    "stripe_events", "password_reset_tokens", "telegram_subscribers",
+]
+# api_cache (nacachované odpovědi z the-odds-api/API-Football) a
+# password_reset_tokens (krátkodobé, časově omezené) appka do výchozí
+# zálohy nezahrnuje — nejsou to reálná uživatelská data a jde o jedinou
+# tabulku appky, co bývá dost velká na to, aby export shodil web service
+# na Renderově free 512MB RAM limitu (OOM restart).
+DEFAULT_BACKUP_TABLES = [t for t in ALL_DB_TABLES if t not in ("api_cache", "password_reset_tokens")]
+
+
+@app.get("/admin/db-stats")
+def admin_db_stats(request: Request):
+    """Počet řádků v každé tabulce — appka tímhle před exportem ověří, jestli se dump vejde do paměti."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    counts = {}
+    with db.get_cursor() as cur:
+        for table in ALL_DB_TABLES:
+            cur.execute(f"SELECT count(*) AS n FROM {table}")
+            counts[table] = cur.fetchone()["n"]
+    return counts
+
+
 @app.get("/admin/export-db")
-def admin_export_db(request: Request):
+def admin_export_db(request: Request, tables: str = ""):
     """
-    Nouzový export celé databáze jako JSON (všechny tabulky, syrové řádky).
-    Appka běží na Renderu, kde je Postgres port zablokovaný pro spojení
-    zvenčí appčina vývojového prostředí — přímý pg_dump odtud nejde, tenhle
-    endpoint appce umožní stáhnout zálohu přes obyčejné HTTPS.
+    Nouzový export databáze jako JSON (appka bere syrové řádky tabulka po
+    tabulce). Appka běží na Renderu, kde je Postgres port zablokovaný pro
+    spojení zvenčí appčina vývojového prostředí — přímý pg_dump odtud
+    nejde, tenhle endpoint appce umožní stáhnout zálohu přes obyčejné
+    HTTPS. Výchozí sada appku vynechává 'api_cache' a
+    'password_reset_tokens' (viz DEFAULT_BACKUP_TABLES) kvůli paměťovému
+    limitu free web service — appka je zahrne jen na výslovné přání přes
+    ?tables=api_cache,...
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    tables = [
-        "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
-        "token_transactions", "redeem_codes", "redeem_code_uses",
-        "stripe_events", "password_reset_tokens", "telegram_subscribers",
-    ]
+    requested = [t.strip() for t in tables.split(",") if t.strip()] or DEFAULT_BACKUP_TABLES
+    invalid = [t for t in requested if t not in ALL_DB_TABLES]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Neznámé tabulky: {invalid}")
+
     dump = {}
     with db.get_cursor() as cur:
-        for table in tables:
+        for table in requested:
             cur.execute(f"SELECT * FROM {table}")
             dump[table] = [dict(row) for row in cur.fetchall()]
     return json.loads(json.dumps(dump, default=str))
