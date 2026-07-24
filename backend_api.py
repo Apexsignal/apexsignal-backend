@@ -68,6 +68,8 @@ ALLOWED_ORIGINS = [
     "https://apexsignal-app.netlify.app",
     "https://cheerful-tarsier-f89a91.netlify.app",  # starší doména appky, appka ji nechává pro jistotu funkční
     "https://apexsignal-tickets.netlify.app",  # nový Netlify účet (starému došel kredit, viz 24.7.)
+    "https://apexsignal.cz",  # vlastní doména (Wedos DNS -> Netlify, viz 24.7.)
+    "https://www.apexsignal.cz",
 ]
 app.add_middleware(
     CORSMiddleware,
