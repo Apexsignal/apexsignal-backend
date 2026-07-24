@@ -30,7 +30,7 @@ import requests
 from probability_model import SelectionCandidate
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 
 
 def review_candidates(candidates: list[SelectionCandidate]) -> list[SelectionCandidate]:
@@ -102,6 +102,11 @@ def review_candidates(candidates: list[SelectionCandidate]) -> list[SelectionCan
         return reviewed if reviewed else candidates
 
     except Exception as exc:  # noqa: BLE001 — tahle vrstva nikdy nesmí appku shodit
+        # Appka tuhle chybu MUSÍ vidět v logu — appka jednou (neplatné jméno
+        # modelu) tuhle kontrolu appce potichu vůbec neprováděla celou dobu
+        # a nikdo si toho nevšiml, protože appka vracela candidates beze
+        # změny a appka tak vypadala, že "prostě nic nenašla".
+        print(f"[ai_reviewer] Kontrola čerstvých zpráv selhala, appka vrací kandidáty beze změny: {exc}")
         return candidates
 
 
