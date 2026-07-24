@@ -67,6 +67,7 @@ app = FastAPI(title="ApexSignal API", version="0.1.0")
 ALLOWED_ORIGINS = [
     "https://apexsignal-app.netlify.app",
     "https://cheerful-tarsier-f89a91.netlify.app",  # starší doména appky, appka ji nechává pro jistotu funkční
+    "https://apexsignal-tickets.netlify.app",  # nový Netlify účet (starému došel kredit, viz 24.7.)
 ]
 app.add_middleware(
     CORSMiddleware,
