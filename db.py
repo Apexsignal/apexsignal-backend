@@ -11,6 +11,7 @@ from typing import Optional
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 
 def _get_dsn() -> str:
@@ -26,10 +27,33 @@ def _get_dsn() -> str:
     return url
 
 
+# Appka dřív otvírala NOVÉ TCP připojení k Postgresu na úplně KAŽDÝ dotaz
+# (get_cursor() volalo psycopg2.connect() pokaždé znovu) — u Historie,
+# co appka souběžně vyhodnocuje desítky výběrů najednou (viz
+# _try_settle_ticket v backend_api.py), to znamenalo klidně 30-60 nových
+# připojení najednou jen pro jedno otevření Historie. Pool appce dovolí
+# připojení znovupoužívat mezi requesty.
+_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        # maxconn 40: appka umí souběžně vyhodnocovat až 4 tikety × 8 výběrů
+        # (viz SETTLE_LEG_WORKERS v backend_api.py) = špička 32 souběžných
+        # připojení jen z jednoho requestu na Historii, plus rezerva pro
+        # ostatní současné requesty.
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            2, 40, _get_dsn(), cursor_factory=psycopg2.extras.RealDictCursor
+        )
+    return _pool
+
+
 @contextmanager
 def get_cursor():
-    """Context manager pro DB připojení."""
-    conn = psycopg2.connect(_get_dsn(), cursor_factory=psycopg2.extras.RealDictCursor)
+    """Context manager pro DB připojení — bere/vrací spojení z poolu místo navazování nového."""
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
         cur = conn.cursor()
         yield cur
@@ -39,7 +63,7 @@ def get_cursor():
         raise
     finally:
         cur.close()
-        conn.close()
+        pool.putconn(conn)
 
 
 SCHEMA = """
