@@ -2205,7 +2205,80 @@ def run_daily_tickets(request: Request):
             except Exception as e:
                 results.append({"type": "top4_wife", "status": f"error: {e}", "ticket_id": ticket_id})
 
+    # Odběratelé, co appce napsali /start na Telegramu (viz /telegram/webhook)
+    # — každému appka denně pošle 1 nejlepší kratky + 1 nejlepší stredni,
+    # v pátek navíc nejlepší boost. Nezávislé na manželčině TOP4 výběru
+    # výše (jiný účel: pravidelný předplacený balíček pro klienty).
+    subscriber_chat_ids = db.get_active_telegram_subscribers()
+    if subscriber_chat_ids and generated_today:
+        def _best(ticket_type):
+            candidates = [t for t in generated_today if t[0].ticket_type == ticket_type]
+            return max(candidates, key=lambda t: t[0].combined_probability) if candidates else None
+
+        client_picks = [p for p in (_best("kratky"), _best("stredni")) if p is not None]
+        if today_prague.weekday() == 4:  # pátek
+            boost_pick = _best("boost")
+            if boost_pick is not None:
+                client_picks.append(boost_pick)
+
+        for chat_id in subscriber_chat_ids:
+            for ticket, ticket_id in client_picks:
+                try:
+                    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id), chat_id=chat_id)
+                    results.append({"type": "client_subscriber", "status": "sent", "ticket_id": ticket_id, "chat_id": chat_id})
+                except Exception as e:
+                    results.append({"type": "client_subscriber", "status": f"error: {e}", "chat_id": chat_id})
+
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+
+
+TELEGRAM_WELCOME_MESSAGE = (
+    "Ahoj! 👋 Vítej u ApexSignal.\n\n"
+    "Od teď ti sem budu každé ráno posílat:\n"
+    "🎫 1× krátký tiket\n"
+    "🎫 1× střední tiket\n"
+    "🔥 každý pátek navíc BOOST tiket (vyšší kurz, TOP výběr týdne)\n\n"
+    "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
+    "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
+    "co sází místo tebe.\n\n"
+    "Ať se daří! ⚽"
+)
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Telegram appce POSTuje sem každou novou zprávu (appka má nastavený
+    webhook přes setWebhook, misto rucniho pollovani getUpdates) — appka
+    díky tomu umí SAMA (bez zásahu admina) přivítat nového klienta a
+    zapsat si jeho chat_id do telegram_subscribers, jakmile appce napíše
+    /start. Volitelně zabezpečeno TELEGRAM_WEBHOOK_SECRET (Telegram ho
+    posílá zpátky v hlavičce X-Telegram-Bot-Api-Secret-Token).
+    """
+    secret_expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if secret_expected and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret_expected:
+        raise HTTPException(status_code=403, detail="Neplatný webhook secret")
+
+    update = await request.json()
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    print(f"[telegram-webhook] chat_id={chat_id} name={chat.get('first_name')!r} text={text!r}")
+
+    if chat_id and text == "/start":
+        is_new = db.add_telegram_subscriber(chat_id, chat.get("first_name"))
+        if is_new:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+                    json={"chat_id": chat_id, "text": TELEGRAM_WELCOME_MESSAGE},
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"[telegram-webhook] chyba při odesílání uvítací zprávy: {e}")
+
+    return {"ok": True}
 
 
 class AdminSeedShowcaseRequest(BaseModel):

@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     used BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP DEFAULT now()
 );
+
+-- Lidé, co appce napsali /start na Telegramu — appka jim pak denně
+-- posílá 1 kratky + 1 stredni tiket (a v pátek navíc boost), viz
+-- run_daily_tickets. chat_id appka zjistí automaticky z webhooku,
+-- žádné ruční dohledávání přes getUpdates.
+CREATE TABLE IF NOT EXISTS telegram_subscribers (
+    chat_id BIGINT PRIMARY KEY,
+    first_name VARCHAR(255),
+    active BOOLEAN NOT NULL DEFAULT true,
+    joined_at TIMESTAMP DEFAULT now()
+);
 """
 
 
@@ -691,3 +702,26 @@ def redeem_code(code: str, user_id: int) -> dict:
             (user_id, row["tokens"], f"REDEEM_CODE:{code}"),
         )
         return {"ok": True, "tokens": row["tokens"], "balance": new_balance}
+
+
+def add_telegram_subscriber(chat_id: int, first_name: Optional[str]) -> bool:
+    """Uloží/obnoví odběratele denních tiketů na Telegramu. Vrací True, pokud jde o NOVÉHO
+    odběratele (appka mu má poslat uvítací zprávu), False, pokud tam chat_id už bylo."""
+    with get_cursor() as cur:
+        cur.execute("SELECT 1 FROM telegram_subscribers WHERE chat_id = %s", (chat_id,))
+        is_new = cur.fetchone() is None
+        cur.execute(
+            """
+            INSERT INTO telegram_subscribers (chat_id, first_name, active)
+            VALUES (%s, %s, true)
+            ON CONFLICT (chat_id) DO UPDATE SET active = true, first_name = EXCLUDED.first_name
+            """,
+            (chat_id, first_name),
+        )
+        return is_new
+
+
+def get_active_telegram_subscribers() -> list[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT chat_id FROM telegram_subscribers WHERE active = true")
+        return [row["chat_id"] for row in cur.fetchall()]
