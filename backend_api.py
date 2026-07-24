@@ -2402,6 +2402,61 @@ def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
     return {"ticket_id": ticket_id, "status": "seeded"}
 
 
+class CopyDailyTicketsRequest(BaseModel):
+    target_user_id: int
+    stake_amount: float
+
+
+@app.post("/admin/copy-daily-tickets-to-user")
+def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
+    """
+    Zkopíruje appkou DNES vygenerované tikety (DAILY_TICKETS_USER_ID —
+    ty, co appka posílá i na hlavní Telegram chat) na konkrétní účet
+    (např. test3), každý s danou sázkou (stejnou pro každý tiket) a
+    stavem 'pending'. Appka duplicity (stejná sada zápasů+tipů, typicky
+    z dvojího běhu cronu za den) vynechá — zkopíruje jen jednu kopii
+    každé unikátní kombinace.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    source_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not source_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+    source_user_id = int(source_user_id_raw)
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    def _signature(ticket):
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket.selections))
+
+    rows = [r for r in repo.get_saved_tickets(source_user_id) if _created_at_utc(r) >= today_start_utc]
+
+    seen_signatures = set()
+    copied = []
+    for row in rows:
+        sig = _signature(row["ticket"])
+        if sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
+        new_ticket_id = repo.save_ticket(req.target_user_id, row["ticket"])
+        repo.set_actual_stake(new_ticket_id, req.stake_amount, row["ticket"].total_odds)
+        copied.append({
+            "new_ticket_id": new_ticket_id,
+            "source_ticket_id": row["ticket_id"],
+            "ticket_type": row["ticket"].ticket_type,
+            "total_odds": row["ticket"].total_odds,
+        })
+
+    return {"copied_count": len(copied), "skipped_duplicates": len(rows) - len(copied), "copied": copied}
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
