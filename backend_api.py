@@ -2218,9 +2218,17 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
     (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni, v pátek
     navíc nejlepší boost — stejný výběr pro náhled i pro odeslání."""
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
-    today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
-    rows = [r for r in repo.get_saved_tickets(target_user_id) if r["created_at"] >= today_start_utc_naive]
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        # repo.get_saved_tickets appka vrací created_at jako tz-aware (UTC) —
+        # na rozdíl od run_daily_tickets výše appka tady srovnává přímo v
+        # Pythonu (ne v SQL), takže obě strany musí mít stejnou "aware"
+        # podobu, jinak Python porovnání spadne (naive vs aware).
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    rows = [r for r in repo.get_saved_tickets(target_user_id) if _created_at_utc(r) >= today_start_utc]
 
     def _best(ticket_type):
         candidates = [r for r in rows if r["ticket"].ticket_type == ticket_type]
