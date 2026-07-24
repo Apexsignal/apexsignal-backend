@@ -245,7 +245,7 @@ def forgot_password(req: ForgotPasswordRequest, request: Request):
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         db.create_password_reset_token(token, user["id"], expires_at)
-        frontend_url = os.environ.get("FRONTEND_URL", "https://cheerful-tarsier-f89a91.netlify.app")
+        frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
         reset_link = f"{frontend_url}/reset-password.html?token={token}"
         try:
             email_service.send_password_reset_email(req.email, reset_link)
@@ -778,7 +778,7 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
         raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
 
     price_kc = req.tokens * TOKEN_KC_VALUE
-    frontend_url = os.environ.get("FRONTEND_URL", "https://cheerful-tarsier-f89a91.netlify.app")
+    frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
     try:
         session = stripe.checkout.Session.create(
             mode="payment",
@@ -2548,7 +2548,7 @@ Pokud obrázek není sázkový tiket: {"selections":[],"overall":"Na obrázku ne
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "max_tokens": 1000,
                 "messages": [{"role": "user", "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": image_b64}},
@@ -2572,7 +2572,7 @@ Pokud obrázek není sázkový tiket: {"selections":[],"overall":"Na obrázku ne
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "max_tokens": 2000,
                 "messages": [{"role": "user", "content": f"""Analyzuj tyto sázkové výběry. Pro každý vyhledej aktuální informace (forma, zranění, vzájemné zápasy) a ohodnoť ho.
 
@@ -2687,7 +2687,7 @@ def generate_signal_text(
 
         # Zavolej Claude API
         request_body = {
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5",
             "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}],
         }
