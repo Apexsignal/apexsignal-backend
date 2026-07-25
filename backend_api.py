@@ -2435,6 +2435,18 @@ def run_transparency_daily_tickets(request: Request):
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
 
+def _ticket_units(total_odds: Optional[float], status: str) -> float:
+    """
+    Výsledek jednoho tiketu při jednotkovém vkladu: výhra vynese kurz
+    mínus vsazená jednotka, prohra sebere celou jednotku. Appka na tomhle
+    staví veřejně vykazovaná čísla místo korun — viz poznámka u
+    profit_units v public_transparency.
+    """
+    if status == "won":
+        return round((total_odds or 0) - 1.0, 2)
+    return -1.0
+
+
 @app.get("/public/transparency")
 def public_transparency(limit: int = 100):
     """
@@ -2469,8 +2481,14 @@ def public_transparency(limit: int = 100):
             "ticket_type": ticket.ticket_type,
             "status": status,
             "total_odds": ticket.total_odds,
-            "stake": r.get("actual_stake_amount"),
-            "profit": r.get("actual_profit_loss") if resolved else None,
+            # Výsledek appka veřejně vykazuje v JEDNOTKÁCH, ne v korunách:
+            # každý tiket = 1 jednotka vkladu. Uložené actual_stake_amount
+            # jsou u automaticky generovaných tiketů náhodně přiřazené
+            # částky (viz DAILY_TICKETS_STAKE_CHOICES), ne skutečně vsazené
+            # peníze — publikovat je jako reálný vklad by bylo tvrzení,
+            # které neodpovídá skutečnosti. Úspěšnost a ROI přitom zůstávají
+            # nedotčené, protože jsou vlastností VÝBĚRŮ, ne velikosti sázky.
+            "profit_units": _ticket_units(ticket.total_odds, status) if resolved else None,
             "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
             "selection_count": len(ticket.selections),
         }
@@ -2488,19 +2506,31 @@ def public_transparency(limit: int = 100):
             entry["selections"] = None  # appka výběry schválně skrývá, dokud tiket neskončí
         tickets.append(entry)
 
-    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r.get("actual_stake_amount") is not None]
+    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r["ticket"].total_odds]
     won_rows = [r for r in resolved_rows if r["status"] == "won"]
-    total_staked = sum(r["actual_stake_amount"] for r in resolved_rows)
-    total_profit = sum(r.get("actual_profit_loss") or 0 for r in resolved_rows)
+
+    # Křivka kumulativního zisku pro graf — appka ji staví CHRONOLOGICKY
+    # (rows jsou seřazené od nejnovějšího), aby šla vykreslit zleva doprava.
+    equity_curve = []
+    cumulative = 0.0
+    for r in sorted(resolved_rows, key=lambda x: x["created_at"]):
+        cumulative += _ticket_units(r["ticket"].total_odds, r["status"])
+        created_at = r["created_at"]
+        equity_curve.append({
+            "date": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "units": round(cumulative, 2),
+        })
+
     stats = {
         "resolved_count": len(resolved_rows),
         "won_count": len(won_rows),
         "win_rate_pct": round(len(won_rows) / len(resolved_rows) * 100, 1) if resolved_rows else None,
-        "total_staked": total_staked,
-        "total_profit": round(total_profit, 2),
-        "roi_pct": round(total_profit / total_staked * 100, 1) if total_staked else None,
+        # Zisk i ROI při jednotkovém vkladu na každý tiket — ROI je tedy
+        # přímo průměrný výnos na vsazenou jednotku.
+        "units_profit": round(cumulative, 2),
+        "roi_pct": round(cumulative / len(resolved_rows) * 100, 1) if resolved_rows else None,
     }
-    return {"tickets": tickets, "stats": stats}
+    return {"tickets": tickets, "stats": stats, "equity_curve": equity_curve}
 
 
 @app.get("/transparentni-ucet", response_class=HTMLResponse)
@@ -2516,7 +2546,9 @@ def transparency_html(limit: int = 100):
     crawlerovi.
     """
     data = public_transparency(limit=limit)
-    return HTMLResponse(content=transparency_page.render_page(data["tickets"], data["stats"]))
+    return HTMLResponse(
+        content=transparency_page.render_page(data["tickets"], data["stats"], data.get("equity_curve"))
+    )
 
 
 def _todays_client_picks(target_user_id: int) -> list[dict]:
