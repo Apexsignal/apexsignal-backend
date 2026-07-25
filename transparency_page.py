@@ -372,8 +372,6 @@ font-size:.94rem;font-weight:600;border:1px solid var(--accent);color:var(--acce
 .btn:hover{background:var(--accent-glow)}
 .btn-fill{background:var(--accent);color:#fff;border-color:var(--accent)}
 @media (prefers-color-scheme:dark){.btn-fill{color:#0E1319}}
-.btn-disabled{border-color:var(--line);color:var(--muted);cursor:default}
-.btn-disabled:hover{background:transparent}
 .badge-soon{display:inline-block;font-size:.95rem;font-weight:700;letter-spacing:.02em;
 color:var(--muted);background:var(--line-soft);padding:4px 10px;border-radius:4px}
 .offer-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;
@@ -602,14 +600,21 @@ def render_page(
             "Generuješ si sám — vybereš ligy, míru rizika, časový rámec. "
             "Platíš jen za to, co si necháš vygenerovat."
         )
-        app_offer_cta = f'<a class="btn" href="{escape(app_url)}">Otevřít appku</a>'
     else:
-        app_offer_price = '<span class="badge-soon">Připravujeme</span>'
+        # Registrace a přihlášení appka nechává OTEVŘENÉ i bez peněz na
+        # fotbalová data — zamčené je jen samotné generování tiketů (viz
+        # _require_generation_enabled v backend_api.py). Tenhle CTA proto
+        # nesmí být zamčené tlačítko, i když appka "Aplikace" nabídku
+        # zobrazuje jako ještě nedokončenou — jinak appka lidem brání
+        # udělat přesně tu jednu věc (vstoupit, zaregistrovat se), kterou
+        # appka chce, aby mohli.
+        app_offer_price = '<span class="badge-soon">Generování připravujeme</span>'
         app_offer_body = (
-            "Appka na týhle části ještě testuje a doostřuje model, ať vlastní generování "
-            "nespustí dřív, než na to bude spolehlivé. Zatím dostupný jen kanál na Telegramu vlevo."
+            "Registrace a přihlášení fungují už teď. Appka jen ještě testuje a doostřuje "
+            "samotné generování tiketů, ať ho nespustí dřív, než na to bude spolehlivé — "
+            "uvnitř appky to uvidíš stejně napsané."
         )
-        app_offer_cta = '<span class="btn btn-disabled">Brzy dostupné</span>'
+    app_offer_cta = f'<a class="btn" href="{escape(app_url)}">Otevřít appku</a>'
 
     offers = f"""<section>
   <h2>Dvě cesty, jeden model</h2>
