@@ -90,16 +90,25 @@ app.add_middleware(
 # appka bude mít.
 CLIENT_TICKET_GENERATION_ENABLED = os.environ.get("CLIENT_TICKET_GENERATION_ENABLED", "true").strip().lower() != "false"
 
+# Appka i přes globální zámek pustí generování appce vlastním testovacím
+# účtům (viz GENERATION_ALLOWED_USER_IDS v Renderu) — appka si tak umí
+# reálně vyzkoušet appku samotnou, aniž by musela odemknout generování
+# úplně všem a riskovat vyčerpání rozpočtu na fotbalové API.
+GENERATION_ALLOWED_USER_IDS = {
+    int(x) for x in os.environ.get("GENERATION_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
+}
 
-def _require_generation_enabled() -> None:
-    if not CLIENT_TICKET_GENERATION_ENABLED:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Appka vlastní generování i nákup tokenů zatím připravuje a testuje — brzy bude "
-                "dostupné. Mezitím zkus kanál na Telegramu na apexsignal.cz/transparentni-ucet."
-            ),
-        )
+
+def _require_generation_enabled(user_id: Optional[int] = None) -> None:
+    if CLIENT_TICKET_GENERATION_ENABLED or (user_id is not None and user_id in GENERATION_ALLOWED_USER_IDS):
+        return
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Appka vlastní generování i nákup tokenů zatím připravuje a testuje — brzy bude "
+            "dostupné. Mezitím zkus kanál na Telegramu na apexsignal.cz/transparentni-ucet."
+        ),
+    )
 
 
 @app.get("/health")
@@ -809,7 +818,7 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
     # Dokud appka nemá zaplacené API kredity na reálný provoz (viz
     # _require_generation_enabled), nemá smysl pouštět ani nákup tokenů
     # — zákazník by zaplatil za tokeny, které zatím nemá na co utratit.
-    _require_generation_enabled()
+    _require_generation_enabled(user_id)
     if req.tokens < MIN_CUSTOM_TOKENS or req.tokens > MAX_CUSTOM_TOKENS:
         raise HTTPException(status_code=400, detail=f"Počet tokenů musí být mezi {MIN_CUSTOM_TOKENS} a {MAX_CUSTOM_TOKENS}")
     if not stripe.api_key:
@@ -1485,7 +1494,7 @@ def _filter_within_days(matches: list[MatchInput], days: int) -> list[MatchInput
 # =====================================================================
 @app.post("/tickets/generate", response_model=TicketPairResponse)
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
-    _require_generation_enabled()
+    _require_generation_enabled(user_id)
     _check_token_balance(user_id, req.risk_level)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     wider_days = req.time_frame_days + 3
@@ -1541,7 +1550,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
 
 @app.post("/tickets/regenerate", response_model=TicketPairResponse)
 def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
-    _require_generation_enabled()
+    _require_generation_enabled(user_id)
     _check_token_balance(user_id, req.risk_level)
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
