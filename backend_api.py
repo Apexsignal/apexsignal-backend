@@ -2704,7 +2704,8 @@ TELEGRAM_NO_ACCESS_MESSAGE = (
 
 TELEGRAM_LINK_INVALID_MESSAGE = (
     "Tenhle párovací odkaz už neplatí — kódy vydrží hodinu a jdou použít jen jednou.\n\n"
-    "Napiš appce e-mail, kterým jsi platil, appka ti pošle nový: apexsignal.cz/transparentni-ucet"
+    "Na apexsignal.cz/transparentni-ucet je dole formulář — zadej tam e-mail, kterým jsi "
+    "platil, a appka ti hned pošle nový odkaz."
 )
 
 TELEGRAM_EXPIRED_MESSAGE = (
@@ -2825,7 +2826,11 @@ async def telegram_webhook(request: Request):
             sub = db.get_subscription_by_id(subscription_id) or {}
             period_end = sub.get("current_period_end")
             konec = period_end.strftime("%-d. %-m. %Y") if hasattr(period_end, "strftime") else "neznámo"
-            _send_telegram_message(chat_id, f"Předplatné je aktivní. Zaplaceno do {konec}.")
+            _send_telegram_message(
+                chat_id,
+                f"Předplatné je aktivní. Zaplaceno do {konec}.\n\n"
+                "Nic dalšího dělat nemusíš — tikety chodí automaticky každé ráno, v pátek i BOOST.",
+            )
         else:
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
         return {"ok": True}
