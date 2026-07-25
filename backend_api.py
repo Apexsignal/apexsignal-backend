@@ -2483,14 +2483,23 @@ def public_transparency(limit: int = 100):
             "selection_count": len(ticket.selections),
         }
         if resolved:
+            # r["selections"] appka natahuje samostatně (viz db.fetch_ticket_rows)
+            # a obsahuje "result" (won/lost/pending) PER VÝBĚR — na rozdíl od
+            # ticket.selections (Ticket objekt), kde tohle pole není. Appka
+            # veřejně chce ukázat, jestli prohra tiketu byla "o jednu nohu",
+            # nebo jestli nevyšlo skoro nic, takže appka obě sady spáruje
+            # POZIČNĚ (obě appka staví ze stejného seznamu DB řádků, ve
+            # stejném pořadí — viz db.fetch_ticket_rows).
+            raw_selections = r.get("selections") or []
             entry["selections"] = [
                 {
                     "home_team": s.home_team, "away_team": s.away_team,
                     "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
                     "selection": s.selection, "odds": s.odds,
                     "league": s.league, "country": s.country,
+                    "result": raw_selections[i]["result"] if i < len(raw_selections) else None,
                 }
-                for s in ticket.selections
+                for i, s in enumerate(ticket.selections)
             ]
         else:
             entry["selections"] = None  # appka výběry schválně skrývá, dokud tiket neskončí
@@ -2633,7 +2642,13 @@ def client_tickets_preview(request: Request):
                 "ticket_type": r["ticket"].ticket_type,
                 "total_odds": r["ticket"].total_odds,
                 "combined_probability": r["ticket"].combined_probability,
-                "selections": [f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds})" for s in r["ticket"].selections],
+                # Výkop appka do náhledu přidala schválně (viz
+                # _ticket_still_sendable) — bez něj nejde ručně ověřit,
+                # jestli filtr na "ještě nezačaté zápasy" vůbec dělá něco.
+                "selections": [
+                    f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds}) @ {s.kickoff_date} {s.kickoff_time} UTC"
+                    for s in r["ticket"].selections
+                ],
             }
             for r in picks
         ],

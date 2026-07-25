@@ -242,10 +242,27 @@ def _chart_svg(curve: list[dict]) -> str:
 </figure>"""
 
 
+RESULT_ICONS = {"won": "✓", "lost": "✗", "pending": "•"}
+
+# Appka u prohraného tiketu chce ukázat, že to bylo třeba jen o JEDNU
+# nohu, ne že model netrefil skoro nic — proto appka per-výběr výsledek
+# (won/lost/pending), co appka stejně už ukládá do DB, teď zobrazuje i
+# tady, ne jen jako souhrnný status celého tiketu.
+RESULT_LABELS = {
+    "won": "Tenhle výběr vyšel",
+    "lost": "Tenhle výběr nevyšel",
+    "pending": "Appka tenhle výběr nedokázala vyhodnotit ze skóre",
+}
+
+
 def _selection_row(sel: dict) -> str:
     teams = f"{escape(str(sel.get('home_team') or ''))} — {escape(str(sel.get('away_team') or ''))}"
+    result = sel.get("result") or "pending"
+    icon = RESULT_ICONS.get(result, "")
+    label = escape(RESULT_LABELS.get(result, ""))
     return (
         '<li class="sel">'
+        f'<span class="sel-result {result}" role="img" aria-label="{label}" title="{label}">{icon}</span>'
         f'<div class="sel-match"><span class="sel-teams">{teams}</span>'
         f'<span class="sel-league">{escape(str(sel.get("league") or ""))}</span></div>'
         f'<div class="sel-pick"><span class="sel-market">{escape(_market_label(sel.get("market_type")))}</span>'
@@ -428,9 +445,13 @@ border:1px solid var(--line);color:var(--muted)}
 .t-status.won{color:var(--up);border-color:var(--up)}
 .t-status.lost{color:var(--down);border-color:var(--down)}
 .sels{list-style:none;margin:0;padding:0}
-.sel{display:grid;grid-template-columns:1fr auto auto;gap:6px 16px;padding:12px 16px;
+.sel{display:grid;grid-template-columns:auto 1fr auto auto;gap:6px 14px;padding:12px 16px;
 border-bottom:1px solid var(--line-soft);align-items:center}
 .sel:last-child{border-bottom:none}
+.sel-result{width:18px;text-align:center;font-size:.95rem;font-weight:700;line-height:1}
+.sel-result.won{color:var(--up)}
+.sel-result.lost{color:var(--down)}
+.sel-result.pending{color:var(--muted)}
 .sel-match{display:flex;flex-direction:column;gap:2px;min-width:0}
 .sel-teams{font-size:.92rem}.sel-league{font-size:.76rem;color:var(--muted)}
 .sel-pick{display:flex;flex-direction:column;gap:2px;text-align:right}
@@ -448,7 +469,7 @@ border-top:1px solid var(--line-soft);flex-wrap:wrap}
    <footer class="t-foot"> uvnitř každého tiketu a přebil mu směr flexu. */
 .wrap>footer{border-top:1px solid var(--line);padding-top:20px;font-size:.75rem;color:var(--muted);
 line-height:1.8;display:flex;flex-direction:column;gap:10px}
-@media (max-width:560px){.sel{grid-template-columns:1fr auto}.sel-pick{text-align:left}
+@media (max-width:560px){.sel{grid-template-columns:auto 1fr auto}.sel-pick{text-align:left}
 .wrap{gap:36px;padding-top:32px}.chart svg{height:200px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
