@@ -174,6 +174,36 @@ CREATE TABLE IF NOT EXISTS telegram_subscribers (
     active BOOLEAN NOT NULL DEFAULT true,
     joined_at TIMESTAMP DEFAULT now()
 );
+
+-- Měsíční předplatné placeného Telegram kanálu (2 tikety denně + páteční
+-- BOOST). Appka si tady drží stav ze Stripu — zdrojem pravdy je Stripe,
+-- tahle tabulka je jen jeho odraz, který appka aktualizuje z webhooku.
+-- Rozesílka (viz get_paid_telegram_subscribers) se ptá VÝHRADNĚ sem, ne
+-- na telegram_subscribers.active — samotné /start na Telegramu nikomu
+-- přístup k placeným tiketům nedává.
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id                INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    stripe_customer_id     VARCHAR(255),
+    stripe_subscription_id VARCHAR(255) UNIQUE,
+    status                 VARCHAR(32) NOT NULL DEFAULT 'inactive',
+    current_period_end     TIMESTAMPTZ,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub ON subscriptions (stripe_subscription_id);
+
+-- Jednorázový kód, kterým si uživatel spáruje účet v appce se svým
+-- Telegramem. Appka ho vydá přihlášenému uživateli, ten klikne na
+-- t.me/<bot>?start=<kod> a Telegram ho pošle botovi jako "/start <kod>".
+-- Teprve tím appka zjistí, KTERÉMU uživateli dané chat_id patří — bez
+-- toho by appka nikdy nevěděla, jestli za daným Telegramem stojí platba.
+CREATE TABLE IF NOT EXISTS telegram_link_codes (
+    code       VARCHAR(32) PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at    TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -211,6 +241,24 @@ def ensure_schema() -> None:
             cur.execute("ALTER TABLE ticket_selections ADD COLUMN IF NOT EXISTS country VARCHAR(255)")
     except Exception:
         pass
+
+    # telegram_subscribers vzniklo dřív než placený kanál, takže tam vazba
+    # na uživatele chybí — appka ji doplňuje tady. Sloupec je NULLABLE
+    # schválně: řádky z doby před zámkem (kdy /start stačilo k odběru)
+    # zůstanou nespárované, a protože rozesílka platících dělá JOIN přes
+    # user_id, žádný z nich placené tikety nedostane.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE telegram_subscribers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+    except Exception:
+        pass
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_telegram_subscribers_user ON telegram_subscribers (user_id)")
+    except Exception:
+        pass
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
@@ -764,3 +812,235 @@ def get_active_telegram_subscribers() -> list[int]:
     with get_cursor() as cur:
         cur.execute("SELECT chat_id FROM telegram_subscribers WHERE active = true")
         return [row["chat_id"] for row in cur.fetchall()]
+
+
+# =====================================================================
+# Předplatné placeného Telegram kanálu
+#
+# Zdroj pravdy je Stripe. Appka si sem jen zrcadlí stav z webhooku a
+# ptá se odsud při KAŽDÉ rozesílce — nikdy se nespoléhá na to, že si
+# někoho jednou označila jako platícího a už to tak zůstane.
+# =====================================================================
+ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing")
+
+
+def upsert_subscription(
+    user_id: int,
+    status: str,
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    current_period_end: Optional[datetime] = None,
+) -> None:
+    """
+    Zapíše/aktualizuje stav předplatného. COALESCE u ID sloupců appka
+    používá schválně: některé webhook události (např. o zaplacení
+    faktury) nenesou customer/subscription ID, a appka jimi nesmí
+    přepsat hodnoty, které si už dřív uložila z jiné události.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO subscriptions
+                (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, updated_at)
+            VALUES (%s, %s, %s, %s, %s, now())
+            ON CONFLICT (user_id) DO UPDATE SET
+                stripe_customer_id     = COALESCE(EXCLUDED.stripe_customer_id, subscriptions.stripe_customer_id),
+                stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, subscriptions.stripe_subscription_id),
+                status                 = EXCLUDED.status,
+                current_period_end     = COALESCE(EXCLUDED.current_period_end, subscriptions.current_period_end),
+                updated_at             = now()
+            """,
+            (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end),
+        )
+
+
+def update_subscription_by_stripe_id(
+    stripe_subscription_id: str,
+    status: str,
+    current_period_end: Optional[datetime] = None,
+) -> bool:
+    """
+    Aktualizuje předplatné podle Stripe ID — appka tohle potřebuje u
+    událostí o obnovení/zrušení, které nenesou naše user_id, jen Stripe
+    identifikátory. Vrací False, když k danému ID žádný řádek nemáme
+    (pak si volající musí user_id dohledat jinak).
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE subscriptions
+               SET status = %s,
+                   current_period_end = COALESCE(%s, current_period_end),
+                   updated_at = now()
+             WHERE stripe_subscription_id = %s
+            """,
+            (status, current_period_end, stripe_subscription_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_subscription(user_id: int) -> Optional[dict]:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id, stripe_customer_id, stripe_subscription_id, status,
+                   current_period_end, created_at, updated_at
+              FROM subscriptions WHERE user_id = %s
+            """,
+            (user_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def has_active_subscription(user_id: int) -> bool:
+    """
+    Appka pouští placený obsah jen tomu, kdo má stav 'active' (nebo
+    'trialing') A ZÁROVEŇ nevypršené období. Druhá podmínka je pojistka
+    pro případ, že by appce utekl webhook o zrušení — předplatné pak
+    samo dojede na konci zaplaceného období místo aby platilo věčně.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM subscriptions
+             WHERE user_id = %s
+               AND status = ANY(%s)
+               AND (current_period_end IS NULL OR current_period_end > now())
+            """,
+            (user_id, list(ACTIVE_SUBSCRIPTION_STATUSES)),
+        )
+        return cur.fetchone() is not None
+
+
+def get_paid_telegram_subscribers() -> list[dict]:
+    """
+    Chat_id všech, kdo mají PRÁVĚ TEĎ zaplaceno a zároveň spárovaný
+    Telegram. Tímhle appka nahradila get_active_telegram_subscribers()
+    v rozesílce — samotné /start bez platby sem člověka nedostane.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT ts.chat_id, ts.user_id, ts.first_name
+              FROM telegram_subscribers ts
+              JOIN subscriptions s ON s.user_id = ts.user_id
+             WHERE ts.active = true
+               AND ts.user_id IS NOT NULL
+               AND s.status = ANY(%s)
+               AND (s.current_period_end IS NULL OR s.current_period_end > now())
+            """,
+            (list(ACTIVE_SUBSCRIPTION_STATUSES),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_lapsed_telegram_chats() -> list[dict]:
+    """
+    Spárované Telegramy, kterým předplatné doběhlo — appka jim pošle
+    zprávu o vypršení a označí je jako neaktivní (viz
+    /admin/telegram-sync). Bez tohohle kroku by jim sice tikety
+    nechodily, ale nikdy by se nedozvěděli proč.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT ts.chat_id, ts.user_id
+              FROM telegram_subscribers ts
+              LEFT JOIN subscriptions s ON s.user_id = ts.user_id
+             WHERE ts.active = true
+               AND ts.user_id IS NOT NULL
+               AND (
+                    s.user_id IS NULL
+                 OR s.status <> ALL(%s)
+                 OR (s.current_period_end IS NOT NULL AND s.current_period_end <= now())
+               )
+            """,
+            (list(ACTIVE_SUBSCRIPTION_STATUSES),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def set_telegram_chat_active(chat_id: int, active: bool) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE telegram_subscribers SET active = %s WHERE chat_id = %s", (active, chat_id))
+
+
+def create_telegram_link_code(code: str, user_id: int, ttl_minutes: int = 60) -> None:
+    """Vydá jednorázový párovací kód. Starší nepoužité kódy téhož
+    uživatele appka zahodí, ať jich nezůstávají hromady platných."""
+    with get_cursor() as cur:
+        cur.execute("DELETE FROM telegram_link_codes WHERE user_id = %s AND used_at IS NULL", (user_id,))
+        cur.execute(
+            """
+            INSERT INTO telegram_link_codes (code, user_id, expires_at)
+            VALUES (%s, %s, now() + %s * interval '1 minute')
+            """,
+            (code, user_id, ttl_minutes),
+        )
+
+
+def consume_telegram_link_code(code: str) -> Optional[int]:
+    """
+    Uplatní párovací kód a vrátí user_id, kterému patří. Označení za
+    použitý je součástí stejného UPDATE (ne zvlášť SELECT + UPDATE), aby
+    dvě současná /start se stejným kódem nespárovala dva různé Telegramy.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE telegram_link_codes
+               SET used_at = now()
+             WHERE code = %s AND used_at IS NULL AND expires_at > now()
+            RETURNING user_id
+            """,
+            (code,),
+        )
+        row = cur.fetchone()
+        return row["user_id"] if row else None
+
+
+def link_telegram_chat(chat_id: int, user_id: int, first_name: Optional[str]) -> None:
+    """
+    Naváže chat_id na uživatele. Kdyby si tentýž člověk spároval jiný
+    Telegram, appka ten starý odpojí — jedno předplatné = jeden Telegram,
+    jinak by stačilo koupit jedno a rozdat kód známým.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE telegram_subscribers SET user_id = NULL, active = false WHERE user_id = %s AND chat_id <> %s",
+            (user_id, chat_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO telegram_subscribers (chat_id, first_name, active, user_id)
+            VALUES (%s, %s, true, %s)
+            ON CONFLICT (chat_id) DO UPDATE
+                SET active = true, first_name = EXCLUDED.first_name, user_id = EXCLUDED.user_id
+            """,
+            (chat_id, first_name, user_id),
+        )
+
+
+def get_user_id_for_chat(chat_id: int) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT user_id FROM telegram_subscribers WHERE chat_id = %s", (chat_id,))
+        row = cur.fetchone()
+        return row["user_id"] if row else None
+
+
+def get_telegram_chat_id_for_user(user_id: int) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT chat_id FROM telegram_subscribers WHERE user_id = %s AND active = true",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        return row["chat_id"] if row else None
+
+
+def find_user_id_by_stripe_customer(stripe_customer_id: str) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT user_id FROM subscriptions WHERE stripe_customer_id = %s", (stripe_customer_id,))
+        row = cur.fetchone()
+        return row["user_id"] if row else None
