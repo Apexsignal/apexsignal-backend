@@ -2633,7 +2633,13 @@ def client_tickets_preview(request: Request):
                 "ticket_type": r["ticket"].ticket_type,
                 "total_odds": r["ticket"].total_odds,
                 "combined_probability": r["ticket"].combined_probability,
-                "selections": [f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds})" for s in r["ticket"].selections],
+                # Výkop appka do náhledu přidala schválně (viz
+                # _ticket_still_sendable) — bez něj nejde ručně ověřit,
+                # jestli filtr na "ještě nezačaté zápasy" vůbec dělá něco.
+                "selections": [
+                    f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds}) @ {s.kickoff_date} {s.kickoff_time} UTC"
+                    for s in r["ticket"].selections
+                ],
             }
             for r in picks
         ],
