@@ -36,6 +36,25 @@ TICKET_LABELS = {
     "dlouhy": "BOOST TIKET",  # starší název pro BOOST, pořád v uložených datech
 }
 
+# Popisek k obrázku appka posílala jen jako holé JPG bez jediného slova —
+# klient bez kontextu nemusí po týdnech/měsících vůbec vědět, co s tím
+# udělat, natož si pamatovat, že appka mu jen radí a sázku klikat musí
+# sám. Tenhle text jde s KAŽDÝM tiketem, ne jen s tím prvním po registraci.
+TICKET_CAPTION_LABELS = {
+    "kratky": "Krátký tiket", "stredni": "Střední tiket", "boost": "BOOST tiket",
+    "dlouhy": "BOOST tiket",
+}
+
+
+def build_ticket_caption(ticket: dict) -> str:
+    label = TICKET_CAPTION_LABELS.get(ticket.get("ticket_type", ""), "Tiket")
+    total_odds = ticket.get("total_odds", 0)
+    return (
+        f"🎫 {label} · kurz {total_odds:.2f}\n\n"
+        "Appka jen doporučuje — sázku si klikáš sám, kde chceš (Tipsport, Fortuna...).\n\n"
+        "Není to jistota. 18+, sázej jen to, co si můžeš dovolit prohrát."
+    )
+
 
 def wrap(draw, text, font, max_width):
     words = text.split()
@@ -155,7 +174,7 @@ def send_ticket_to_telegram(ticket: dict, bot_token: str = None, chat_id: str = 
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     resp = requests.post(
         url,
-        data={"chat_id": chat},
+        data={"chat_id": chat, "caption": build_ticket_caption(ticket)},
         files={"photo": ("ticket.jpg", buf, "image/jpeg")},
         timeout=30,
     )
