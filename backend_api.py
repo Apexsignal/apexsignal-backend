@@ -2713,6 +2713,42 @@ TELEGRAM_EXPIRED_MESSAGE = (
     "Díky, že jsi to zkusil — a ať se daří."
 )
 
+# Appka bot umí reagovat jen na /start a /stav — jakoukoli jinou zprávu
+# appka dřív potichu zahazovala, klient nedostal odpověď a appka se o
+# tom vůbec nedozvěděla. Tohle je odpověď, kterou dostane MÍSTO ticha.
+TELEGRAM_UNRECOGNIZED_MESSAGE = (
+    "Tenhle bot je automatický a zprávy sám nečte — jen posílá ranní tikety.\n\n"
+    "Tvůj vzkaz appka přeposlala, ozveme se ti co nejdřív. Pro rychlejší odpověď "
+    "napiš rovnou na apexsignal@seznam.cz."
+)
+
+
+def _forward_client_message_to_owner(chat_id: int, first_name: Optional[str], username: Optional[str], text: str) -> None:
+    """
+    Bot appce sám odpovídat neumí, takže appka aspoň přepošle zprávu tam,
+    kde ji appka uvidí — appku vlastní Telegram (TELEGRAM_CHAT_ID). Bez
+    tohohle appka nemá jak zjistit, že jí vůbec někdo něco napsal.
+    """
+    owner_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not owner_chat_id:
+        print("[telegram] TELEGRAM_CHAT_ID není nastavený, nemám kam přeposlat zprávu klienta")
+        return
+
+    subscription_id = db.get_subscription_id_for_chat(chat_id)
+    sub = db.get_subscription_by_id(subscription_id) if subscription_id else None
+    who = f"předplatitel ({sub['email']})" if sub else "nepárovaný/neznámý chat"
+    handle = f"@{username}" if username else "bez uživatelského jména"
+
+    message = (
+        f"📩 Zpráva od klienta na Telegram botovi\n"
+        f"{first_name or '—'} ({handle}) — {who}\n\n"
+        f"„{text}“"
+    )
+    try:
+        _send_telegram_message(int(owner_chat_id), message)
+    except Exception as e:
+        print(f"[telegram] nepodařilo se přeposlat zprávu klienta: {e}")
+
 
 def _send_telegram_message(chat_id: int, text: str) -> None:
     """Odeslání jedné textové zprávy. Chybu appka jen zaloguje — když
@@ -2792,6 +2828,15 @@ async def telegram_webhook(request: Request):
             _send_telegram_message(chat_id, f"Předplatné je aktivní. Zaplaceno do {konec}.")
         else:
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+        return {"ok": True}
+
+    if text:
+        # Cokoli jiného než /start nebo /stav appka dřív potichu
+        # zahazovala — klient nedostal odpověď a appka se to nikdy
+        # nedozvěděla. Teď aspoň appku upozorní a klientovi řekne, kam
+        # se obrátit pro rychlejší odpověď.
+        _send_telegram_message(chat_id, TELEGRAM_UNRECOGNIZED_MESSAGE)
+        _forward_client_message_to_owner(chat_id, chat.get("first_name"), chat.get("username"), text)
 
     return {"ok": True}
 
