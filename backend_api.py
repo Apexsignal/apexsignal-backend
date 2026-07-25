@@ -82,10 +82,12 @@ app.add_middleware(
 
 # Appka na vlastní generování zákazníky zatím nemá zaplacené API kredity
 # ve verzi, co by uneslo reálný provoz (jen appce vlastní denní účet pro
-# kanál) — /tickets/generate a /tickets/regenerate appka proto dočasně
-# zamyká, ať klient sám nevyčerpá kvótu/rozpočet dřív, než na to appka
-# bude mít. Appka to řídí přes proměnnou prostředí, ať jde zapnout
-# okamžitě, beze změny kódu, jakmile na to appka bude mít.
+# kanál) — appka proto dočasně zamyká celou tuhle stranu appky:
+# /tickets/generate, /tickets/regenerate A TAKÉ nákup tokenů
+# (/payments/create-checkout-session), ať si zákazník nekoupí tokeny,
+# které zatím nemá na co utratit. Appka to řídí přes proměnnou
+# prostředí, ať jde zapnout okamžitě, beze změny kódu, jakmile na to
+# appka bude mít.
 CLIENT_TICKET_GENERATION_ENABLED = os.environ.get("CLIENT_TICKET_GENERATION_ENABLED", "true").strip().lower() != "false"
 
 
@@ -94,8 +96,8 @@ def _require_generation_enabled() -> None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Vlastní generování tiketů appka zatím připravuje a testuje — brzy bude dostupné. "
-                "Mezitím zkus kanál na Telegramu na apexsignal.cz/transparentni-ucet."
+                "Appka vlastní generování i nákup tokenů zatím připravuje a testuje — brzy bude "
+                "dostupné. Mezitím zkus kanál na Telegramu na apexsignal.cz/transparentni-ucet."
             ),
         )
 
@@ -804,6 +806,10 @@ class CreateCheckoutSessionRequest(BaseModel):
 
 @app.post("/payments/create-checkout-session")
 def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = Depends(get_current_user_id)):
+    # Dokud appka nemá zaplacené API kredity na reálný provoz (viz
+    # _require_generation_enabled), nemá smysl pouštět ani nákup tokenů
+    # — zákazník by zaplatil za tokeny, které zatím nemá na co utratit.
+    _require_generation_enabled()
     if req.tokens < MIN_CUSTOM_TOKENS or req.tokens > MAX_CUSTOM_TOKENS:
         raise HTTPException(status_code=400, detail=f"Počet tokenů musí být mezi {MIN_CUSTOM_TOKENS} a {MAX_CUSTOM_TOKENS}")
     if not stripe.api_key:
