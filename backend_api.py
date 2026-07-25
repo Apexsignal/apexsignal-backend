@@ -2547,8 +2547,25 @@ def transparency_html(limit: int = 100):
     """
     data = public_transparency(limit=limit)
     return HTMLResponse(
-        content=transparency_page.render_page(data["tickets"], data["stats"], data.get("equity_curve"))
+        content=transparency_page.render_page(
+            data["tickets"], data["stats"], data.get("equity_curve"), _app_equivalent_monthly_kc()
+        )
     )
+
+
+def _app_equivalent_monthly_kc() -> int:
+    """
+    Kolik by stálo přes appku/tokeny vygenerovat to samé, co appka posílá
+    v placeném kanálu za měsíc — 1 krátký + 1 střední denně, plus BOOST
+    v každý pátek (viz _todays_client_picks). Appka to počítá živě z
+    TOKEN_COSTS/TOKEN_KC_VALUE, ne jako pevné číslo v textu landing page,
+    ať se srovnání samo opraví, když se ceník někdy změní.
+    """
+    days_per_month = 30
+    fridays_per_month = round(days_per_month / 7)
+    daily_kc = (TOKEN_COSTS["kratky"] + TOKEN_COSTS["stredni"]) * TOKEN_KC_VALUE
+    boost_kc = TOKEN_COSTS["boost"] * TOKEN_KC_VALUE
+    return daily_kc * days_per_month + boost_kc * fridays_per_month
 
 
 def _todays_client_picks(target_user_id: int) -> list[dict]:

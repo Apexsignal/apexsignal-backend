@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime
 from html import escape
 from typing import Optional
@@ -328,9 +329,9 @@ def _stats_block(stats: Optional[dict]) -> str:
 
 STYLE = """
 :root{--paper:#F4F6F8;--raise:#FFF;--ink:#111820;--muted:#5C6875;--line:#DCE2E9;
---line-soft:#E9EDF2;--accent:#2340C8;--up:#00897B;--down:#C0392B;--warn-soft:#FBF2DE;--warn:#8A5A00}
+--line-soft:#E9EDF2;--accent:#4338CA;--accent-glow:rgb(67 56 202 / 14%);--up:#00897B;--down:#C0392B}
 @media (prefers-color-scheme:dark){:root{--paper:#0E1319;--raise:#151C24;--ink:#E6EBF1;--muted:#8A97A6;
---line:#232D38;--line-soft:#1A222B;--accent:#6C8CF5;--up:#0FA08C;--down:#EC5F57;--warn-soft:#241D0F;--warn:#E0B15C}}
+--line:#232D38;--line-soft:#1A222B;--accent:#8B7CF6;--accent-glow:rgb(139 124 246 / 18%);--up:#0FA08C;--down:#EC5F57}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font-size:16px;line-height:1.6;
 font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased}
@@ -347,6 +348,30 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius
 section{display:flex;flex-direction:column;gap:18px}
 .lede{color:var(--muted);font-size:1.05rem}
 .up{color:var(--up)}.down{color:var(--down)}
+header{position:relative;padding-top:8px}
+header::before{content:"";position:absolute;top:-40px;left:-20px;right:-20px;height:280px;z-index:-1;
+pointer-events:none;background:radial-gradient(60% 100% at 15% 0%,var(--accent-glow),transparent 70%)}
+.hero-stat{margin-top:22px;padding:20px 22px;background:var(--raise);border:1px solid var(--line);
+border-radius:6px;display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden}
+.hero-stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent)}
+.hero-label{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
+.hero-val{font-size:clamp(2rem,7vw,2.8rem);font-weight:700;letter-spacing:-.03em;line-height:1.05;
+font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
+.hero-sub{font-size:.82rem;color:var(--muted)}
+.offers{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.offer{background:var(--raise);border:1px solid var(--line);border-radius:6px;padding:22px;
+display:flex;flex-direction:column;gap:12px}
+.offer.primary{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.offer-price{font-size:1.6rem;font-weight:700;letter-spacing:-.02em;
+font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
+.offer-price small{font-size:.78rem;font-weight:400;color:var(--muted);letter-spacing:0}
+.offer p{font-size:.9rem;color:var(--muted);flex:1}
+.btn{display:block;text-align:center;padding:12px 18px;border-radius:5px;text-decoration:none;
+font-size:.94rem;font-weight:600;border:1px solid var(--accent);color:var(--accent);background:transparent}
+.btn:hover{background:var(--accent-glow)}
+.btn-fill{background:var(--accent);color:#fff;border-color:var(--accent)}
+@media (prefers-color-scheme:dark){.btn-fill{color:#0E1319}}
 .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);
 border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .cell{background:var(--raise);padding:15px 16px;display:flex;flex-direction:column;gap:4px}
@@ -371,8 +396,6 @@ padding:6px 9px;border-radius:3px;white-space:nowrap;transform:translate(-50%,-1
 .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
 .rule{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:16px 18px;display:flex;flex-direction:column;gap:6px}
 .rule strong{font-size:.95rem}.rule span{font-size:.88rem;color:var(--muted)}
-.note{background:var(--warn-soft);border:1px solid var(--line);border-radius:4px;padding:16px 18px;font-size:.9rem}
-.note strong{color:var(--warn)}
 .empty-stats{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:6px}
 .empty-stats span{color:var(--muted);font-size:.9rem}
 .tickets{display:flex;flex-direction:column;gap:12px}
@@ -461,7 +484,12 @@ def _script_for(curve: list[dict]) -> str:
     return out
 
 
-def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Optional[list[dict]] = None) -> str:
+def render_page(
+    tickets: list[dict],
+    stats: Optional[dict],
+    equity_curve: Optional[list[dict]] = None,
+    app_equivalent_kc: Optional[int] = None,
+) -> str:
     curve = equity_curve or []
     resolved_count = (stats or {}).get("resolved_count") or 0
     roi = (stats or {}).get("roi_pct")
@@ -478,18 +506,48 @@ def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Option
         '<p class="lede">Zatím tu není žádný tiket. Jakmile model vybere první, objeví se tady.</p>'
     )
 
-    # Poctivá poznámka k velikosti vzorku. Čím lepší čísla, tím důležitější
-    # — bez ní vypadá vysoké ROI na krátkém úseku jako nafouknutá reklama.
-    sample_note = ""
-    if resolved_count:
-        sample_note = (
-            '<div class="note">'
-            f"<strong>Ke čtení těch čísel:</strong> je za nimi {resolved_count} vyhodnocených tiketů "
-            "za pár týdnů. To je na jakýkoli závěr málo. Na takhle krátkém úseku vyjde v plusu i model, "
-            "který dlouhodobě prodělává — a naopak. Čím delší řada bude, tím blíž bude ROI realitě, "
-            "a skoro jistě bude nižší než teď. Suď mě podle měsíců, ne podle týdnů."
+    units_profit = (stats or {}).get("units_profit")
+    hero_stat = ""
+    if resolved_count and units_profit is not None:
+        hero_stat = (
+            '<div class="hero-stat">'
+            '<span class="hero-label">Zisk k dnešnímu dni</span>'
+            f'<span class="hero-val {_trend_class(units_profit)}">{_fmt_signed(units_profit, 1)} jednotek</span>'
+            f'<span class="hero-sub">při vkladu 1 jednotky na každý z {resolved_count} vyhodnocených tiketů</span>'
             "</div>"
         )
+
+    payment_link = os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip()
+    app_url = os.environ.get("APP_URL", "https://apexsignal.cz").strip()
+
+    compare_line = ""
+    if app_equivalent_kc:
+        formatted_kc = f"{app_equivalent_kc:,.0f}".replace(",", " ")
+        compare_line = (
+            f"Přes appku a tokeny by tenhle měsíční balík vyšel na {formatted_kc} Kč. "
+            "V kanálu ho máš za zlomek ceny."
+        )
+
+    offers = f"""<section>
+  <h2>Dvě cesty, jeden model</h2>
+  <p class="lede">Liší se jen tím, kdo dělá výběr — ty, nebo appka.</p>
+  <div class="offers">
+    <div class="offer primary">
+      <span class="eyebrow">Kanál na Telegramu</span>
+      <div class="offer-price">2 500 Kč <small>/ měsíc</small></div>
+      <p>Každé ráno 1 krátký a 1 střední tiket, v pátek navíc BOOST s kurzem 10+.
+      Nic si sám negeneruješ, appka pošle výběr rovnou na Telegram. {compare_line}</p>
+      <a class="btn btn-fill" href="{escape(payment_link) if payment_link else '#'}">Aktivovat kanál</a>
+    </div>
+    <div class="offer">
+      <span class="eyebrow">Aplikace</span>
+      <div class="offer-price">Tokeny <small>120–600 Kč / tiket</small></div>
+      <p>Generuješ si sám — vybereš ligy, míru rizika, časový rámec. Platíš jen za to,
+      co si necháš vygenerovat.</p>
+      <a class="btn" href="{escape(app_url)}">Otevřít appku</a>
+    </div>
+  </div>
+</section>"""
 
     curve_json = json.dumps(
         [{"units": p["units"]} for p in curve], ensure_ascii=False, separators=(",", ":")
@@ -515,17 +573,18 @@ def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Option
 
 <header>
   <p class="eyebrow">ApexSignal — veřejný účet</p>
-  <h1>Všechny tikety. Včetně těch, co nevyšly.</h1>
-  <p class="lede">Kompletní záznam fotbalového modelu, na kterém ApexSignal stojí. Nic se odsud nemaže.
-  Výsledky jsou v jednotkách: každý tiket počítám jako jeden stejně velký vklad, ať jsou čísla
-  porovnatelná a nezávisí na tom, kolik kdo sází.</p>
+  <h1>Dost bylo tipérů, co mažou prohry.</h1>
+  <p class="lede">Tady je jen matika. Model vybírá zápasy, appka ukazuje úplně všechno — výhry
+  i prohry, natrvalo, beze změny. Žádná falešná jistota, žádné emoce. Výsledky jsou v jednotkách:
+  každý tiket počítám jako jeden stejně velký vklad, ať jsou čísla porovnatelná a nezávisí na tom,
+  kolik kdo sází.</p>
+  {hero_stat}
 </header>
 
 <section>
   <h2>Jak si model vede</h2>
   {_stats_block(stats)}
   {_chart_svg(curve)}
-  {sample_note}
 </section>
 
 <section class="rules">
@@ -538,6 +597,8 @@ def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Option
     <span>U nevyhodnoceného tiketu vidíš jen počet tipů a kurz. Po skončení se výběry odhalí natrvalo.</span>
   </div>
 </section>
+
+{offers}
 
 <section>
   <h2>Historie tiketů</h2>
