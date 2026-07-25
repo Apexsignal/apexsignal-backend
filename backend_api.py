@@ -863,22 +863,28 @@ def _sync_subscription_from_stripe(sub: dict, email: Optional[str] = None) -> Op
     )
 
 
-def _send_telegram_onboarding_email(subscription_id: int, email: str) -> None:
-    """Vygeneruje párovací kód a pošle ho e-mailem rovnou jako hotový
+def _send_telegram_onboarding_email(subscription_id: int, email: str) -> bool:
+    """
+    Vygeneruje párovací kód a pošle ho e-mailem rovnou jako hotový
     odkaz do Telegramu — appka tu nemá žádné přihlášené sezení, kterému
     by mohla kód jen vrátit v odpovědi na požadavek, jako to dělá appka
-    pro appku vázanou na účet."""
+    pro appku vázanou na účet. Vrací True jen když se appce e-mail
+    OPRAVDU podařilo odeslat — appka tohle musí umět rozlišit, jinak
+    volající (viz /telegram/resend-link) tvrdí zákazníkovi, že mu něco
+    přijde, přestože appka nic neposlala.
+    """
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
     if not bot_username:
         print("[stripe] TELEGRAM_BOT_USERNAME není nastavený, nemůžu poslat párovací odkaz")
-        return
+        return False
     code = secrets.token_urlsafe(9)[:12]
     db.create_telegram_link_code(code, subscription_id, ttl_minutes=TELEGRAM_LINK_CODE_TTL_MINUTES)
     deep_link = f"https://t.me/{bot_username}?start={code}"
     try:
-        email_service.send_channel_welcome_email(email, deep_link)
+        return email_service.send_channel_welcome_email(email, deep_link)
     except Exception as e:
         print(f"[stripe] nepodařilo se poslat uvítací e-mail na {email}: {e}")
+        return False
 
 
 class BillingPortalRequest(BaseModel):
@@ -925,7 +931,8 @@ def resend_telegram_link(req: BillingPortalRequest):
     sub = db.get_subscription_by_email(req.email)
     if not sub or not db.has_active_subscription_id(sub["id"]):
         raise HTTPException(status_code=404, detail="K tomuhle e-mailu appka nemá aktivní předplatné")
-    _send_telegram_onboarding_email(sub["id"], sub["email"])
+    if not _send_telegram_onboarding_email(sub["id"], sub["email"]):
+        raise HTTPException(status_code=502, detail="Nepodařilo se odeslat e-mail — zkus to prosím za chvíli znovu")
     return {"status": "sent"}
 
 
