@@ -2559,6 +2559,26 @@ def _app_equivalent_monthly_kc() -> int:
     return daily_kc * days_per_month + boost_kc * fridays_per_month
 
 
+def _ticket_still_sendable(ticket: Ticket, buffer_minutes: int = 30) -> bool:
+    """Appka nepošle jako 'dnešní tip' tiket, kde už kterýkoli výběr vykopl
+    (nebo vykopne za míň než buffer_minutes) — appka tikety generuje ráno
+    s filtrem na BUDOUCÍ zápasy (viz _filter_future_matches), ale odeslání
+    může appka spustit později (ruční doběh, nový odběratel se spáruje až
+    večer...) a mezitím už zápas může běžet nebo být odehraný. Poslat
+    takový "tip" by bylo zavádějící — appka slibuje kurz předem, ne
+    komentář k živému/skončenému zápasu."""
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(minutes=buffer_minutes)
+    for s in ticket.selections:
+        try:
+            kickoff_dt = datetime.fromisoformat(f"{s.kickoff_date}T{s.kickoff_time}:00+00:00")
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if kickoff_dt <= cutoff:
+            return False
+    return True
+
+
 def _todays_client_picks(target_user_id: int) -> list[dict]:
     """Vybere z dnešních uložených tiketů appkina automatického účtu
     (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni, v pátek
@@ -2577,7 +2597,10 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
     rows = [r for r in repo.get_saved_tickets(target_user_id) if _created_at_utc(r) >= today_start_utc]
 
     def _best(ticket_type):
-        candidates = [r for r in rows if r["ticket"].ticket_type == ticket_type]
+        candidates = [
+            r for r in rows
+            if r["ticket"].ticket_type == ticket_type and _ticket_still_sendable(r["ticket"])
+        ]
         return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
 
     picks = [p for p in (_best("kratky"), _best("stredni")) if p is not None]
