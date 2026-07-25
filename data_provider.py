@@ -1770,13 +1770,24 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
         result["market_implied_probabilities"]["match_winner:home"] = probs["home"]
         result["market_implied_probabilities"]["match_winner:away"] = probs["away"]
 
+    # Vyřazuje čtvrtinové linie (1.75, 2.25, ...) — API-Football je sice
+    # vrací (agregace zahraničních bookmakerů), ale Tipsport a další čeští
+    # sázkaři běžně nabízí jen celé/půlené linie (1.5, 2.0, 2.5...). Tiket
+    # s "over 1.75" pak uživatel na Tipsportu nenajde.
+    def _is_standard_line(threshold: float) -> bool:
+        return (threshold * 4) % 2 == 0  # zůstanou jen násobky 0.5
+
     for threshold, prices in over_goals_prices.items():
+        if not _is_standard_line(threshold):
+            continue
         result["over_goals"][threshold] = _median(prices)
         if threshold in under_goals_prices:
             p_over, _ = devig_two_way(_median(prices), _median(under_goals_prices[threshold]))
             result["market_implied_probabilities"][f"over_goals:over_{threshold}"] = p_over
 
     for threshold, prices in over_cards_prices.items():
+        if not _is_standard_line(threshold):
+            continue
         result["over_cards"][threshold] = _median(prices)
 
     if btts_yes_prices:
