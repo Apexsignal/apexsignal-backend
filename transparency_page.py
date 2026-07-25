@@ -484,7 +484,12 @@ def _script_for(curve: list[dict]) -> str:
     return out
 
 
-def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Optional[list[dict]] = None) -> str:
+def render_page(
+    tickets: list[dict],
+    stats: Optional[dict],
+    equity_curve: Optional[list[dict]] = None,
+    app_equivalent_kc: Optional[int] = None,
+) -> str:
     curve = equity_curve or []
     resolved_count = (stats or {}).get("resolved_count") or 0
     roi = (stats or {}).get("roi_pct")
@@ -514,15 +519,24 @@ def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Option
 
     payment_link = os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip()
     app_url = os.environ.get("APP_URL", "https://apexsignal.cz").strip()
+
+    compare_line = ""
+    if app_equivalent_kc:
+        formatted_kc = f"{app_equivalent_kc:,.0f}".replace(",", " ")
+        compare_line = (
+            f"Přes appku a tokeny by tenhle měsíční balík vyšel na {formatted_kc} Kč. "
+            "V kanálu ho máš za zlomek ceny."
+        )
+
     offers = f"""<section>
-  <h2>Když do toho chceš jít</h2>
-  <p class="lede">Dvě cesty ke stejnému modelu. Liší se jen tím, kdo dělá výběr — ty, nebo appka.</p>
+  <h2>Dvě cesty, jeden model</h2>
+  <p class="lede">Liší se jen tím, kdo dělá výběr — ty, nebo appka.</p>
   <div class="offers">
     <div class="offer primary">
       <span class="eyebrow">Kanál na Telegramu</span>
       <div class="offer-price">2 500 Kč <small>/ měsíc</small></div>
-      <p>2 tikety každé ráno — krátký a střední. V pátek navíc BOOST. Nic si sám negeneruješ,
-      appka pošle výběr rovnou na Telegram.</p>
+      <p>Každé ráno 1 krátký a 1 střední tiket, v pátek navíc BOOST s kurzem 10+.
+      Nic si sám negeneruješ, appka pošle výběr rovnou na Telegram. {compare_line}</p>
       <a class="btn btn-fill" href="{escape(payment_link) if payment_link else '#'}">Aktivovat kanál</a>
     </div>
     <div class="offer">
@@ -559,10 +573,11 @@ def render_page(tickets: list[dict], stats: Optional[dict], equity_curve: Option
 
 <header>
   <p class="eyebrow">ApexSignal — veřejný účet</p>
-  <h1>Všechny tikety. Včetně těch, co nevyšly.</h1>
-  <p class="lede">Kompletní záznam fotbalového modelu, na kterém ApexSignal stojí. Nic se odsud nemaže.
-  Výsledky jsou v jednotkách: každý tiket počítám jako jeden stejně velký vklad, ať jsou čísla
-  porovnatelná a nezávisí na tom, kolik kdo sází.</p>
+  <h1>Dost bylo tipérů, co mažou prohry.</h1>
+  <p class="lede">Tady je jen matika. Model vybírá zápasy, appka ukazuje úplně všechno — výhry
+  i prohry, natrvalo, beze změny. Žádná falešná jistota, žádné emoce. Výsledky jsou v jednotkách:
+  každý tiket počítám jako jeden stejně velký vklad, ať jsou čísla porovnatelná a nezávisí na tom,
+  kolik kdo sází.</p>
   {hero_stat}
 </header>
 
