@@ -509,11 +509,16 @@ def render_page(
     units_profit = (stats or {}).get("units_profit")
     hero_stat = ""
     if resolved_count and units_profit is not None:
+        # Datum appka bere z PRVNÍHO bodu křivky (curve je chronologicky
+        # seřazená), ne z aktuálního data — jinak by "od" ukazovalo pořád
+        # dnešek místo skutečného začátku měřeného období.
+        since = _fmt_date(curve[0]["date"]) if curve else ""
+        since_note = f" od {since}" if since else ""
         hero_stat = (
             '<div class="hero-stat">'
             '<span class="hero-label">Zisk k dnešnímu dni</span>'
             f'<span class="hero-val {_trend_class(units_profit)}">{_fmt_signed(units_profit, 1)} jednotek</span>'
-            f'<span class="hero-sub">při vkladu 1 jednotky na každý z {resolved_count} vyhodnocených tiketů</span>'
+            f'<span class="hero-sub">při vkladu 1 jednotky na každý z {resolved_count} vyhodnocených tiketů{since_note}</span>'
             "</div>"
         )
 
