@@ -372,6 +372,10 @@ font-size:.94rem;font-weight:600;border:1px solid var(--accent);color:var(--acce
 .btn:hover{background:var(--accent-glow)}
 .btn-fill{background:var(--accent);color:#fff;border-color:var(--accent)}
 @media (prefers-color-scheme:dark){.btn-fill{color:#0E1319}}
+.btn-disabled{border-color:var(--line);color:var(--muted);cursor:default}
+.btn-disabled:hover{background:transparent}
+.badge-soon{display:inline-block;font-size:.95rem;font-weight:700;letter-spacing:.02em;
+color:var(--muted);background:var(--line-soft);padding:4px 10px;border-radius:4px}
 .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);
 border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .cell{background:var(--raise);padding:15px 16px;display:flex;flex-direction:column;gap:4px}
@@ -489,6 +493,7 @@ def render_page(
     stats: Optional[dict],
     equity_curve: Optional[list[dict]] = None,
     app_equivalent_kc: Optional[int] = None,
+    app_generation_enabled: bool = True,
 ) -> str:
     curve = equity_curve or []
     resolved_count = (stats or {}).get("resolved_count") or 0
@@ -533,6 +538,21 @@ def render_page(
             "V kanálu ho máš za zlomek ceny."
         )
 
+    if app_generation_enabled:
+        app_offer_price = 'Tokeny <small>120–600 Kč / tiket</small>'
+        app_offer_body = (
+            "Generuješ si sám — vybereš ligy, míru rizika, časový rámec. "
+            "Platíš jen za to, co si necháš vygenerovat."
+        )
+        app_offer_cta = f'<a class="btn" href="{escape(app_url)}">Otevřít appku</a>'
+    else:
+        app_offer_price = '<span class="badge-soon">Připravujeme</span>'
+        app_offer_body = (
+            "Appka na týhle části ještě testuje a doostřuje model, ať vlastní generování "
+            "nespustí dřív, než na to bude spolehlivé. Zatím dostupný jen kanál na Telegramu vlevo."
+        )
+        app_offer_cta = '<span class="btn btn-disabled">Brzy dostupné</span>'
+
     offers = f"""<section>
   <h2>Dvě cesty, jeden model</h2>
   <p class="lede">Liší se jen tím, kdo dělá výběr — ty, nebo appka.</p>
@@ -546,10 +566,9 @@ def render_page(
     </div>
     <div class="offer">
       <span class="eyebrow">Aplikace</span>
-      <div class="offer-price">Tokeny <small>120–600 Kč / tiket</small></div>
-      <p>Generuješ si sám — vybereš ligy, míru rizika, časový rámec. Platíš jen za to,
-      co si necháš vygenerovat.</p>
-      <a class="btn" href="{escape(app_url)}">Otevřít appku</a>
+      <div class="offer-price">{app_offer_price}</div>
+      <p>{app_offer_body}</p>
+      {app_offer_cta}
     </div>
   </div>
 </section>"""
