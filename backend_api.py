@@ -2425,6 +2425,44 @@ def run_transparency_daily_tickets(request: Request):
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
 
+@app.post("/admin/transparency-backfill-results")
+def transparency_backfill_results(request: Request):
+    """
+    Veřejný transparentní účet (TRANSPARENCY_USER_ID) měl desítky tiketů
+    z období PŘED tím, než appka vůbec začala per-výběr výsledek
+    (won/lost) ukládat vedle celkového statusu tiketu — appka jim tak
+    neuměla ukázat, jestli prohra byla "o jednu nohu", nebo nevyšlo skoro
+    nic (viz _selection_row v transparency_page.py). Stejná logika jako
+    appce vlastní /admin/backfill-results (appka ji tam má vázanou na
+    přihlášení), jen tady přes ADMIN_TASK_KEY — na tenhle účet se nikdo
+    nepřihlašuje. Bezpečně opakovatelné, appka jen znovu dotáhne skóre a
+    přepíše, co už má.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="TRANSPARENCY_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    checked = 0
+    status_changed = 0
+    for row in repo.get_saved_tickets(target_user_id):
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        if not selection_ids:
+            continue
+        checked += 1
+        new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+        if new_status is not None and row["status"] != new_status:
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            status_changed += 1
+
+    return {"tickets_checked": checked, "status_changed": status_changed}
+
+
 def _ticket_units(total_odds: Optional[float], status: str) -> float:
     """
     Výsledek jednoho tiketu při jednotkovém vkladu: výhra vynese kurz
