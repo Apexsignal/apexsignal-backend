@@ -699,15 +699,12 @@ MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní č
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # =====================================================================
-# Předplatné placeného Telegram kanálu — 2 tikety denně + páteční BOOST.
-#
-# Appka umí obojí: buď si cenu vyrobí sama (nic se ve Stripu nemusí
-# předem zakládat), nebo použije hotovou cenu ze Stripe dashboardu,
-# pokud je STRIPE_SUBSCRIPTION_PRICE_ID nastavené. Druhá varianta je
-# čistší pro účetnictví, první rozjede platby okamžitě.
+# Předplatné placeného Telegram kanálu — 1 krátký + 1 střední tiket
+# denně, v pátek navíc BOOST. Appka to prodává přes samostatný Stripe
+# Payment Link (STRIPE_CHANNEL_PAYMENT_LINK_URL, viz transparency_page)
+# — appka sama žádnou Checkout Session pro předplatné nevytváří, jen
+# zpracovává webhook událost, když někdo tím odkazem zaplatí.
 # =====================================================================
-SUBSCRIPTION_PRICE_KC = 2500  # Kč / měsíc
-SUBSCRIPTION_PRODUCT_NAME = "ApexSignal — měsíční předplatné tiketů"
 TELEGRAM_LINK_CODE_TTL_MINUTES = 60
 
 
@@ -817,27 +814,6 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
     return {"checkout_url": session.url}
 
 
-def _frontend_url() -> str:
-    return os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
-
-
-def _subscription_line_item() -> dict:
-    """Hotová cena ze Stripu má přednost; jinak si ji appka vyrobí sama,
-    ať se dá spustit bez zakládání produktu v dashboardu."""
-    price_id = os.environ.get("STRIPE_SUBSCRIPTION_PRICE_ID", "").strip()
-    if price_id:
-        return {"price": price_id, "quantity": 1}
-    return {
-        "price_data": {
-            "currency": "czk",
-            "product_data": {"name": SUBSCRIPTION_PRODUCT_NAME},
-            "unit_amount": SUBSCRIPTION_PRICE_KC * 100,  # Stripe počítá v haléřích
-            "recurring": {"interval": "month"},
-        },
-        "quantity": 1,
-    }
-
-
 def _period_end_from_subscription(sub: dict) -> Optional[datetime]:
     """
     Konec zaplaceného období. Stripe ho v novějších verzích API přesunul
@@ -857,87 +833,79 @@ def _period_end_from_subscription(sub: dict) -> Optional[datetime]:
     return datetime.fromtimestamp(int(ts), tz=timezone.utc)
 
 
-def _sync_subscription_from_stripe(sub: dict, user_id: Optional[int] = None) -> None:
-    """Zrcadlí jeden objekt předplatného ze Stripu do naší DB."""
-    if user_id is None:
-        metadata = sub.get("metadata") or {}
-        raw = metadata.get("user_id")
-        user_id = int(raw) if raw else None
-    if user_id is None and sub.get("customer"):
-        user_id = db.find_user_id_by_stripe_customer(sub["customer"])
-    if user_id is None:
-        # Bez user_id nemá appka co spárovat — aspoň to zaloguje, ať se
-        # to dá dohledat, místo aby událost tiše zahodila.
-        print(f"[stripe] předplatné {sub.get('id')} nejde spárovat s uživatelem, přeskakuji")
-        return
+def _sync_subscription_from_stripe(sub: dict, email: Optional[str] = None) -> Optional[int]:
+    """
+    Zrcadlí jeden objekt předplatného ze Stripu do naší DB a vrátí
+    subscription_id. Appka tu nemá žádné vlastní user_id k dispozici —
+    zákazník appce nezakládá účet, appka ho pozná jen podle e-mailu.
+    Řada webhook událostí ale e-mail vůbec nenese, proto appka bez něj
+    dotáhne e-mail ze Stripe Customer objektu.
+    """
+    if email is None and sub.get("customer"):
+        try:
+            customer = stripe.Customer.retrieve(sub["customer"])
+            email = customer.get("email")
+        except Exception as e:
+            print(f"[stripe] nepodařilo se dotáhnout e-mail zákazníka {sub.get('customer')}: {e}")
+    if email is None:
+        # Bez e-mailu nemá appka koho o výsledku informovat — aspoň to
+        # zaloguje, ať se to dá ručně dohledat, místo aby událost tiše
+        # zahodila.
+        print(f"[stripe] předplatné {sub.get('id')} nemá e-mail, přeskakuji")
+        return None
 
-    db.upsert_subscription(
-        user_id=user_id,
+    return db.upsert_subscription_by_stripe_sub(
+        stripe_subscription_id=sub["id"],
+        email=email,
         status=sub.get("status", "inactive"),
         stripe_customer_id=sub.get("customer"),
-        stripe_subscription_id=sub.get("id"),
         current_period_end=_period_end_from_subscription(sub),
     )
 
 
-class SubscriptionCheckoutResponse(BaseModel):
-    checkout_url: str
-
-
-@app.post("/payments/create-subscription-session", response_model=SubscriptionCheckoutResponse)
-def create_subscription_session(user_id: int = Depends(get_current_user_id)):
-    """
-    Odkaz na zaplacení měsíčního předplatného. Appka posílá user_id ve
-    dvou místech (metadata session i metadata samotného předplatného) —
-    to druhé je důležité, protože pozdější události o obnovení už o
-    původní checkout session nevědí nic.
-    """
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
-
-    if db.has_active_subscription(user_id):
-        raise HTTPException(status_code=409, detail="Předplatné už máš aktivní")
-
-    user = db.get_user_by_id(user_id)
-    existing = db.get_subscription(user_id) or {}
-    frontend_url = _frontend_url()
-
+def _send_telegram_onboarding_email(subscription_id: int, email: str) -> None:
+    """Vygeneruje párovací kód a pošle ho e-mailem rovnou jako hotový
+    odkaz do Telegramu — appka tu nemá žádné přihlášené sezení, kterému
+    by mohla kód jen vrátit v odpovědi na požadavek, jako to dělá appka
+    pro appku vázanou na účet."""
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+    if not bot_username:
+        print("[stripe] TELEGRAM_BOT_USERNAME není nastavený, nemůžu poslat párovací odkaz")
+        return
+    code = secrets.token_urlsafe(9)[:12]
+    db.create_telegram_link_code(code, subscription_id, ttl_minutes=TELEGRAM_LINK_CODE_TTL_MINUTES)
+    deep_link = f"https://t.me/{bot_username}?start={code}"
     try:
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[_subscription_line_item()],
-            customer=existing.get("stripe_customer_id") or None,
-            customer_email=None if existing.get("stripe_customer_id") else (user or {}).get("email"),
-            metadata={"user_id": str(user_id), "kind": "subscription"},
-            subscription_data={"metadata": {"user_id": str(user_id)}},
-            success_url=f"{frontend_url}/?subscription=success",
-            cancel_url=f"{frontend_url}/?subscription=cancelled",
-        )
+        email_service.send_channel_welcome_email(email, deep_link)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+        print(f"[stripe] nepodařilo se poslat uvítací e-mail na {email}: {e}")
 
-    return SubscriptionCheckoutResponse(checkout_url=session.url)
+
+class BillingPortalRequest(BaseModel):
+    email: str
 
 
 @app.post("/payments/billing-portal")
-def billing_portal(user_id: int = Depends(get_current_user_id)):
+def billing_portal(req: BillingPortalRequest):
     """
     Odkaz do Stripe portálu, kde si zákazník sám zruší předplatné nebo
-    změní kartu. U ceny 2 500 Kč měsíčně je zrušení na jedno kliknutí
-    povinnost, ne laskavost — nutit lidi psát na podporu je nejrychlejší
-    cesta ke stížnostem a chargebackům.
+    změní kartu — appka ho najde podle e-mailu, kterým platil (appka to
+    dál nijak neověřuje, portál sám ukáže jen to, co k danému Stripe
+    zákazníkovi patří). U ceny 2 500 Kč měsíčně je zrušení na jedno
+    kliknutí povinnost, ne laskavost — nutit lidi psát na podporu je
+    nejrychlejší cesta ke stížnostem a chargebackům.
     """
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
 
-    sub = db.get_subscription(user_id)
+    sub = db.get_subscription_by_email(req.email)
     if not sub or not sub.get("stripe_customer_id"):
-        raise HTTPException(status_code=404, detail="Žádné předplatné k správě")
+        raise HTTPException(status_code=404, detail="K tomuhle e-mailu appka nemá žádné předplatné")
 
     try:
         session = stripe.billing_portal.Session.create(
             customer=sub["stripe_customer_id"],
-            return_url=_frontend_url(),
+            return_url=os.environ.get("APP_URL", "https://apexsignal.cz"),
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
@@ -945,39 +913,20 @@ def billing_portal(user_id: int = Depends(get_current_user_id)):
     return {"portal_url": session.url}
 
 
-@app.get("/subscription/status")
-def subscription_status(user_id: int = Depends(get_current_user_id)):
-    """Jedno místo pravdy pro frontend — stav předplatného i to, jestli
-    už má člověk spárovaný Telegram (bez něj mu tikety nemají kam chodit)."""
-    sub = db.get_subscription(user_id)
-    active = db.has_active_subscription(user_id)
-    period_end = (sub or {}).get("current_period_end")
-    return {
-        "active": active,
-        "status": (sub or {}).get("status", "none"),
-        "current_period_end": period_end.isoformat() if hasattr(period_end, "isoformat") else period_end,
-        "price_kc": SUBSCRIPTION_PRICE_KC,
-        "telegram_linked": db.get_telegram_chat_id_for_user(user_id) is not None,
-    }
-
-
-@app.post("/telegram/link-code")
-def telegram_link_code(user_id: int = Depends(get_current_user_id)):
+@app.post("/telegram/resend-link")
+def resend_telegram_link(req: BillingPortalRequest):
     """
-    Vydá jednorázový kód a rovnou hotový odkaz do Telegramu. Uživatel na
-    něj klikne, Telegram botovi pošle "/start <kod>" a teprve tím se
-    appka dozví, kterému účtu dané chat_id patří. Bez tohohle kroku by
-    appka u příchozí zprávy neměla jak zjistit, jestli za ní stojí platba.
+    Znovu pošle párovací odkaz na e-mail, kterým appka zákazníka zná —
+    appka mu ho poprvé posílá automaticky hned po zaplacení, tohle je
+    záchranná síť pro případ, že ten e-mail appka nedoručila nebo se
+    ztratil (appka bez toho nemá jak zákazníkovi jinak předat kód, ten
+    nemá u appky žádný účet ani přihlášení).
     """
-    if not db.has_active_subscription(user_id):
-        raise HTTPException(status_code=402, detail="Placený kanál je jen pro předplatitele — nejdřív si aktivuj předplatné")
-
-    code = secrets.token_urlsafe(9)[:12]
-    db.create_telegram_link_code(code, user_id, ttl_minutes=TELEGRAM_LINK_CODE_TTL_MINUTES)
-
-    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
-    deep_link = f"https://t.me/{bot_username}?start={code}" if bot_username else None
-    return {"code": code, "deep_link": deep_link, "expires_in_minutes": TELEGRAM_LINK_CODE_TTL_MINUTES}
+    sub = db.get_subscription_by_email(req.email)
+    if not sub or not db.has_active_subscription_id(sub["id"]):
+        raise HTTPException(status_code=404, detail="K tomuhle e-mailu appka nemá aktivní předplatné")
+    _send_telegram_onboarding_email(sub["id"], sub["email"])
+    return {"status": "sent"}
 
 
 @app.post("/payments/webhook")
@@ -1015,26 +964,33 @@ async def stripe_webhook(request: Request):
         return {"status": "ok"}
 
     if event_type == "checkout.session.completed":
-        metadata = obj.get("metadata") or {}
-        user_id = int(metadata.get("user_id", 0)) or None
-
         if obj.get("mode") == "subscription":
-            # Samotná session nenese stav předplatného, appka si ho proto
-            # dotáhne ze Stripu — ať v DB skončí i datum konce období.
-            subscription_id = obj.get("subscription")
-            if subscription_id:
+            # Platba přes samostatný Stripe Payment Link — appka tu nemá
+            # žádné metadata.user_id (nikdo se nikde nepřihlašoval), jen
+            # e-mail, který zákazník zadal do Stripe checkoutu.
+            email = (obj.get("customer_details") or {}).get("email") or obj.get("customer_email")
+            stripe_subscription_id = obj.get("subscription")
+            if not (email and stripe_subscription_id):
+                print(f"[stripe] checkout.session.completed bez e-mailu/subscription ID: {obj.get('id')}")
+            else:
+                # Samotná session nenese stav předplatného, appka si ho
+                # proto dotáhne ze Stripu — ať v DB skončí i datum konce
+                # období.
                 try:
-                    sub = stripe.Subscription.retrieve(subscription_id)
-                    _sync_subscription_from_stripe(sub, user_id=user_id)
+                    sub = stripe.Subscription.retrieve(stripe_subscription_id)
+                    subscription_row_id = _sync_subscription_from_stripe(sub, email=email)
                 except Exception as e:
-                    print(f"[stripe] nepodařilo se načíst předplatné {subscription_id}: {e}")
-                    if user_id:
-                        db.upsert_subscription(
-                            user_id=user_id, status="active",
-                            stripe_customer_id=obj.get("customer"),
-                            stripe_subscription_id=subscription_id,
-                        )
+                    print(f"[stripe] nepodařilo se načíst předplatné {stripe_subscription_id}: {e}")
+                    subscription_row_id = db.upsert_subscription_by_stripe_sub(
+                        stripe_subscription_id=stripe_subscription_id, email=email, status="active",
+                        stripe_customer_id=obj.get("customer"),
+                    )
+                if subscription_row_id:
+                    _send_telegram_onboarding_email(subscription_row_id, email)
         else:
+            # Jednorázový nákup tokenů (appka vázaná na účet) — beze změny.
+            metadata = obj.get("metadata") or {}
+            user_id = int(metadata.get("user_id", 0)) or None
             tokens = int(metadata.get("tokens", 0))
             if user_id and tokens:
                 db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
@@ -2704,21 +2660,21 @@ TELEGRAM_WELCOME_MESSAGE = (
 # stojí platba.
 TELEGRAM_NO_ACCESS_MESSAGE = (
     "Ahoj! 👋 Tenhle kanál je pro předplatitele ApexSignalu.\n\n"
-    "Předplatné aktivuješ v aplikaci na apexsignal.cz — po zaplacení tam najdeš tlačítko "
-    "„Propojit Telegram“, které tě sem vrátí a účet se spáruje sám.\n\n"
-    "Jak si model vede, si můžeš kdykoli zdarma zkontrolovat na "
-    "apexsignal.cz/transparentni-ucet — jsou tam všechny tikety včetně prohraných.\n\n"
+    "Předplatné aktivuješ na apexsignal.cz/transparentni-ucet — po zaplacení appka na tvůj "
+    "e-mail rovnou pošle tenhle přesný odkaz s párovacím kódem, stačí na něj kliknout.\n\n"
+    "Jak si model vede, si můžeš kdykoli zdarma zkontrolovat tamtéž — jsou tam všechny "
+    "tikety včetně prohraných.\n\n"
     "18+"
 )
 
 TELEGRAM_LINK_INVALID_MESSAGE = (
-    "Tenhle párovací odkaz už neplatí — kódy vydržím hodinu a jdou použít jen jednou.\n\n"
-    "Vygeneruj si nový v aplikaci na apexsignal.cz."
+    "Tenhle párovací odkaz už neplatí — kódy vydrží hodinu a jdou použít jen jednou.\n\n"
+    "Napiš appce e-mail, kterým jsi platil, appka ti pošle nový: apexsignal.cz/transparentni-ucet"
 )
 
 TELEGRAM_EXPIRED_MESSAGE = (
     "Předplatné ti skončilo, takže sem další tikety posílat nebudu. 🙏\n\n"
-    "Kdykoli ho můžeš obnovit v aplikaci na apexsignal.cz a kanál naskočí zpátky.\n\n"
+    "Kdykoli ho můžeš obnovit na apexsignal.cz/transparentni-ucet a kanál naskočí zpátky.\n\n"
     "Díky, že jsi to zkusil — a ať se daří."
 )
 
@@ -2776,26 +2732,26 @@ async def telegram_webhook(request: Request):
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
             return {"ok": True}
 
-        linked_user_id = db.consume_telegram_link_code(code)
-        if linked_user_id is None:
+        linked_subscription_id = db.consume_telegram_link_code(code)
+        if linked_subscription_id is None:
             _send_telegram_message(chat_id, TELEGRAM_LINK_INVALID_MESSAGE)
             return {"ok": True}
 
         # Kód mohl být vydaný ještě v době platného předplatného, ale
         # uplatněný až po jeho konci — appka proto ověřuje platbu znovu
         # tady, ne jen při vydávání kódu.
-        if not db.has_active_subscription(linked_user_id):
+        if not db.has_active_subscription_id(linked_subscription_id):
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
             return {"ok": True}
 
-        db.link_telegram_chat(chat_id, linked_user_id, chat.get("first_name"))
+        db.link_telegram_chat(chat_id, linked_subscription_id, chat.get("first_name"))
         _send_telegram_message(chat_id, TELEGRAM_WELCOME_MESSAGE)
         return {"ok": True}
 
     if text == "/stav":
-        user_id = db.get_user_id_for_chat(chat_id)
-        if user_id and db.has_active_subscription(user_id):
-            sub = db.get_subscription(user_id) or {}
+        subscription_id = db.get_subscription_id_for_chat(chat_id)
+        if subscription_id and db.has_active_subscription_id(subscription_id):
+            sub = db.get_subscription_by_id(subscription_id) or {}
             period_end = sub.get("current_period_end")
             konec = period_end.strftime("%-d. %-m. %Y") if hasattr(period_end, "strftime") else "neznámo"
             _send_telegram_message(chat_id, f"Předplatné je aktivní. Zaplaceno do {konec}.")
