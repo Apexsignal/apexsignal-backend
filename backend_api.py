@@ -80,6 +80,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Appka na vlastní generování zákazníky zatím nemá zaplacené API kredity
+# ve verzi, co by uneslo reálný provoz (jen appce vlastní denní účet pro
+# kanál) — /tickets/generate a /tickets/regenerate appka proto dočasně
+# zamyká, ať klient sám nevyčerpá kvótu/rozpočet dřív, než na to appka
+# bude mít. Appka to řídí přes proměnnou prostředí, ať jde zapnout
+# okamžitě, beze změny kódu, jakmile na to appka bude mít.
+CLIENT_TICKET_GENERATION_ENABLED = os.environ.get("CLIENT_TICKET_GENERATION_ENABLED", "true").strip().lower() != "false"
+
+
+def _require_generation_enabled() -> None:
+    if not CLIENT_TICKET_GENERATION_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Vlastní generování tiketů appka zatím připravuje a testuje — brzy bude dostupné. "
+                "Mezitím zkus kanál na Telegramu na apexsignal.cz/transparentni-ucet."
+            ),
+        )
+
 
 @app.get("/health")
 def health():
@@ -1460,6 +1479,7 @@ def _filter_within_days(matches: list[MatchInput], days: int) -> list[MatchInput
 # =====================================================================
 @app.post("/tickets/generate", response_model=TicketPairResponse)
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _require_generation_enabled()
     _check_token_balance(user_id, req.risk_level)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     wider_days = req.time_frame_days + 3
@@ -1515,6 +1535,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
 
 @app.post("/tickets/regenerate", response_model=TicketPairResponse)
 def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _require_generation_enabled()
     _check_token_balance(user_id, req.risk_level)
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
@@ -2511,7 +2532,8 @@ def transparency_html(limit: int = 100):
     data = public_transparency(limit=limit)
     return HTMLResponse(
         content=transparency_page.render_page(
-            data["tickets"], data["stats"], data.get("equity_curve"), _app_equivalent_monthly_kc()
+            data["tickets"], data["stats"], data.get("equity_curve"), _app_equivalent_monthly_kc(),
+            app_generation_enabled=CLIENT_TICKET_GENERATION_ENABLED,
         )
     )
 
