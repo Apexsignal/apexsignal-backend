@@ -7,13 +7,23 @@ blokované není.
 
 Proměnné prostředí:
     BREVO_API_KEY, BREVO_FROM_EMAIL (musí být ověřená adresa v Brevo),
-    BREVO_FROM_NAME (výchozí "ApexSignal")
+    BREVO_FROM_NAME (výchozí "ApexSignal"), BREVO_REPLY_TO (výchozí = odesílatel)
+
+DŮLEŽITÉ k doručitelnosti: BREVO_FROM_EMAIL musí být na VLASTNÍ doméně
+(tikety@apexsignal.cz), ne na svobodné schránce typu @seznam.cz nebo
+@gmail.com. Seznam i Google mají v DMARC nastavené, že jejich jménem smí
+posílat jen jejich vlastní servery — Brevo mezi ně nepatří, takže takový
+e-mail projde rovnou do spamu, ať je jeho obsah jakýkoli. K vlastní doméně
+musí být v DNS zapsané záznamy, které Brevo vydá při ověření domény.
 
 Appka bez nastaveného API klíče e-maily jen vypíše do logu, nezhroutí se
 kvůli nim — registrace/reset hesla appce funguje i bez e-mailu, jen se
 uživatel o tom nedozví hned.
 """
 import os
+import re
+from html import unescape
+
 import requests
 
 BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
@@ -23,7 +33,23 @@ def _brevo_configured() -> bool:
     return bool(os.environ.get("BREVO_API_KEY") and os.environ.get("BREVO_FROM_EMAIL"))
 
 
-def send_email(to_email: str, subject: str, html_body: str) -> bool:
+def _html_to_text(html: str) -> str:
+    """
+    Hrubý převod HTML na čitelný prostý text. Appka nechce kvůli tomuhle
+    tahat další knihovnu — stačí odstranit značky a poskládat řádky.
+    """
+    text = re.sub(r"(?is)<(script|style).*?</\1>", "", html)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|tr|h[1-6])>", "\n", text)
+    # Odkaz appka přepíše na "text (adresa)", ať v textové verzi nezmizí.
+    text = re.sub(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', r"\2 (\1)", text)
+    text = re.sub(r"(?s)<[^>]+>", "", text)
+    text = unescape(text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for i, line in enumerate(lines) if line or (i and lines[i - 1])).strip()
+
+
+def send_email(to_email: str, subject: str, html_body: str, text_body: str | None = None) -> bool:
     if not _brevo_configured():
         print(f"[email_service] Brevo API není nastavené, e-mail se neposílá (adresát: {to_email}, předmět: {subject})")
         return False
@@ -31,17 +57,27 @@ def send_email(to_email: str, subject: str, html_body: str) -> bool:
     api_key = os.environ["BREVO_API_KEY"]
     from_email = os.environ["BREVO_FROM_EMAIL"]
     from_name = os.environ.get("BREVO_FROM_NAME", "ApexSignal")
+    reply_to = os.environ.get("BREVO_REPLY_TO", from_email)
+
+    payload = {
+        "sender": {"email": from_email, "name": from_name},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html_body,
+        # Textová verze appce chyběla úplně. E-mail bez ní je pro
+        # spamové filtry (Seznam i Gmail) podezřelý sám o sobě —
+        # legitimní odesílatelé posílají obě verze.
+        "textContent": text_body or _html_to_text(html_body),
+        # Odpověď na e-mail musí někam dorazit; adresa, na kterou nikdo
+        # nečte, je další drobný mínus u filtrů.
+        "replyTo": {"email": reply_to, "name": from_name},
+    }
 
     try:
         resp = requests.post(
             BREVO_API_URL,
             headers={"api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"},
-            json={
-                "sender": {"email": from_email, "name": from_name},
-                "to": [{"email": to_email}],
-                "subject": subject,
-                "htmlContent": html_body,
-            },
+            json=payload,
             timeout=15,
         )
         if resp.status_code >= 300:

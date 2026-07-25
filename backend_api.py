@@ -32,6 +32,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
@@ -44,6 +45,7 @@ import auth
 import rate_limiter
 import ticket_telegram
 import email_service
+import transparency_page
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 import stripe
@@ -696,6 +698,18 @@ MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní č
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
+# =====================================================================
+# Předplatné placeného Telegram kanálu — 2 tikety denně + páteční BOOST.
+#
+# Appka umí obojí: buď si cenu vyrobí sama (nic se ve Stripu nemusí
+# předem zakládat), nebo použije hotovou cenu ze Stripe dashboardu,
+# pokud je STRIPE_SUBSCRIPTION_PRICE_ID nastavené. Druhá varianta je
+# čistší pro účetnictví, první rozjede platby okamžitě.
+# =====================================================================
+SUBSCRIPTION_PRICE_KC = 2500  # Kč / měsíc
+SUBSCRIPTION_PRODUCT_NAME = "ApexSignal — měsíční předplatné tiketů"
+TELEGRAM_LINK_CODE_TTL_MINUTES = 60
+
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
     """Appka řídí typ tiketu jen podle risk_level, stejně jako
@@ -803,13 +817,177 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
     return {"checkout_url": session.url}
 
 
+def _frontend_url() -> str:
+    return os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
+
+
+def _subscription_line_item() -> dict:
+    """Hotová cena ze Stripu má přednost; jinak si ji appka vyrobí sama,
+    ať se dá spustit bez zakládání produktu v dashboardu."""
+    price_id = os.environ.get("STRIPE_SUBSCRIPTION_PRICE_ID", "").strip()
+    if price_id:
+        return {"price": price_id, "quantity": 1}
+    return {
+        "price_data": {
+            "currency": "czk",
+            "product_data": {"name": SUBSCRIPTION_PRODUCT_NAME},
+            "unit_amount": SUBSCRIPTION_PRICE_KC * 100,  # Stripe počítá v haléřích
+            "recurring": {"interval": "month"},
+        },
+        "quantity": 1,
+    }
+
+
+def _period_end_from_subscription(sub: dict) -> Optional[datetime]:
+    """
+    Konec zaplaceného období. Stripe ho v novějších verzích API přesunul
+    ze samotného předplatného na jeho položky, takže se appka dívá na
+    obě místa — jinak by jí po změně verze API tiše zmizel datum a
+    předplatné by pak platilo donekonečna.
+    """
+    ts = sub.get("current_period_end")
+    if not ts:
+        items = (sub.get("items") or {}).get("data") or []
+        for item in items:
+            if item.get("current_period_end"):
+                ts = item["current_period_end"]
+                break
+    if not ts:
+        return None
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+
+
+def _sync_subscription_from_stripe(sub: dict, user_id: Optional[int] = None) -> None:
+    """Zrcadlí jeden objekt předplatného ze Stripu do naší DB."""
+    if user_id is None:
+        metadata = sub.get("metadata") or {}
+        raw = metadata.get("user_id")
+        user_id = int(raw) if raw else None
+    if user_id is None and sub.get("customer"):
+        user_id = db.find_user_id_by_stripe_customer(sub["customer"])
+    if user_id is None:
+        # Bez user_id nemá appka co spárovat — aspoň to zaloguje, ať se
+        # to dá dohledat, místo aby událost tiše zahodila.
+        print(f"[stripe] předplatné {sub.get('id')} nejde spárovat s uživatelem, přeskakuji")
+        return
+
+    db.upsert_subscription(
+        user_id=user_id,
+        status=sub.get("status", "inactive"),
+        stripe_customer_id=sub.get("customer"),
+        stripe_subscription_id=sub.get("id"),
+        current_period_end=_period_end_from_subscription(sub),
+    )
+
+
+class SubscriptionCheckoutResponse(BaseModel):
+    checkout_url: str
+
+
+@app.post("/payments/create-subscription-session", response_model=SubscriptionCheckoutResponse)
+def create_subscription_session(user_id: int = Depends(get_current_user_id)):
+    """
+    Odkaz na zaplacení měsíčního předplatného. Appka posílá user_id ve
+    dvou místech (metadata session i metadata samotného předplatného) —
+    to druhé je důležité, protože pozdější události o obnovení už o
+    původní checkout session nevědí nic.
+    """
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    if db.has_active_subscription(user_id):
+        raise HTTPException(status_code=409, detail="Předplatné už máš aktivní")
+
+    user = db.get_user_by_id(user_id)
+    existing = db.get_subscription(user_id) or {}
+    frontend_url = _frontend_url()
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[_subscription_line_item()],
+            customer=existing.get("stripe_customer_id") or None,
+            customer_email=None if existing.get("stripe_customer_id") else (user or {}).get("email"),
+            metadata={"user_id": str(user_id), "kind": "subscription"},
+            subscription_data={"metadata": {"user_id": str(user_id)}},
+            success_url=f"{frontend_url}/?subscription=success",
+            cancel_url=f"{frontend_url}/?subscription=cancelled",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return SubscriptionCheckoutResponse(checkout_url=session.url)
+
+
+@app.post("/payments/billing-portal")
+def billing_portal(user_id: int = Depends(get_current_user_id)):
+    """
+    Odkaz do Stripe portálu, kde si zákazník sám zruší předplatné nebo
+    změní kartu. U ceny 2 500 Kč měsíčně je zrušení na jedno kliknutí
+    povinnost, ne laskavost — nutit lidi psát na podporu je nejrychlejší
+    cesta ke stížnostem a chargebackům.
+    """
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    sub = db.get_subscription(user_id)
+    if not sub or not sub.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="Žádné předplatné k správě")
+
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=sub["stripe_customer_id"],
+            return_url=_frontend_url(),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return {"portal_url": session.url}
+
+
+@app.get("/subscription/status")
+def subscription_status(user_id: int = Depends(get_current_user_id)):
+    """Jedno místo pravdy pro frontend — stav předplatného i to, jestli
+    už má člověk spárovaný Telegram (bez něj mu tikety nemají kam chodit)."""
+    sub = db.get_subscription(user_id)
+    active = db.has_active_subscription(user_id)
+    period_end = (sub or {}).get("current_period_end")
+    return {
+        "active": active,
+        "status": (sub or {}).get("status", "none"),
+        "current_period_end": period_end.isoformat() if hasattr(period_end, "isoformat") else period_end,
+        "price_kc": SUBSCRIPTION_PRICE_KC,
+        "telegram_linked": db.get_telegram_chat_id_for_user(user_id) is not None,
+    }
+
+
+@app.post("/telegram/link-code")
+def telegram_link_code(user_id: int = Depends(get_current_user_id)):
+    """
+    Vydá jednorázový kód a rovnou hotový odkaz do Telegramu. Uživatel na
+    něj klikne, Telegram botovi pošle "/start <kod>" a teprve tím se
+    appka dozví, kterému účtu dané chat_id patří. Bez tohohle kroku by
+    appka u příchozí zprávy neměla jak zjistit, jestli za ní stojí platba.
+    """
+    if not db.has_active_subscription(user_id):
+        raise HTTPException(status_code=402, detail="Placený kanál je jen pro předplatitele — nejdřív si aktivuj předplatné")
+
+    code = secrets.token_urlsafe(9)[:12]
+    db.create_telegram_link_code(code, user_id, ttl_minutes=TELEGRAM_LINK_CODE_TTL_MINUTES)
+
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+    deep_link = f"https://t.me/{bot_username}?start={code}" if bot_username else None
+    return {"code": code, "deep_link": deep_link, "expires_in_minutes": TELEGRAM_LINK_CODE_TTL_MINUTES}
+
+
 @app.post("/payments/webhook")
 async def stripe_webhook(request: Request):
     """
-    Appka tokeny připisuje TADY (server-side, po ověřeném webhooku), ne
-    hned po přesměrování na success_url — ten frontend uživatel může
-    zavřít/obejít, kdežto webhook appka dostane přímo od Stripe a jde mu
-    věřit jen po ověření podpisu (STRIPE_WEBHOOK_SECRET).
+    Appka tokeny připisuje i předplatné aktivuje TADY (server-side, po
+    ověřeném webhooku), ne hned po přesměrování na success_url — ten
+    frontend uživatel může zavřít/obejít, kdežto webhook appka dostane
+    přímo od Stripe a jde mu věřit jen po ověření podpisu
+    (STRIPE_WEBHOOK_SECRET).
     """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
@@ -822,14 +1000,64 @@ async def stripe_webhook(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Neplatný webhook: {e}")
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        if db.mark_stripe_event_if_new(event["id"]):
-            metadata = session.get("metadata") or {}
-            user_id = int(metadata.get("user_id", 0))
+    event_type = event["type"]
+    obj = event["data"]["object"]
+
+    # Ochrana proti dvojímu zpracování je až tady, po rozhodnutí, že je
+    # událost pro appku zajímavá — jinak by první doručení neznámého typu
+    # "spotřebovalo" ID a případné opakování už appka neviděla.
+    relevant = (
+        event_type == "checkout.session.completed"
+        or event_type.startswith("customer.subscription.")
+        or event_type in ("invoice.payment_succeeded", "invoice.payment_failed")
+    )
+    if not relevant or not db.mark_stripe_event_if_new(event["id"]):
+        return {"status": "ok"}
+
+    if event_type == "checkout.session.completed":
+        metadata = obj.get("metadata") or {}
+        user_id = int(metadata.get("user_id", 0)) or None
+
+        if obj.get("mode") == "subscription":
+            # Samotná session nenese stav předplatného, appka si ho proto
+            # dotáhne ze Stripu — ať v DB skončí i datum konce období.
+            subscription_id = obj.get("subscription")
+            if subscription_id:
+                try:
+                    sub = stripe.Subscription.retrieve(subscription_id)
+                    _sync_subscription_from_stripe(sub, user_id=user_id)
+                except Exception as e:
+                    print(f"[stripe] nepodařilo se načíst předplatné {subscription_id}: {e}")
+                    if user_id:
+                        db.upsert_subscription(
+                            user_id=user_id, status="active",
+                            stripe_customer_id=obj.get("customer"),
+                            stripe_subscription_id=subscription_id,
+                        )
+        else:
             tokens = int(metadata.get("tokens", 0))
             if user_id and tokens:
-                db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{session['id']}")
+                db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
+
+    elif event_type.startswith("customer.subscription."):
+        # created / updated / deleted — u deleted pošle Stripe status
+        # 'canceled', takže appka nepotřebuje větvit, stačí zrcadlit.
+        if not db.update_subscription_by_stripe_id(
+            obj["id"], obj.get("status", "inactive"), _period_end_from_subscription(obj)
+        ):
+            _sync_subscription_from_stripe(obj)
+
+    elif event_type in ("invoice.payment_succeeded", "invoice.payment_failed"):
+        # Obnovení nebo neúspěšné strhnutí — appka si dotáhne aktuální
+        # stav předplatného, ať 'past_due' nebo prodloužené období
+        # dorazí do DB i bez samostatné customer.subscription.updated.
+        subscription_id = obj.get("subscription")
+        if subscription_id:
+            try:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                _sync_subscription_from_stripe(sub)
+            except Exception as e:
+                print(f"[stripe] nepodařilo se načíst předplatné {subscription_id}: {e}")
 
     return {"status": "ok"}
 
@@ -2207,6 +2435,18 @@ def run_transparency_daily_tickets(request: Request):
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
 
+def _ticket_units(total_odds: Optional[float], status: str) -> float:
+    """
+    Výsledek jednoho tiketu při jednotkovém vkladu: výhra vynese kurz
+    mínus vsazená jednotka, prohra sebere celou jednotku. Appka na tomhle
+    staví veřejně vykazovaná čísla místo korun — viz poznámka u
+    profit_units v public_transparency.
+    """
+    if status == "won":
+        return round((total_odds or 0) - 1.0, 2)
+    return -1.0
+
+
 @app.get("/public/transparency")
 def public_transparency(limit: int = 100):
     """
@@ -2241,8 +2481,14 @@ def public_transparency(limit: int = 100):
             "ticket_type": ticket.ticket_type,
             "status": status,
             "total_odds": ticket.total_odds,
-            "stake": r.get("actual_stake_amount"),
-            "profit": r.get("actual_profit_loss") if resolved else None,
+            # Výsledek appka veřejně vykazuje v JEDNOTKÁCH, ne v korunách:
+            # každý tiket = 1 jednotka vkladu. Uložené actual_stake_amount
+            # jsou u automaticky generovaných tiketů náhodně přiřazené
+            # částky (viz DAILY_TICKETS_STAKE_CHOICES), ne skutečně vsazené
+            # peníze — publikovat je jako reálný vklad by bylo tvrzení,
+            # které neodpovídá skutečnosti. Úspěšnost a ROI přitom zůstávají
+            # nedotčené, protože jsou vlastností VÝBĚRŮ, ne velikosti sázky.
+            "profit_units": _ticket_units(ticket.total_odds, status) if resolved else None,
             "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
             "selection_count": len(ticket.selections),
         }
@@ -2260,19 +2506,49 @@ def public_transparency(limit: int = 100):
             entry["selections"] = None  # appka výběry schválně skrývá, dokud tiket neskončí
         tickets.append(entry)
 
-    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r.get("actual_stake_amount") is not None]
+    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r["ticket"].total_odds]
     won_rows = [r for r in resolved_rows if r["status"] == "won"]
-    total_staked = sum(r["actual_stake_amount"] for r in resolved_rows)
-    total_profit = sum(r.get("actual_profit_loss") or 0 for r in resolved_rows)
+
+    # Křivka kumulativního zisku pro graf — appka ji staví CHRONOLOGICKY
+    # (rows jsou seřazené od nejnovějšího), aby šla vykreslit zleva doprava.
+    equity_curve = []
+    cumulative = 0.0
+    for r in sorted(resolved_rows, key=lambda x: x["created_at"]):
+        cumulative += _ticket_units(r["ticket"].total_odds, r["status"])
+        created_at = r["created_at"]
+        equity_curve.append({
+            "date": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "units": round(cumulative, 2),
+        })
+
     stats = {
         "resolved_count": len(resolved_rows),
         "won_count": len(won_rows),
         "win_rate_pct": round(len(won_rows) / len(resolved_rows) * 100, 1) if resolved_rows else None,
-        "total_staked": total_staked,
-        "total_profit": round(total_profit, 2),
-        "roi_pct": round(total_profit / total_staked * 100, 1) if total_staked else None,
+        # Zisk i ROI při jednotkovém vkladu na každý tiket — ROI je tedy
+        # přímo průměrný výnos na vsazenou jednotku.
+        "units_profit": round(cumulative, 2),
+        "roi_pct": round(cumulative / len(resolved_rows) * 100, 1) if resolved_rows else None,
     }
-    return {"tickets": tickets, "stats": stats}
+    return {"tickets": tickets, "stats": stats, "equity_curve": equity_curve}
+
+
+@app.get("/transparentni-ucet", response_class=HTMLResponse)
+def transparency_html(limit: int = 100):
+    """
+    Veřejná stránka transparentního účtu — stejná data jako
+    /public/transparency, jen v HTML. Je to zároveň landing page:
+    odkaz z fóra, z Telegramu i z profilu na Instagramu vede sem.
+
+    Vykresluje se na serveru schválně — hlavní web je aplikace v
+    JavaScriptu a náhled jejího odkazu je všude prázdný, což u odkazu na
+    tipérskou službu vypadá podezřele. Tahle stránka ukáže čísla i
+    crawlerovi.
+    """
+    data = public_transparency(limit=limit)
+    return HTMLResponse(
+        content=transparency_page.render_page(data["tickets"], data["stats"], data.get("equity_curve"))
+    )
 
 
 def _todays_client_picks(target_user_id: int) -> list[dict]:
@@ -2346,10 +2622,16 @@ def client_tickets_send(request: Request):
         raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
 
     picks = _todays_client_picks(int(target_user_id_raw))
-    subscriber_chat_ids = db.get_active_telegram_subscribers()
+
+    # Rozesílka se ptá VÝHRADNĚ na platící (get_paid_telegram_subscribers
+    # dělá JOIN na subscriptions). get_active_telegram_subscribers() by
+    # vrátilo i všechny, kdo si kdy jen napsali /start — tedy i lidi bez
+    # jediné zaplacené koruny.
+    recipients = db.get_paid_telegram_subscribers()
 
     results = []
-    for chat_id in subscriber_chat_ids:
+    for recipient in recipients:
+        chat_id = recipient["chat_id"]
         for r in picks:
             try:
                 ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id)
@@ -2357,11 +2639,36 @@ def client_tickets_send(request: Request):
             except Exception as e:
                 results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": f"error: {e}"})
 
-    return {"picks_sent": [r["ticket_id"] for r in picks], "results": results}
+    return {
+        "picks_sent": [r["ticket_id"] for r in picks],
+        "recipients": len(recipients),
+        "results": results,
+    }
+
+
+@app.post("/admin/telegram-sync")
+def admin_telegram_sync(request: Request):
+    """
+    Uklidí Telegram po lidech, kterým předplatné doběhlo — pošle jim
+    zprávu proč a označí je jako neaktivní. Rozesílka je sice vynechá
+    i bez tohohle (ptá se na platnost při každém běhu), ale bez zprávy
+    by se nikdy nedozvěděli, že jim tikety přestaly chodit záměrně.
+    Pouštět stejnou naplánovanou úlohou jako denní tikety.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    lapsed = db.get_lapsed_telegram_chats()
+    for row in lapsed:
+        _send_telegram_message(row["chat_id"], TELEGRAM_EXPIRED_MESSAGE)
+        db.set_telegram_chat_active(row["chat_id"], False)
+
+    return {"deactivated": len(lapsed), "chat_ids": [r["chat_id"] for r in lapsed]}
 
 
 TELEGRAM_WELCOME_MESSAGE = (
-    "Ahoj! 👋 Vítej u ApexSignal.\n\n"
+    "Ahoj! 👋 Účet je spárovaný, předplatné máš aktivní.\n\n"
     "Od teď ti sem budu každé ráno posílat:\n"
     "🎫 1× krátký tiket\n"
     "🎫 1× střední tiket\n"
@@ -2369,8 +2676,52 @@ TELEGRAM_WELCOME_MESSAGE = (
     "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
     "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
     "co sází místo tebe.\n\n"
+    "Všechny tikety včetně prohraných najdeš veřejně na apexsignal.cz/transparentni-ucet.\n\n"
+    "18+. Hazardní hraní může být návykové — sázej jen to, co můžeš prohrát.\n\n"
     "Ať se daří! ⚽"
 )
+
+# Appka tuhle zprávu pošle každému, kdo botovi napíše bez platného
+# párovacího kódu. Dřív takový člověk rovnou začal dostávat placené
+# tikety — /start stačilo k odběru a nikde se neověřovalo, jestli za ním
+# stojí platba.
+TELEGRAM_NO_ACCESS_MESSAGE = (
+    "Ahoj! 👋 Tenhle kanál je pro předplatitele ApexSignalu.\n\n"
+    "Předplatné aktivuješ v aplikaci na apexsignal.cz — po zaplacení tam najdeš tlačítko "
+    "„Propojit Telegram“, které tě sem vrátí a účet se spáruje sám.\n\n"
+    "Jak si model vede, si můžeš kdykoli zdarma zkontrolovat na "
+    "apexsignal.cz/transparentni-ucet — jsou tam všechny tikety včetně prohraných.\n\n"
+    "18+"
+)
+
+TELEGRAM_LINK_INVALID_MESSAGE = (
+    "Tenhle párovací odkaz už neplatí — kódy vydržím hodinu a jdou použít jen jednou.\n\n"
+    "Vygeneruj si nový v aplikaci na apexsignal.cz."
+)
+
+TELEGRAM_EXPIRED_MESSAGE = (
+    "Předplatné ti skončilo, takže sem další tikety posílat nebudu. 🙏\n\n"
+    "Kdykoli ho můžeš obnovit v aplikaci na apexsignal.cz a kanál naskočí zpátky.\n\n"
+    "Díky, že jsi to zkusil — a ať se daří."
+)
+
+
+def _send_telegram_message(chat_id: int, text: str) -> None:
+    """Odeslání jedné textové zprávy. Chybu appka jen zaloguje — když
+    selže uvítání, nesmí to shodit celý webhook (Telegram by ho pak
+    opakoval dokola)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("[telegram] TELEGRAM_BOT_TOKEN není nastavený, zprávu neposílám")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[telegram] chyba při odesílání zprávy na {chat_id}: {e}")
 
 
 @app.post("/telegram/webhook")
@@ -2394,17 +2745,45 @@ async def telegram_webhook(request: Request):
     text = (message.get("text") or "").strip()
     print(f"[telegram-webhook] chat_id={chat_id} name={chat.get('first_name')!r} text={text!r}")
 
-    if chat_id and text == "/start":
-        is_new = db.add_telegram_subscriber(chat_id, chat.get("first_name"))
-        if is_new:
-            try:
-                requests.post(
-                    f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-                    json={"chat_id": chat_id, "text": TELEGRAM_WELCOME_MESSAGE},
-                    timeout=10,
-                )
-            except Exception as e:
-                print(f"[telegram-webhook] chyba při odesílání uvítací zprávy: {e}")
+    if not chat_id:
+        return {"ok": True}
+
+    if text.startswith("/start"):
+        # "/start ABC123" — kód z odkazu, který si uživatel vygeneroval v
+        # appce po zaplacení. Bez kódu (holé /start) appka nemá jak zjistit,
+        # kdo to je, takže přístup nedává — jen vysvětlí, jak na to.
+        parts = text.split(maxsplit=1)
+        code = parts[1].strip() if len(parts) > 1 else ""
+
+        if not code:
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+            return {"ok": True}
+
+        linked_user_id = db.consume_telegram_link_code(code)
+        if linked_user_id is None:
+            _send_telegram_message(chat_id, TELEGRAM_LINK_INVALID_MESSAGE)
+            return {"ok": True}
+
+        # Kód mohl být vydaný ještě v době platného předplatného, ale
+        # uplatněný až po jeho konci — appka proto ověřuje platbu znovu
+        # tady, ne jen při vydávání kódu.
+        if not db.has_active_subscription(linked_user_id):
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+            return {"ok": True}
+
+        db.link_telegram_chat(chat_id, linked_user_id, chat.get("first_name"))
+        _send_telegram_message(chat_id, TELEGRAM_WELCOME_MESSAGE)
+        return {"ok": True}
+
+    if text == "/stav":
+        user_id = db.get_user_id_for_chat(chat_id)
+        if user_id and db.has_active_subscription(user_id):
+            sub = db.get_subscription(user_id) or {}
+            period_end = sub.get("current_period_end")
+            konec = period_end.strftime("%-d. %-m. %Y") if hasattr(period_end, "strftime") else "neznámo"
+            _send_telegram_message(chat_id, f"Předplatné je aktivní. Zaplaceno do {konec}.")
+        else:
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
 
     return {"ok": True}
 
