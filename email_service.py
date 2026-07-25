@@ -114,6 +114,38 @@ def send_welcome_email(to_email: str) -> bool:
     return send_email(to_email, "Vítej v ApexSignal", _wrap_html(inner))
 
 
+def send_channel_welcome_email(to_email: str, telegram_deep_link: str) -> bool:
+    """
+    Appka tohle posílá HNED po úspěšném zaplacení kanálu (viz webhook
+    v backend_api.py) — zákazník appce nezakládá účet, takže tenhle
+    e-mail je JEDINÝ způsob, jak se k němu párovací odkaz na Telegram
+    vůbec dostane.
+    """
+    inner = f"""
+    <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Díky za platbu! Kanál je aktivní.</p>
+    <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
+      Zbývá poslední krok — propojit Telegram, kam appka bude posílat tikety.
+      Klikni na tlačítko níž (na telefonu, kde máš Telegram nainstalovaný):
+    </p>
+    <p style="margin:24px 0;">
+      <a href="{telegram_deep_link}" style="background:#19E0C4;color:#0B0E14;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">Propojit Telegram</a>
+    </p>
+    <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
+      Odkaz je platný hodinu a jde použít jen jednou. Pokud vyprší, napiš appce
+      tenhle e-mail znovu (přes formulář na apexsignal.cz/transparentni-ucet)
+      a pošle ti nový.
+    </p>
+    <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
+      Od zítřejšího rána ti budou chodit 2 tikety denně (krátký a střední),
+      v pátek navíc BOOST. Sázku si vždycky klikáš sám, kde chceš.
+    </p>
+    <p style="color:#8A93A8;font-size:12px;line-height:1.6;">
+      18+. Hazardní hraní může být návykové. Sázej jen to, co si můžeš dovolit prohrát.
+    </p>
+    """
+    return send_email(to_email, "Kanál je aktivní — propoj si Telegram", _wrap_html(inner))
+
+
 def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     inner = f"""
     <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Někdo (doufejme, že ty) požádal o obnovení hesla k účtu ApexSignal.</p>
