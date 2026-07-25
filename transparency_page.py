@@ -376,6 +376,22 @@ font-size:.94rem;font-weight:600;border:1px solid var(--accent);color:var(--acce
 .btn-disabled:hover{background:transparent}
 .badge-soon{display:inline-block;font-size:.95rem;font-weight:700;letter-spacing:.02em;
 color:var(--muted);background:var(--line-soft);padding:4px 10px;border-radius:4px}
+.offer-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;
+font-size:.82rem;color:var(--muted);counter-reset:step}
+.offer-steps li{counter-increment:step;padding-left:24px;position:relative}
+.offer-steps li::before{content:counter(step);position:absolute;left:0;top:0;width:16px;height:16px;
+border-radius:50%;background:var(--accent-glow);color:var(--accent);font-size:.66rem;font-weight:700;
+display:flex;align-items:center;justify-content:center;line-height:1}
+.resend{background:var(--raise);border:1px solid var(--line);border-radius:6px;padding:22px}
+.resend-form{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+.resend-form input{flex:1;min-width:220px;padding:11px 14px;border-radius:5px;border:1px solid var(--line);
+background:var(--paper);color:var(--ink);font-size:.94rem;font-family:inherit}
+.resend-form input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.resend-form button{flex-shrink:0;cursor:pointer}
+.resend-form button:disabled{opacity:.6;cursor:default}
+.resend-status{font-size:.86rem;margin-top:10px}
+.resend-status.ok{color:var(--up)}
+.resend-status.err{color:var(--down)}
 .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);
 border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .cell{background:var(--raise);padding:15px 16px;display:flex;flex-direction:column;gap:4px}
@@ -470,6 +486,44 @@ SCRIPT = """
 """
 
 
+RESEND_SCRIPT = """
+(function(){
+  var form=document.getElementById('resend-form'); if(!form) return;
+  var status=document.getElementById('resend-status');
+  var input=document.getElementById('resend-email');
+  var btn=form.querySelector('button');
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var email=(input.value||'').trim();
+    if(!email) return;
+    btn.disabled=true;
+    status.hidden=false;
+    status.className='resend-status';
+    status.textContent='Odesílám…';
+    fetch('%BACKEND_URL%/telegram/resend-link',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email:email})
+    }).then(function(r){
+      return r.json().catch(function(){return {};}).then(function(body){
+        if(!r.ok) throw new Error(body.detail||'Nepodařilo se odeslat, zkus to prosím znovu.');
+        return body;
+      });
+    }).then(function(){
+      status.className='resend-status ok';
+      status.textContent='Hotovo — koukni do e-mailu, odkaz dorazí během chvíle.';
+      form.reset();
+    }).catch(function(err){
+      status.className='resend-status err';
+      status.textContent=err.message||'Nepodařilo se odeslat, zkus to prosím znovu.';
+    }).finally(function(){
+      btn.disabled=false;
+    });
+  });
+})();
+"""
+
+
 def _script_for(curve: list[dict]) -> str:
     """Do JS appka propašuje jen rozměry a rozsah os — samotná data jdou
     zvlášť v <script type="application/json">, ať se nemusí escapovat."""
@@ -529,6 +583,10 @@ def render_page(
 
     payment_link = os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip()
     app_url = os.environ.get("APP_URL", "https://apexsignal.cz").strip()
+    # Stránka běží na Netlify (apexsignal.cz), appka samotná na Renderu —
+    # relativní URL by tu mířila na Netlify, kde tahle cesta neexistuje,
+    # proto formulář dole musí volat backend na jeho vlastní doméně.
+    backend_url = os.environ.get("BACKEND_PUBLIC_URL", "https://apexsignal-backend.onrender.com").strip()
 
     compare_line = ""
     if app_equivalent_kc:
@@ -562,6 +620,11 @@ def render_page(
       <div class="offer-price">2 500 Kč <small>/ měsíc</small></div>
       <p>Každé ráno 1 krátký a 1 střední tiket, v pátek navíc BOOST s kurzem 10+.
       Nic si sám negeneruješ, appka pošle výběr rovnou na Telegram. {compare_line}</p>
+      <ol class="offer-steps">
+        <li>Zaplatíš kartou přes Stripe — bez zakládání účtu.</li>
+        <li>Hned ti přijde e-mail s odkazem na propojení Telegramu.</li>
+        <li>Klikneš na odkaz a od dalšího rána ti chodí tikety.</li>
+      </ol>
       <a class="btn btn-fill" href="{escape(payment_link) if payment_link else '#'}">Aktivovat kanál</a>
     </div>
     <div class="offer">
@@ -624,6 +687,17 @@ def render_page(
 
 {offers}
 
+<section class="resend">
+  <h2>Už jsi zaplatil, ale ztratil odkaz na Telegram?</h2>
+  <p class="lede">Párovací odkaz platí jen hodinu a jde použít jen jednou. Napiš e-mail, kterým jsi
+  platil kanál, a pošleme nový.</p>
+  <form class="resend-form" id="resend-form">
+    <input type="email" id="resend-email" name="email" placeholder="e-mail, kterým jsi platil" required autocomplete="email">
+    <button type="submit" class="btn btn-fill">Poslat nový odkaz</button>
+  </form>
+  <p class="resend-status" id="resend-status" role="status" hidden></p>
+</section>
+
 <section>
   <h2>Historie tiketů</h2>
   <div class="tickets">{cards}</div>
@@ -640,5 +714,6 @@ def render_page(
 </div>
 <script id="curve-data" type="application/json">{curve_json}</script>
 <script>{_script_for(curve)}</script>
+<script>{RESEND_SCRIPT.replace("%BACKEND_URL%", backend_url)}</script>
 </body>
 </html>"""
