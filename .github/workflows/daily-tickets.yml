@@ -1,0 +1,41 @@
+# Appka dřív neměla ŽÁDNÉ automatické spouštění denních tiketů — historie
+# ukazovala nepravidelné časy vzniku (12:53, 22:00, 08:55...), což je
+# vzorec ručního volání, ne cronu. Pro placený kanál (2 500 Kč/měsíc) je
+# tohle kritická díra: zaplacený a spárovaný zákazník by nedostal nic, dokud
+# by appka ručně nezavolala admin endpointy.
+#
+# 05:00 UTC = 7:00 v Praze v létě (CEST), 6:00 v zimě (CET) — appka tenhle
+# roční posun o hodinu bere jako přijatelný, přesnost na minutu tu nehraje
+# roli. Tři kroky jdou za sebou v jednom běhu, ne jako tři samostatné
+# naplánované úlohy, ať appka nemusí řešit, jestli druhý krok náhodou
+# neběží dřív než první.
+#
+# Vyžaduje repozitářový secret ADMIN_TASK_KEY (Settings → Secrets and
+# variables → Actions → New repository secret) se stejnou hodnotou, jakou
+# appka má na Renderu v proměnné ADMIN_TASK_KEY.
+name: Denní tikety pro placený kanál
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}  # appka umožní i ruční spuštění z záložky Actions
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vygenerovat dnešní tikety (kratky/stredni, v patek i boost)
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/daily-tickets \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      - name: Rozeslat dnesni vyber platicim predplatitelum na Telegram
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/client-tickets-send \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      - name: Odpojit a upozornit predplatitele, kterym doběhlo predplatne
+        if: always()  # appka tohle chce pustit, i kdyz predchozi krok selze
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/telegram-sync \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
