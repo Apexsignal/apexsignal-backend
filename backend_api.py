@@ -2565,7 +2565,7 @@ def public_transparency(limit: int = 100):
                     "league": s.league, "country": s.country,
                     "result": None,
                 }
-                for s in ticket.selections
+                for i, s in enumerate(ticket.selections)
             ]
         tickets.append(entry)
 
