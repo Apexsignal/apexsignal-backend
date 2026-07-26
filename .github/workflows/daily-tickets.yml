@@ -39,11 +39,6 @@ jobs:
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/test3-daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
 
-      - name: Vygenerovat dnesni tikety na test3 (2x kratky, 2x stredni, sazka 1000 Kc)
-        run: |
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/test3-daily-tickets \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
-
       - name: Rozeslat dnesni vyber platicim predplatitelum na Telegram
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/client-tickets-send \
