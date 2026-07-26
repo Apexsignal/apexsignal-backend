@@ -162,8 +162,16 @@ def normalize_to_match_input(
         * rest_days_adjustment_factor(home_rest_days) * home_dead_rubber
     away_factor = weather_factor * injury_goal_adjustment_factor(away_injury_count) \
         * rest_days_adjustment_factor(away_rest_days) * away_dead_rubber
-    home_xg = _estimate_expected_goals(home_stats, is_home=True, recency_weighted_avg=home_recent_form, adjustment_factor=home_factor)
-    away_xg = _estimate_expected_goals(away_stats, is_home=False, recency_weighted_avg=away_recent_form, adjustment_factor=away_factor)
+    # Domácí góly appka počítá i podle HOSTOVA obranného průměru (a naopak)
+    # — viz opponent_stats v _estimate_expected_goals.
+    home_xg = _estimate_expected_goals(
+        home_stats, is_home=True, recency_weighted_avg=home_recent_form,
+        adjustment_factor=home_factor, opponent_stats=away_stats,
+    )
+    away_xg = _estimate_expected_goals(
+        away_stats, is_home=False, recency_weighted_avg=away_recent_form,
+        adjustment_factor=away_factor, opponent_stats=home_stats,
+    )
     expected_cards = _estimate_expected_cards(home_stats, away_stats)
 
     # FALLBACK KURZY: Pokud API-Football nevrátil kurzy, estimuj z model pravděpodobnosti
@@ -482,29 +490,45 @@ def motivation_adjustment_factor(motivation_factor: float) -> float:
         return None
 
 
+DEFENSE_FACTOR_MIN = 0.6  # appka obranou sílu soupeře omezí na tohle rozpětí — i tým
+DEFENSE_FACTOR_MAX = 1.6  # s extrémní (často málo podloženou) obranou nesmí xG zlomit
+
+
 def _estimate_expected_goals(
     team_stats: dict, is_home: bool, recency_weighted_avg: Optional[float] = None,
-    adjustment_factor: float = 1.0,
+    adjustment_factor: float = 1.0, opponent_stats: Optional[dict] = None,
 ) -> float:
     """
     Zjednodušený xG odhad: průměr vstřelených gólů, upravený o domácí/
-    venkovní výhodu, se třemi vrstvami opatrnosti navrch:
+    venkovní výhodu a o obrannou sílu SOUPEŘE, se čtyřmi vrstvami
+    opatrnosti navrch:
 
     1) Shrinkage na malém vzorku — na začátku sezóny (málo odehraných
        zápasů) je sezónní průměr statisticky nespolehlivý (velký šum).
        "Stáhneme" ho blíž k ligovému průměru úměrně tomu, kolik dat tým
-       má; s přibývajícími zápasy korekce postupně mizí.
+       má; s přibývajícími zápasy korekce postupně mizí. Appka stejnou
+       opatrnost aplikuje i na obranou sílu soupeře.
     2) Vážení nedávné formy — pokud `recency_weighted_avg` je dostupný
        (poslední zápasy vážené víc než starší, viz data_provider.
        adapt_recent_form_goals), zkombinuje se se sezónním průměrem,
        aby appka reagovala na aktuální formu, ne jen na celosezónní stav.
-    3) adjustment_factor — souhrnný multiplikátor počasí × zranění ×
+    3) opponent_stats — appka dřív počítala góly týmu jen z JEHO
+       VLASTNÍHO útočného průměru a soupeřovu obranu úplně ignorovala,
+       i když appka ta data (goals.against z /teams/statistics) z API
+       dostávala celou dobu, jen je zahazovala (viz
+       adapt_api_football_team_stats). Tým se sezónním průměrem
+       "2 góly/zápas" proti nejlepší obraně ligy reálně dá míň, než
+       proti nejhorší — appka teď avg_goals_conceded_last_10 soupeře
+       promítne jako multiplikátor (poměr k ligovému průměru), stejnou
+       shrinkage logikou jako u vlastního útoku.
+    4) adjustment_factor — souhrnný multiplikátor počasí × zranění ×
        odpočinku × motivace (viz *_adjustment_factor funkce výše); bez
        jakýchkoli dat zůstává 1.0 = beze změny.
 
-    V produkci by šlo nahradit plnohodnotným xG modelem (Dixon-Coles,
-    Poisson regrese s útočnou/obrannou silou týmu) — to ale vyžaduje
-    samostatný (a placený) zdroj dat, viz poznámka v probability_model.py.
+    V produkci by šlo nahradit plnohodnotným Dixon-Coles modelem
+    (odhad útočné/obranné síly regresí přes celou ligovou tabulku, ne
+    jen pár týmu) — to by vyžadovalo samostatný (a placený) zdroj dat.
+    Tohle je levnější mezikrok se stejnými daty, co appka už beztak má.
     """
     avg_goals_scored = team_stats.get("avg_goals_scored_last_10", 1.2)
     games_played = team_stats.get("games_played", 0)
@@ -516,8 +540,19 @@ def _estimate_expected_goals(
     if recency_weighted_avg is not None:
         shrunk_avg = RECENCY_BLEND_WEIGHT * recency_weighted_avg + (1 - RECENCY_BLEND_WEIGHT) * shrunk_avg
 
+    defense_factor = 1.0
+    if opponent_stats is not None:
+        opp_conceded = opponent_stats.get("avg_goals_conceded_last_10")
+        if opp_conceded is not None:
+            opp_games = opponent_stats.get("games_played", 0)
+            shrunk_opp_conceded = (
+                opp_games * opp_conceded + SHRINKAGE_PSEUDO_GAMES * LEAGUE_AVERAGE_GOALS_PER_TEAM
+            ) / (opp_games + SHRINKAGE_PSEUDO_GAMES)
+            defense_factor = shrunk_opp_conceded / LEAGUE_AVERAGE_GOALS_PER_TEAM
+            defense_factor = min(max(defense_factor, DEFENSE_FACTOR_MIN), DEFENSE_FACTOR_MAX)
+
     home_advantage_factor = 1.10 if is_home else 0.92
-    return round(shrunk_avg * home_advantage_factor * adjustment_factor, 2)
+    return round(shrunk_avg * home_advantage_factor * adjustment_factor * defense_factor, 2)
 
 
 def adapt_recent_form_goals(fixtures: list[dict], team_id: int, venue: Optional[str] = None) -> Optional[float]:
@@ -1654,6 +1689,14 @@ def adapt_api_football_team_stats(stats: dict) -> dict:
         stats.get("goals", {}).get("for", {}).get("average", {}).get("total", "1.2")
         or "1.2"
     )
+    # appka tohle pole ze stejné odpovědi dřív vůbec nečetla — model tak
+    # počítal góly týmu jen z JEHO VLASTNÍHO útoku a ignoroval, jak dobrou
+    # obranu má soupeř (viz _estimate_expected_goals). API ho přitom
+    # appce posílá v tom samém volání, appka ho jen zahazovala.
+    goals_conceded_avg = (
+        stats.get("goals", {}).get("against", {}).get("average", {}).get("total", "1.3")
+        or "1.3"
+    )
     yellow_cards = stats.get("cards", {}).get("yellow", {})
     total_yellow = sum(
         int(v.get("total") or 0) for v in yellow_cards.values() if isinstance(v, dict)
@@ -1661,6 +1704,7 @@ def adapt_api_football_team_stats(stats: dict) -> dict:
     played = stats.get("fixtures", {}).get("played", {}).get("total") or 1
     return {
         "avg_goals_scored_last_10": float(goals_avg),
+        "avg_goals_conceded_last_10": float(goals_conceded_avg),
         "avg_cards_last_10": round(total_yellow / played, 2),
         "games_played": played,
     }
