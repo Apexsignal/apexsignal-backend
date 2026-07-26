@@ -3099,25 +3099,33 @@ class AdminSeedShowcaseRequest(BaseModel):
     recommended_stake_pct: float = 0.0
     stake_amount: float
     created_at: Optional[str] = None  # ISO datetime — appka zachová reálné datum starší výhry
+    target_user_id: Optional[int] = None  # výchozí DAILY_TICKETS_USER_ID, appka umožní i jiný cílový účet
+    status: str = "won"  # appka defaultně "won" kvůli zpětné kompatibilitě (výkladní skříň ukazuje jen výhry)
+    selection_results: Optional[list[str]] = None  # per-výběr výsledek (won/lost/pending), stejné pořadí jako selections
 
 
 @app.post("/admin/showcase/seed")
 def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
     """
-    Appka tímhle ručně přidá do výkladní skříně (/showcase/tickets) starší
-    JIŽ VYHRANÉ tikety appky (nejčastěji z testovacích účtů) — appka je
-    zkopíruje pod DAILY_TICKETS_USER_ID účet se zachovaným datem, appka
-    nemění nic na tom, co se reálně stalo (appka tikety zkopíruje 1:1,
-    jen appka je fyzicky přesune pod účet, ze kterého veřejná appka čte).
+    Appka tímhle ručně přidá starší tiket appky (nejčastěji z testovacích
+    účtů) na cílový účet se zachovaným datem — appka nemění nic na tom,
+    co se reálně stalo (appka tiket zkopíruje 1:1, jen appka ho fyzicky
+    přesune pod jiný účet). Původně jen appky vlastní výkladní skříň
+    (/showcase/tickets, DAILY_TICKETS_USER_ID, jen výhry) — target_user_id
+    a status appka přidala i pro obnovu omylem smazaných tiketů na
+    libovolném účtu, s libovolným výsledkem.
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if not target_user_id_raw:
-        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
-    target_user_id = int(target_user_id_raw)
+    if req.target_user_id is not None:
+        target_user_id = req.target_user_id
+    else:
+        target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
 
     # "dlouhy" je starší appky vlastní název pro BOOST, pořád se objevuje
     # ve starších uložených datech appky — insert_ticket ho ale nepustí
@@ -3144,7 +3152,16 @@ def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
     created_at_dt = datetime.fromisoformat(req.created_at) if req.created_at else None
     ticket_id = repo.save_ticket(target_user_id, ticket, created_at=created_at_dt)
     repo.set_actual_stake(ticket_id, req.stake_amount, req.total_odds)
-    repo.set_ticket_status(ticket_id, "won")
+    repo.set_ticket_status(ticket_id, req.status)
+
+    if req.selection_results:
+        row = db.fetch_ticket_rows(ticket_id=ticket_id)
+        if row:
+            selection_ids = [s.get("id") for s in row[0].get("selections", [])]
+            for selection_id, result in zip(selection_ids, req.selection_results):
+                if selection_id is not None:
+                    db.update_selection_result(selection_id, result)
+
     return {"ticket_id": ticket_id, "status": "seeded"}
 
 
