@@ -2406,7 +2406,7 @@ TRANSPARENCY_STAKE = 500.0
 def run_transparency_daily_tickets(request: Request):
     """
     Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
-    denně vygeneruje 1 kratky + 1 stredni tiket (v pátek navíc 1 boost),
+    denně vygeneruje 2 kratky + 2 stredni tikety (v pátek navíc 1 boost),
     na každý appka automaticky vsadí pevných 500 Kč — appka tenhle účet
     nikdy nemaskuje ani neupravuje, jde čistě o transparentní ukázku
     appčina výkonu (viz GET /public/transparency). Odděleno od
@@ -2438,31 +2438,34 @@ def run_transparency_daily_tickets(request: Request):
 
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-    plan = [("kratky", 20, 2), ("stredni", 50, 2)]
+    plan = [("kratky", 20, 2, 2), ("stredni", 50, 2, 2)]
     if today_prague.weekday() == 4:  # pátek
-        plan.append(("boost", 80, 5))
+        plan.append(("boost", 80, 5, 1))
 
     results = []
-    for label, risk_level, days in plan:
+    for label, risk_level, days, target_count in plan:
         already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
-        if already_today > 0:
-            results.append({"type": label, "status": "already_generated_today"})
-            continue
-        try:
-            ticket = _generate_one_ticket_for_cron(
-                target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
-            )
-        except Exception as e:
-            print(f"[transparency-daily-tickets] {label}: generování selhalo: {e}")
-            results.append({"type": label, "status": "generation_error", "error": str(e)})
-            continue
-        if ticket is None:
-            results.append({"type": label, "status": "failed_to_generate"})
+        to_generate = target_count - already_today
+        if to_generate <= 0:
+            results.append({"type": label, "status": "already_generated_today", "count": already_today})
             continue
 
-        ticket_id = repo.save_ticket(target_user_id, ticket)
-        repo.set_actual_stake(ticket_id, TRANSPARENCY_STAKE, ticket.total_odds)
-        results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE})
+        for _ in range(to_generate):
+            try:
+                ticket = _generate_one_ticket_for_cron(
+                    target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                )
+            except Exception as e:
+                print(f"[transparency-daily-tickets] {label}: generování selhalo: {e}")
+                results.append({"type": label, "status": "generation_error", "error": str(e)})
+                break
+            if ticket is None:
+                results.append({"type": label, "status": "failed_to_generate"})
+                break
+
+            ticket_id = repo.save_ticket(target_user_id, ticket)
+            repo.set_actual_stake(ticket_id, TRANSPARENCY_STAKE, ticket.total_odds)
+            results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE})
 
     return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
 
