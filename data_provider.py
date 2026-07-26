@@ -336,6 +336,22 @@ def injury_goal_adjustment_factor(injury_count: int) -> float:
     return factor
 
 
+def adapt_injuries(injuries_raw: list[dict], team_name: str) -> int:
+    """
+    Spočítá počet nahlášených zranění/vyloučení pro konkrétní tým z
+    odpovědi /injuries (viz ApiFootballProvider.get_injuries) — appka
+    z toho umí jen POČET jmen, ne jejich důležitost pro tým, viz
+    injury_goal_adjustment_factor.
+
+    Appka backend_api.py volala data_provider.adapt_injuries(...), ale
+    tahle funkce v data_provider.py nikdy neexistovala (stejná třída
+    bugu jako u adapt_rest_days) — appka to tiše odchytávala přes
+    except Exception a vždy dosadila home_injury_count=away_injury_count=0,
+    takže zranění/vyloučení appka nikdy reálně nepromítala do xG odhadu.
+    """
+    return sum(1 for entry in injuries_raw if (entry.get("team") or {}).get("name") == team_name)
+
+
 def rest_days_adjustment_factor(days_since_last_match: Optional[int]) -> float:
     """
     Multiplikativní faktor (<=1.0) podle počtu dní od posledního zápasu

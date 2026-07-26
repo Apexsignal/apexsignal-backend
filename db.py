@@ -692,6 +692,29 @@ def get_ticket_owner(ticket_id: int) -> Optional[int]:
         return row["user_id"] if row else None
 
 
+def get_selection_owner(selection_id: int) -> Optional[int]:
+    """Get user_id vlastnící tiket, pod který tenhle výběr patří.
+
+    backend_api.py (/selections/{id}/odds, /selections/{id}/result) tuhle
+    funkci volal, ale v db.py nikdy neexistovala — obě volání appka
+    zjistila v auditu, byla vždy shozena AttributeErrorem (bez try/except
+    kolem, appka viditelně vracela 500, ne tichou chybu)."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT t.user_id FROM ticket_selections s "
+            "JOIN tickets t ON t.id = s.ticket_id WHERE s.id = %s",
+            (selection_id,),
+        )
+        row = cur.fetchone()
+        return row["user_id"] if row else None
+
+
+def update_selection_odds(selection_id: int, odds: float) -> None:
+    """Update selection odds."""
+    with get_cursor() as cur:
+        cur.execute("UPDATE ticket_selections SET odds = %s WHERE id = %s", (odds, selection_id))
+
+
 def update_actual_stake(ticket_id: int, stake_amount: float, odds: float) -> bool:
     """Update actual stake."""
     with get_cursor() as cur:
