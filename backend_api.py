@@ -2321,7 +2321,13 @@ def run_daily_tickets(request: Request):
     # čím víc tiketů denně, tím víc má appka co ukázat.
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-    plan = [("kratky", 20, 2, 6), ("stredni", 50, 2, 6)]
+    # Horizont appka rozšířila z 2 na 4 dny (2026-07-26) — na dnech s tenkým
+    # kalendářem appka i s uvolněným prahem (viz FALLBACK_THRESHOLDS) mezi
+    # kandidáty z jen 2 dnů někdy nenašla žádnou kombinaci s ověřenou
+    # výhodou (edge) a tiket appce úplně selhal. Širší okno appce dá víc
+    # zápasů na výběr, aniž by se cokoli měnilo na tom, JAK appka edge
+    # počítá.
+    plan = [("kratky", 20, 4, 6), ("stredni", 50, 4, 6)]
     if today_prague.weekday() in (1, 4):
         plan.append(("boost", 80, 5, 1))
 
@@ -2438,7 +2444,9 @@ def run_transparency_daily_tickets(request: Request):
 
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-    plan = [("kratky", 20, 2, 2), ("stredni", 50, 2, 2)]
+    # Horizont rozšířen z 2 na 4 dny stejně jako u run_daily_tickets výš —
+    # viz komentář tam.
+    plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 2)]
     if today_prague.weekday() == 4:  # pátek
         plan.append(("boost", 80, 5, 1))
 
