@@ -818,13 +818,23 @@ class OddsAPIProvider:
     # ověřila živě přes /v4/sports, ne podle zastaralé dokumentace.
     # Zahrnuté evropské poháry appka teď (mimo sezónu) může vracet
     # prázdné, na podzim se ale appce rozjedou znovu.
+    # 2026-07-26: appka ověřila živě přes /v4/sports, že aktuálně nabízených
+    # fotbalových klíčů je celkem jen 40 — spousta zemí z TIPSPORT_LEAGUE_IDS
+    # (Rumunsko, Česko, Turecko, Chorvatsko, Srbsko, Maďarsko, Slovensko,
+    # Kypr, Izrael, Uruguay, Kolumbie, Japonsko, Austrálie, Saúdská Arábie,
+    # mezinárodní kvalifikace) tam PROSTĚ NENÍ — appka o ně the-odds-api
+    # nemůže požádat, protože appka je nemá, ne kvůli chybě v párování.
+    # Portugalsko a italská Serie B ale live dostupné byly a appka je
+    # předtím neměla nastavené (2 kredity navíc, zanedbatelné vůči rozpočtu
+    # 500/měsíc, viz get_odds níže).
     SPORT_KEYS: dict[Sport, list[str]] = {
         Sport.FOOTBALL: [
             "soccer_epl", "soccer_efl_champ", "soccer_england_league1", "soccer_england_league2",
             "soccer_england_efl_cup",
             "soccer_germany_bundesliga", "soccer_germany_bundesliga2", "soccer_germany_liga3", "soccer_germany_dfb_pokal",
-            "soccer_italy_serie_a",
+            "soccer_italy_serie_a", "soccer_italy_serie_b",
             "soccer_spain_la_liga",
+            "soccer_portugal_primeira_liga",
             "soccer_france_ligue_one",
             "soccer_netherlands_eredivisie",
             "soccer_belgium_first_div",
