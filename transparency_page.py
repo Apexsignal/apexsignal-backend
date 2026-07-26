@@ -327,6 +327,34 @@ def _ticket_card(ticket: dict) -> str:
     )
 
 
+def _ticket_groups(tickets: list[dict]) -> str:
+    """
+    Místo jednoho dlouhého seznamu appka tikety rozdělí do tří
+    rozklikávacích skupin (výhry/prohry/čekající) — počet appka napíše
+    rovnou do záhlaví skupiny, takže nic neschovává (viz "Dost bylo
+    tipérů, co mažou prohry" v hero textu výš), jen appka nenutí
+    návštěvníka scrollovat přes desítky karet naráz, kde prohry vizuálně
+    "křičí" i když je součet v plusu.
+    """
+    won = [t for t in tickets if t.get("status") == "won"]
+    lost = [t for t in tickets if t.get("status") == "lost"]
+    other = [t for t in tickets if t.get("status") not in ("won", "lost")]
+
+    groups = [("won", "Výhry", won), ("lost", "Prohry", lost), ("pending", "Čekající", other)]
+    blocks = [
+        '<details class="ticket-group">'
+        f'<summary><span class="tg-dot {status_class}"></span>{escape(label)}'
+        f'<span class="tg-count">{len(group)}</span></summary>'
+        f'<div class="tickets">{"".join(_ticket_card(t) for t in group)}</div>'
+        "</details>"
+        for status_class, label, group in groups
+        if group
+    ]
+    return "".join(blocks) or (
+        '<p class="lede">Zatím tu není žádný tiket. Jakmile model vybere první, objeví se tady.</p>'
+    )
+
+
 def _stats_block(stats: Optional[dict]) -> str:
     if not stats or not stats.get("resolved_count"):
         return (
@@ -465,6 +493,19 @@ font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas
 .empty-stats{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:6px}
 .empty-stats span{color:var(--muted);font-size:.9rem}
 .tickets{display:flex;flex-direction:column;gap:12px}
+.ticket-groups{display:flex;flex-direction:column;gap:12px}
+.ticket-group{background:var(--raise);border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.ticket-group summary{cursor:pointer;padding:15px 16px;font-weight:700;font-size:.95rem;
+list-style:none;display:flex;align-items:center;gap:10px;user-select:none}
+.ticket-group summary::-webkit-details-marker{display:none}
+.ticket-group summary::after{content:"▾";margin-left:auto;color:var(--muted);font-size:.75rem;font-weight:400}
+.ticket-group[open] summary::after{content:"▴"}
+.ticket-group[open] summary{border-bottom:1px solid var(--line-soft)}
+.ticket-group .tickets{padding:14px 16px}
+.tg-dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.tg-dot.won{background:var(--up)}
+.tg-dot.lost{background:var(--down)}
+.tg-count{color:var(--muted);font-weight:400;font-size:.85rem}
 .ticket{background:var(--raise);border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .t-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;
 border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
@@ -668,9 +709,7 @@ def render_page(
     else:
         description = "Veřejný účet ApexSignalu — všechny fotbalové tikety včetně prohraných, bez mazání."
 
-    cards = "".join(_ticket_card(t) for t in tickets) or (
-        '<p class="lede">Zatím tu není žádný tiket. Jakmile model vybere první, objeví se tady.</p>'
-    )
+    cards = _ticket_groups(tickets)
 
     units_profit = (stats or {}).get("units_profit")
     hero_stat = ""
@@ -824,7 +863,7 @@ def render_page(
   <p class="lede">Zápasy appka ukazuje hned u každého tiketu. Skrytá zůstává jen samotná sázka — trh, konkrétní
   výběr a kurz té jedné nohy — dokud appka tiket nevyhodnotí. Jde tak dopředu ověřit, na co appka sází, ale
   nejde si to okopírovat, ani appka nemůže zpětně tvrdit něco jiného, než na co skutečně vsadila.</p>
-  <div class="tickets">{cards}</div>
+  <div class="ticket-groups">{cards}</div>
 </section>
 
 <footer>
