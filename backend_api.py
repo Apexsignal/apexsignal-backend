@@ -2854,7 +2854,6 @@ TELEGRAM_WELCOME_MESSAGE = (
     "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
     "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
     "co sází místo tebe.\n\n"
-    "Všechny tikety včetně prohraných najdeš veřejně na apexsignal.cz/transparentni-ucet.\n\n"
     "18+. Hazardní hraní může být návykové — sázej jen to, co můžeš prohrát.\n\n"
     "Ať se daří! ⚽"
 )
