@@ -2239,21 +2239,25 @@ DAILY_TICKETS_STAKE_CHOICES = [200, 300, 500, 800, 1000, 1500, 2000, 3000, 5000]
 
 def _generate_one_ticket_for_cron(
     user_id: int, risk_level: int, sports: list[Sport], market_types: list[MarketType], time_frame_days: int,
+    max_widen_days: int = 3,
 ) -> Optional[Ticket]:
     """Stejná logika jako /tickets/generate (fetch → vyluč už použité →
     vyfiltruj minulé zápasy → fallback na širší horizont, pokud je málo
     zápasů NEBO se z nich nepovede sestavit tiket), jen bez závislosti na
-    přihlášeném uživateli z requestu."""
+    přihlášeném uživateli z requestu. max_widen_days řídí, o kolik dní appka
+    smí couvnout do širšího okna, když je úzké okno prázdné/nepoužitelné —
+    0 znamená appka couvnout vůbec nesmí (radši nic než starý/vzdálený zápas,
+    viz DAILY_TICKETS_USER_ID, kde má appka posílat jen zápasy na dnes/zítra)."""
     exclude_ids = repo.get_all_saved_match_ids(user_id)
 
     # Appka stáhne a obohatí širší okno JEDNOU (viz stejná poznámka u
     # /tickets/generate) — užší okno je jeho podmnožina.
-    all_wider_matches = _fetch_candidate_matches(sports, time_frame_days + 3)
+    all_wider_matches = _fetch_candidate_matches(sports, time_frame_days + max_widen_days)
     all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
     all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
 
     matches = _filter_within_days(all_wider_matches, time_frame_days)
-    if len(matches) < 3:
+    if len(matches) < 3 and max_widen_days > 0:
         matches = all_wider_matches
 
     result = ticket_generator.generate(
@@ -2295,7 +2299,11 @@ def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
 # nic dnes uloženo" DŘÍV, než první stihne cokoli uložit. Prostý zámek
 # v paměti (per proces, žádná DB tabulka navíc) tohle appce stačí vyřešit
 # — druhé souběžné volání appka rovnou odmítne, místo aby duplikovalo.
-_GENERATION_LOCKS = {"daily_tickets": threading.Lock(), "transparency_daily_tickets": threading.Lock()}
+_GENERATION_LOCKS = {
+    "daily_tickets": threading.Lock(),
+    "transparency_daily_tickets": threading.Lock(),
+    "test3_daily_tickets": threading.Lock(),
+}
 
 
 @app.post("/admin/daily-tickets")
@@ -2329,23 +2337,19 @@ def run_daily_tickets(request: Request):
                 repo.set_live_alert(row["ticket_id"], None)
                 settled_count += 1
 
-        # Úterý=1, pátek=4 — BOOST appka posílá jen 2x týdně (5denní horizont
-        # se denně z velké části překrývá se včerejším, denní odesílání by
-        # bylo skoro identické, jen s jinou kombinací nohou). Appka teď na
-        # kratky/stredni generuje víc kusů denně (ne jen 1+1) — appka z toho
-        # staví veřejnou "výkladní skříň" vyhraných tiketů (/showcase/tickets),
-        # čím víc tiketů denně, tím víc má appka co ukázat.
+        # DAILY_TICKETS_USER_ID je zdroj pro PLACENÝ Telegram kanál
+        # (_todays_client_picks/client-tickets-send) — appka tu chce přesně
+        # 1 kratky + 1 stredni denně, v pátek navíc 1 boost, žádnou
+        # "výkladní skříň" navíc (na tu appka má samostatný účet, viz
+        # TEST3_USER_ID níže). Okno je schválně ÚZKÉ (1 den) a appka bez
+        # fallbacku na širší okno (max_widen_days=0) — odběratel má dostat
+        # tip na dnešek/zítřek, ne na zápas za týden, i za cenu, že se
+        # někdy nic nevygeneruje.
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        # Horizont appka rozšířila z 2 na 4 dny (2026-07-26) — na dnech s tenkým
-        # kalendářem appka i s uvolněným prahem (viz FALLBACK_THRESHOLDS) mezi
-        # kandidáty z jen 2 dnů někdy nenašla žádnou kombinaci s ověřenou
-        # výhodou (edge) a tiket appce úplně selhal. Širší okno appce dá víc
-        # zápasů na výběr, aniž by se cokoli měnilo na tom, JAK appka edge
-        # počítá.
-        plan = [("kratky", 20, 4, 6), ("stredni", 50, 4, 6)]
-        if today_prague.weekday() in (1, 4):
-            plan.append(("boost", 80, 5, 1))
+        plan = [("kratky", 20, 1, 1), ("stredni", 50, 1, 1)]
+        if today_prague.weekday() == 4:  # pátek
+            plan.append(("boost", 80, 2, 1))
 
         results = []
         generated_today: list[tuple[Ticket, int]] = []
@@ -2364,6 +2368,7 @@ def run_daily_tickets(request: Request):
                 try:
                     ticket = _generate_one_ticket_for_cron(
                         target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                        max_widen_days=0,
                     )
                 except Exception as e:
                     print(f"[daily-tickets] {label}: generování selhalo: {e}")
@@ -2500,6 +2505,77 @@ def run_transparency_daily_tickets(request: Request):
         return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
     finally:
         _GENERATION_LOCKS["transparency_daily_tickets"].release()
+
+
+TEST3_STAKE = 1000.0
+
+
+@app.post("/admin/test3-daily-tickets")
+def run_test3_daily_tickets(request: Request):
+    """
+    Appka na účtu TEST3_USER_ID (appky vlastní testovací/kontrolní účet)
+    denně vygeneruje 2 kratky + 2 stredni tikety, na každý appka
+    automaticky vsadí pevných 1000 Kč. Odděleno od DAILY_TICKETS_USER_ID
+    (placený Telegram kanál, přesně 1+1+pátek boost) i od
+    TRANSPARENCY_USER_ID (veřejná appka /public/transparency) — appka
+    tenhle účet nemíchá s žádným z nich.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["test3_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/test3-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user_id_raw = os.environ.get("TEST3_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="TEST3_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 2)]
+
+        results = []
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[test3-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, TEST3_STAKE, ticket.total_odds)
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TEST3_STAKE})
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["test3_daily_tickets"].release()
 
 
 @app.post("/admin/transparency-backfill-results")
