@@ -475,10 +475,23 @@ def motivation_adjustment_factor(motivation_factor: float) -> float:
     if isinstance(motivation_factor, bool):
         return 0.90 if motivation_factor else 1.0
     return motivation_factor
+
+
+def adapt_rest_days(recent_fixtures: list[dict], kickoff_iso: str) -> Optional[int]:
     """
     Počet dní od posledního odehraného zápasu týmu do tohoto výkopu —
     appka to počítá z dat, co už tahá pro recency formu (get_recent_form),
     žádný extra API dotaz navíc. Vrací None, pokud appka nemá dostatek dat.
+
+    Byla tu jen jako mrtvý, nikdy nevolaný kód (omylem vložený do těla
+    motivation_adjustment_factor při jednom z dřívějších sloučení) —
+    backend_api.py přitom volá data_provider.adapt_rest_days(...), který
+    díky tomu reálně neexistoval a při KAŽDÉM zápase spadl na
+    AttributeError. To by samo o sobě nevadilo (volající kód to odchytává
+    přes except Exception), jenže stejný except blok kvůli tomu zahazoval
+    i už úspěšně spočítanou home_form/away_form ze stejné try sekce —
+    appka tak fakticky nikdy nepoužívala váženou nedávnou formu, odkdy
+    byl tenhle blok přidán (2026-07-21).
     """
     if not recent_fixtures:
         return None
