@@ -8,10 +8,33 @@ nezávisela na tom, jaké fonty má nainstalované OS kontejneru na Renderu —
 DejaVu Sans obvykle na Linuxu je, ale appka na to nechce sázet.
 """
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
+
+PRAGUE_TZ = ZoneInfo("Europe/Prague")
+
+
+def _kickoff_local(kickoff_date: str, kickoff_time: str) -> str:
+    """
+    kickoff_date/kickoff_time appka všude uchovává v UTC (tak appce chodí
+    z API-Football) — appka to ale nikdy nepřevedla na pražský čas před
+    zobrazením. Bez převodu appka klientovi ukázala např. "21:30" pro
+    zápas, co ve skutečnosti kope v 23:30 pražského času — v CEST to
+    vypadá, jako by appka poslala tiket na zápas, co už dávno začal
+    (nahlášeno uživatelem). Appka při chybě (prázdné/neplatné hodnoty)
+    vrátí radši původní syrový text, než aby appka spadla.
+    """
+    if not kickoff_date or not kickoff_time:
+        return f"{kickoff_date} {kickoff_time}".strip()
+    try:
+        dt_utc = datetime.strptime(f"{kickoff_date} {kickoff_time}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        dt_prague = dt_utc.astimezone(PRAGUE_TZ)
+        return dt_prague.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return f"{kickoff_date} {kickoff_time}".strip()
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _BUNDLED_FONT_DIR = os.path.join(_THIS_DIR, "assets", "fonts")
@@ -113,7 +136,7 @@ def render_ticket(ticket: dict) -> Image.Image:
             draw.text((PADDING + 20, ty), line, font=f_body, fill=TEXT)
             ty += 26
 
-        league = f"{s.get('league', '')} · {s.get('kickoff_date', '')} {s.get('kickoff_time', '')}".strip()
+        league = f"{s.get('league', '')} · {_kickoff_local(s.get('kickoff_date', ''), s.get('kickoff_time', ''))}".strip()
         draw.text((PADDING + 20, row_top + row_h - 32), league, font=f_small, fill=SUBTEXT)
 
         sel_odds = s.get("odds", 0)
