@@ -1723,8 +1723,7 @@ def check_duplicate_matches(req: dict = Body(...), user_id: int = Depends(get_cu
     }
 
 
-@app.get("/tickets/saved", response_model=list[TicketResponse])
-def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
+def _list_saved_tickets_for_user(user_id: int) -> list[TicketResponse]:
     """
     Appka VRACÍ historii přímo z DB, bez čekání na kontrolu živých
     zápasů — dřív appka před vrácením odpovědi dosettlovávala VŠECHNY
@@ -1736,14 +1735,15 @@ def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
     tomu vždycky zobrazí okamžitě, i když stav pár posledních tiketů
     může být pár minut starý.
 
-    user_id appka bere VÝHRADNĚ z přihlašovacího tokenu — nikdy ne z
-    parametru v URL, jinak by si kdokoli mohl jen změnit číslo v adrese
-    a prohlížet si cizí tikety.
+    Sdíleno mezi GET /tickets/saved (bere frontend jako fallback) a
+    GET /tickets/sync (bere frontend PŘEDNOSTNĚ, viz HistoryView) —
+    obě appka vrací STEJNÁ data, jen /tickets/sync appka zabalí do
+    {"tickets": [...]} podle toho, co frontend při čtení očekává.
     """
     saved_rows = repo.get_saved_tickets(user_id)
-    print(f"[DEBUG] /tickets/saved: Backend vrací CELKEM {len(saved_rows)} tiketů pro user_id={user_id}")
+    print(f"[DEBUG] _list_saved_tickets_for_user: Backend vrací CELKEM {len(saved_rows)} tiketů pro user_id={user_id}")
     pending_in_response = [r for r in saved_rows if r["status"] == "pending"]
-    print(f"[DEBUG] /tickets/saved: Z toho PENDING: {len(pending_in_response)}")
+    print(f"[DEBUG] _list_saved_tickets_for_user: Z toho PENDING: {len(pending_in_response)}")
     
     result_list = []
     for row in saved_rows:
@@ -1815,8 +1815,29 @@ def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
                 print(f"  - {sel.home_team} vs {sel.away_team}: result={sel.result}, goals={sel.home_goals}-{sel.away_goals}, id={sel.id}")
         
         result_list.append(tr)
-    
+
     return result_list
+
+
+@app.get("/tickets/saved", response_model=list[TicketResponse])
+def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
+    """user_id appka bere VÝHRADNĚ z přihlašovacího tokenu — nikdy ne z
+    parametru v URL, jinak by si kdokoli mohl jen změnit číslo v adrese
+    a prohlížet si cizí tikety."""
+    return _list_saved_tickets_for_user(user_id)
+
+
+@app.get("/tickets/sync")
+def sync_saved_tickets(user_id: int = Depends(get_current_user_id)):
+    """
+    Stejná data jako GET /tickets/saved, jen zabalená do {"tickets":
+    [...]}. Appka (HistoryView na frontendu) tohle volá PŘEDNOSTNĚ a na
+    /tickets/saved padá jen jako fallback při chybě — appka ale roky
+    tenhle endpoint vůbec neměla implementovaný (žádná zmínka nikde v
+    backendu), takže appka fallback spouštěla úplně pokaždé, zbytečně.
+    """
+    tickets = _list_saved_tickets_for_user(user_id)
+    return {"tickets": tickets}
 
 
 class StakeRequest(BaseModel):
