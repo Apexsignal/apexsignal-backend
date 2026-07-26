@@ -419,6 +419,9 @@ background:var(--paper);color:var(--ink);font-size:.94rem;font-family:inherit}
 .resend-status{font-size:.86rem;margin-top:10px}
 .resend-status.ok{color:var(--up)}
 .resend-status.err{color:var(--down)}
+.resend-alt{margin-top:16px;padding-top:16px;border-top:1px solid var(--line-soft);
+font-size:.88rem;color:var(--muted)}
+.resend-tg{font-weight:600}
 .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);
 border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .cell{background:var(--raise);padding:15px 16px;display:flex;flex-direction:column;gap:4px}
@@ -797,22 +800,23 @@ def render_page(
     <span>Výhry i prohry, automaticky. Když má model špatný týden, uvidíš to tady dřív než kdekoli jinde.</span>
   </div>
   <div class="rule">
-    <strong>Tipy jsou skryté do konce zápasu</strong>
-    <span>U nevyhodnoceného tiketu vidíš jen počet tipů a kurz. Po skončení se výběry odhalí natrvalo.</span>
+    <strong>Sázka je skrytá do konce zápasu</strong>
+    <span>Zápasy vidíš hned. Skrytá zůstává jen samotná sázka — trh, výběr, kurz té nohy — dokud appka tiket nevyhodnotí, pak ji odhalí natrvalo.</span>
   </div>
 </section>
 
 {offers}
 
 <section class="resend">
-  <h2>Už jsi zaplatil, ale ztratil odkaz na Telegram?</h2>
-  <p class="lede">Párovací odkaz platí jen hodinu a jde použít jen jednou. Napiš e-mail, kterým jsi
-  platil kanál, a pošleme nový.</p>
+  <h2>Ztratil jsi odkaz, nebo máš dotaz?</h2>
+  <p class="lede">Zaplatil jsi kanál, ale párovací odkaz na Telegram vypršel nebo se ztratil? Napiš e-mail,
+  kterým jsi platil, a pošleme nový.</p>
   <form class="resend-form" id="resend-form">
     <input type="email" id="resend-email" name="email" placeholder="e-mail, kterým jsi platil" required autocomplete="email">
     <button type="submit" class="btn btn-fill">Poslat nový odkaz</button>
   </form>
   <p class="resend-status" id="resend-status" role="status" hidden></p>
+  <p class="resend-alt">Nebo máš jiný dotaz? <a class="resend-tg" href="https://t.me/D1990V05" target="_blank" rel="noopener noreferrer">Napiš mi rovnou na Telegram →</a></p>
 </section>
 
 <section>
