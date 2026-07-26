@@ -1179,7 +1179,10 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     # Skotsko
     179,  # Scottish Premiership
     # Švýcarsko
-    169,  # Swiss Super League
+    207,  # Swiss Super League — appka tu dřív omylem měla ID 169 (to je
+          # ve skutečnosti Čína, viz níže), takže reálná švýcarská liga
+          # appce celou dobu propadala sítem, zatímco čínská si ID 169
+          # "půjčila" a filtrem procházela
     # Švédsko
     113,  # Allsvenskan
     114,  # Superettan
@@ -1209,20 +1212,33 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     # Česko
     345,  # Chance Liga
     346,  # Chance Národní Liga
-    # Izrael
-    384,  # Premier League
+    # Izrael — appka tu dřív měla jen 384 jako "Premier League", ale 384 je
+    # ve skutečnosti Státní pohár. Skutečná nejvyšší liga (Ligat Ha'al) má
+    # ID 383 — přidáno, 384 ponechána (pohár sám o sobě je běžná sázková
+    # nabídka, viz FA Cup/DFB Pokal/Coppa Italia výš).
+    383,  # Ligat Ha'al (Premier League)
+    384,  # State Cup
     # Kypr
-    262,  # First Division (Cyprus - pozn: ID může být jiné)
+    318,  # First Division — appka tu dřív omylem měla ID 262 (to je Liga MX,
+          # viz Mexiko níže), takže appka fakticky filtrovala jen na Liga MX
+          # dvakrát, ne na kyperskou ligu
     # Jižní Amerika
     71,   # Brasileirao Serie A
     72,   # Brasileirao Serie B
     128,  # Argentine Primera Division
     129,  # Argentine Primera B Nacional
-    239,  # Uruguay Primera Division
-    242,  # Chile Primera Division
+    # Uruguay má sezónu rozdělenou na Apertura/Clausura, appka proto
+    # potřebuje OBĚ ID (žádné jednotné "Primera Division" u API neexistuje).
+    # Dřív appka měla jen 239, což je ve skutečnosti KOLUMBIE (ponechána
+    # níže s opraveným popiskem, je to reálná a sázkově zajímavá liga).
+    268,  # Primera División - Apertura (Uruguay)
+    270,  # Primera División - Clausura (Uruguay)
+    239,  # Primera A (Colombia)
+    265,  # Primera División (Chile) — dřív appka měla omylem 242, což je
+          # Ekvádor (Liga Pro), ne Chile
     # USA/Kanada
     253,  # MLS
-    254,  # USL Championship
+    255,  # USL Championship — dřív appka měla omylem 254, což je ženská NWSL
     # Mexiko
     262,  # Liga MX
     # Japonsko
@@ -1233,24 +1249,37 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     188,  # A-League
     # Saúdská Arábie
     307,  # Pro League
-    # Čína
-    169,  # Super League (China - pozn: ID může být jiné)
+    # Čína VYNECHÁNA ÚMYSLNĚ — appka sem dřív omylem vložila ID 169 se
+    # stejnou poznámkou o nejistotě jako u Švýcarska výš. 169 je ve
+    # skutečnosti SPRÁVNÉ ID čínské Super League (potvrzeno přímo přes
+    # /leagues), jenže čínské zápasy appce reálně chodily na Tipsportu
+    # nedostupné (nahlášeno uživatelem 2x) — appka proto celou ligu radši
+    # úplně vynechá, než aby hádala další ID.
     # Evropské poháry
     2,    # Champions League
     3,    # Europa League
     848,  # Conference League
     531,  # UEFA Super Cup
-    # Mezinárodní
+    # Mezinárodní — appka tu dřív měla několik ID přehozených (ověřeno
+    # živě přes /leagues): 6 byl ve skutečnosti Africký pohár národů (ne
+    # Nations League — ta je celá jen pod ID 5), 29 byla kvalifikace MS
+    # Afrika (ne Africký pohár), 30 byla kvalifikace MS Asie (ne Asijský
+    # pohár) a 13 byla Copa Libertadores, klubová soutěž (ne Copa America,
+    # národní týmy). Appka teď nechává ponechané ID s opraveným popiskem
+    # (jsou to reálné, sázkově zajímavé soutěže) a přidává správné ID pro
+    # to, co appka PŮVODNĚ chtěla.
     1,    # World Cup
     4,    # Euro
-    6,    # Nations League
-    5,    # UEFA Nations League playoff
+    5,    # UEFA Nations League
     10,   # Friendlies (mezinárodní přátelská)
     32,   # World Cup Qualifiers Europe
     34,   # World Cup Qualifiers South America
-    29,   # Africa Cup of Nations
-    13,   # CONMEBOL Copa America
-    30,   # AFC Asian Cup
+    29,   # World Cup Qualifiers Africa
+    6,    # Africa Cup of Nations
+    30,   # World Cup Qualifiers Asia
+    7,    # Asian Cup
+    13,   # CONMEBOL Libertadores
+    9,    # CONMEBOL Copa America
 }
 
 
