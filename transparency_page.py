@@ -443,6 +443,22 @@ padding:6px 9px;border-radius:3px;white-space:nowrap;transform:translate(-50%,-1
 .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
 .rule{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:16px 18px;display:flex;flex-direction:column;gap:6px}
 .rule strong{font-size:.95rem}.rule span{font-size:.88rem;color:var(--muted)}
+.how{display:grid;grid-template-columns:1fr;gap:10px}
+.how-step{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:18px;
+display:flex;flex-direction:column;gap:6px;position:relative;min-width:0}
+.how-icon{width:30px;height:30px;color:var(--accent)}
+.how-icon svg{width:100%;height:100%}
+.how-num{position:absolute;top:16px;right:16px;width:20px;height:20px;border-radius:50%;
+background:var(--accent-glow);color:var(--accent);font-size:.68rem;font-weight:700;
+display:flex;align-items:center;justify-content:center;
+font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
+.how-step strong{font-size:.95rem;margin-top:2px}.how-step span:last-child{font-size:.85rem;color:var(--muted)}
+.how-arrow-wrap{display:none}
+@media (min-width:760px){
+  .how{grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;align-items:stretch}
+  .how-arrow-wrap{display:flex;align-items:center;justify-content:center;width:18px;color:var(--muted)}
+  .how-arrow{width:16px;height:16px}
+}
 .empty-stats{background:var(--raise);border:1px solid var(--line);border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:6px}
 .empty-stats span{color:var(--muted);font-size:.9rem}
 .tickets{display:flex;flex-direction:column;gap:12px}
@@ -568,6 +584,62 @@ def _script_for(curve: list[dict]) -> str:
     for k, v in repl.items():
         out = out.replace(k, v)
     return out
+
+
+# Inline SVG appka drží ve stejném stylu (viewBox 24×24, jen obrys), jako
+# appka sama používá jinde ve svém UI — appka nechce tahat žádnou externí
+# ikonovou knihovnu jen kvůli čtyřem obrázkům, tahle stránka musí zůstat
+# jeden soubor bez dalšího požadavku (viz docstring modulu).
+_ICON_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
+HOW_STEPS = [
+    (
+        "Sbíráme data",
+        "Kurzy, statistiky týmů, forma, historie vzájemných zápasů — pro každou ligu, co model sleduje.",
+        f'<svg {_ICON_ATTRS}><ellipse cx="12" cy="5.5" rx="8" ry="3"/>'
+        '<path d="M4 5.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>'
+        '<path d="M4 11.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>',
+    ),
+    (
+        "Model spočítá pravděpodobnost",
+        "Pro každý možný výsledek — ne jen kdo vyhraje, i góly, karty, oba dají gól.",
+        f'<svg {_ICON_ATTRS}><path d="M3 17h3.5l2.5-10 4 14 2.5-9 2 5H21"/></svg>',
+    ),
+    (
+        "Porovnáme s kurzem",
+        "Hledáme rozdíl mezi tím, co vidí model, a co nabízí sázková kancelář.",
+        f'<svg {_ICON_ATTRS}><path d="M12 3v18"/><path d="M5 7h14"/>'
+        '<path d="M5 7l-3.2 6.2a3.2 3.2 0 0 0 6.4 0z"/>'
+        '<path d="M19 7l-3.2 6.2a3.2 3.2 0 0 0 6.4 0z"/></svg>',
+    ),
+    (
+        "Vybereme jen výhodu",
+        "Když je rozdíl malý, tip nejde ven. Radši míň tipů než tip bez výhody.",
+        f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.8"/>'
+        '<circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>',
+    ),
+]
+
+HOW_ARROW = (
+    '<svg class="how-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M4 12h15"/><path d="M13 6l6 6-6 6"/></svg>'
+)
+
+
+def _how_it_works() -> str:
+    cards = []
+    for i, (title, body, icon) in enumerate(HOW_STEPS):
+        if i:
+            cards.append(f'<div class="how-arrow-wrap" aria-hidden="true">{HOW_ARROW}</div>')
+        cards.append(
+            '<div class="how-step">'
+            f'<span class="how-icon">{icon}</span>'
+            f'<span class="how-num">{i + 1}</span>'
+            f'<strong>{escape(title)}</strong>'
+            f'<span>{escape(body)}</span>'
+            "</div>"
+        )
+    return "".join(cards)
 
 
 def render_page(
@@ -702,6 +774,12 @@ def render_page(
   kolik kdo sází.</p>
   {hero_stat}
 </header>
+
+<section>
+  <h2>Jak model vybírá tipy</h2>
+  <p class="lede">Čtyři kroky, žádná magie.</p>
+  <div class="how">{_how_it_works()}</div>
+</section>
 
 <section>
   <h2>Jak si model vede</h2>
