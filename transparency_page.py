@@ -3,8 +3,8 @@ transparency_page.py — veřejná HTML podoba transparentního účtu.
 
 Appka tuhle stránku servíruje na /transparentni-ucet a bere pro ni
 naprosto stejná data jako JSON endpoint /public/transparency — tedy i
-stejné maskování: u nevyhodnocených tiketů se konkrétní zápasy
-NEUKAZUJÍ, jen počet tipů a kurz.
+stejné maskování: u nevyhodnocených tiketů appka ukazuje zápasy hned,
+ale samotnou sázku (trh, výběr, kurz té nohy) až po vyhodnocení.
 
 Výsledky appka vykazuje v JEDNOTKÁCH (1 tiket = 1 jednotka vkladu), ne
 v korunách. Uložené částky u automaticky generovaných tiketů jsou
@@ -257,17 +257,37 @@ RESULT_LABELS = {
 
 def _selection_row(sel: dict) -> str:
     teams = f"{escape(str(sel.get('home_team') or ''))} — {escape(str(sel.get('away_team') or ''))}"
-    result = sel.get("result") or "pending"
-    icon = RESULT_ICONS.get(result, "")
-    label = escape(RESULT_LABELS.get(result, ""))
+    league = f'<span class="sel-league">{escape(str(sel.get("league") or ""))}</span>'
+
+    # U nevyhodnocených tiketů appka posílá market_type/selection jako
+    # None schválně (viz public_transparency v backend_api.py) — zápas
+    # appka ukazuje hned, sázku samotnou (trh, výběr, kurz té nohy) až
+    # po vyhodnocení, ať si ji nikdo nemůže dřív okopírovat.
+    masked = sel.get("market_type") is None and sel.get("selection") is None
+    if masked:
+        result_span = (
+            '<span class="sel-result pending" role="img" aria-label="Sázka zatím skrytá" '
+            'title="Sázka zatím skrytá">•</span>'
+        )
+        pick_html = '<span class="sel-market">Sázka</span><span class="sel-choice">skrytá</span>'
+        odds_html = "—"
+    else:
+        result = sel.get("result") or "pending"
+        icon = RESULT_ICONS.get(result, "")
+        label = escape(RESULT_LABELS.get(result, ""))
+        result_span = f'<span class="sel-result {result}" role="img" aria-label="{label}" title="{label}">{icon}</span>'
+        pick_html = (
+            f'<span class="sel-market">{escape(_market_label(sel.get("market_type")))}</span>'
+            f'<span class="sel-choice">{escape(_selection_label(sel.get("selection")))}</span>'
+        )
+        odds_html = _fmt_num(sel.get("odds"))
+
     return (
         '<li class="sel">'
-        f'<span class="sel-result {result}" role="img" aria-label="{label}" title="{label}">{icon}</span>'
-        f'<div class="sel-match"><span class="sel-teams">{teams}</span>'
-        f'<span class="sel-league">{escape(str(sel.get("league") or ""))}</span></div>'
-        f'<div class="sel-pick"><span class="sel-market">{escape(_market_label(sel.get("market_type")))}</span>'
-        f'<span class="sel-choice">{escape(_selection_label(sel.get("selection")))}</span></div>'
-        f'<div class="sel-odds">{_fmt_num(sel.get("odds"))}</div>'
+        f"{result_span}"
+        f'<div class="sel-match"><span class="sel-teams">{teams}</span>{league}</div>'
+        f'<div class="sel-pick">{pick_html}</div>'
+        f'<div class="sel-odds">{odds_html}</div>'
         "</li>"
     )
 
@@ -276,20 +296,12 @@ def _ticket_card(ticket: dict) -> str:
     status = ticket.get("status") or "pending"
     resolved = status in ("won", "lost")
     type_label = TICKET_TYPE_LABELS.get(ticket.get("ticket_type"), ticket.get("ticket_type") or "—")
-    count = ticket.get("selection_count") or 0
     units = ticket.get("profit_units")
 
-    if resolved and ticket.get("selections"):
+    if ticket.get("selections"):
         body = '<ul class="sels">' + "".join(_selection_row(s) for s in ticket["selections"]) + "</ul>"
     else:
-        tip_word = "tip" if count == 1 else ("tipy" if count < 5 else "tipů")
-        body = (
-            '<div class="masked">'
-            f'<span class="masked-count"><strong>{count}</strong> {tip_word} — skryto do vyhodnocení</span>'
-            '<span class="masked-note">Zápasy odhalím, až tiket skončí. Do té doby si ho nikdo nemůže '
-            "okopírovat a já si nemůžu zpětně vymyslet, co jsem tvrdil.</span>"
-            "</div>"
-        )
+        body = '<p class="lede" style="padding:16px">Appka k tomuhle tiketu nemá uložené zápasy.</p>'
 
     units_cell = ""
     if resolved and units is not None:
@@ -457,9 +469,6 @@ border-bottom:1px solid var(--line-soft);align-items:center}
 .sel-pick{display:flex;flex-direction:column;gap:2px;text-align:right}
 .sel-market{font-size:.72rem;color:var(--muted)}.sel-choice{font-size:.88rem}
 .sel-odds{font-size:.95rem;font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
-.masked{padding:16px;display:flex;flex-direction:column;gap:5px;font-size:.92rem}
-.masked-count{display:block}
-.masked-note{font-size:.84rem;color:var(--muted)}
 .t-foot{display:flex;flex-direction:row;gap:24px;padding:12px 16px;
 border-top:1px solid var(--line-soft);flex-wrap:wrap}
 .t-cell{display:flex;flex-direction:column;gap:2px}
@@ -726,6 +735,9 @@ def render_page(
 
 <section>
   <h2>Historie tiketů</h2>
+  <p class="lede">Zápasy appka ukazuje hned u každého tiketu. Skrytá zůstává jen samotná sázka — trh, konkrétní
+  výběr a kurz té jedné nohy — dokud appka tiket nevyhodnotí. Jde tak dopředu ověřit, na co appka sází, ale
+  nejde si to okopírovat, ani appka nemůže zpětně tvrdit něco jiného, než na co skutečně vsadila.</p>
   <div class="tickets">{cards}</div>
 </section>
 

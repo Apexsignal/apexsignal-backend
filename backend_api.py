@@ -2490,12 +2490,13 @@ def public_transparency(limit: int = 100):
     Zcela veřejný, bez přihlášení dostupný přehled appčina transparentního
     účtu (TRANSPARENCY_USER_ID) — appka ukazuje ÚPLNĚ VŠECHNY tikety, i
     prohrané (na rozdíl od /showcase/tickets, co ukazuje jen výhry) —
-    smysl je transparentnost, ne reklama. Appka ale u tiketů, co ještě
-    nejsou vyhodnocené (pending/live), NEUKAZUJE konkrétní zápasy ani
-    výběry — jen kolik tipů tiket má, jaký má kurz a kolik je vsazeno.
-    Jakmile appka tiket vyhodnotí (výhra/prohra), výběry appka odhalí
-    natrvalo. Appka tohle dělá, aby nikdo nemohl z appky "okopírovat"
-    tip dřív, než appka sama rozhodne o výsledku.
+    smysl je transparentnost, ne reklama. Appka u tiketů, co ještě nejsou
+    vyhodnocené (pending/live), ukazuje ZÁPASY hned (tým, soupeř, liga),
+    ale market_type/selection/odds u každého výběru posílá jako None —
+    samotnou sázku appka odhalí natrvalo, až tiket vyhodnotí. Appka tohle
+    dělá, aby nikdo nemohl z appky "okopírovat" tip dřív, než appka sama
+    rozhodne o výsledku, ale zápasy appka zveřejňuje předem a natrvalo,
+    ať appka nemůže zpětně tvrdit něco jiného, než na co vsadila.
     """
     limit = max(1, min(limit, 200))
     target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
@@ -2549,7 +2550,23 @@ def public_transparency(limit: int = 100):
                 for i, s in enumerate(ticket.selections)
             ]
         else:
-            entry["selections"] = None  # appka výběry schválně skrývá, dokud tiket neskončí
+            # Appka teď zápas ukazuje HNED, i u nevyhodnoceného tiketu —
+            # skrytá zůstává jen samotná sázka (trh, konkrétní výběr a
+            # kurz té jedné nohy), dokud appka tiket nevyhodnotí. Appka
+            # market_type/selection/odds schválně posílá jako None místo
+            # toho, aby appka výběry vynechala úplně — díky tomu appka
+            # DOPŘEDU a NATRVALO zveřejní, na jaké zápasy vsadila (nejde
+            # zpětně dopsat), a zároveň nikdo neví PŘESNĚ na co, dokud
+            # appka tiket sama neodhalí.
+            entry["selections"] = [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": None, "selection": None, "odds": None,
+                    "league": s.league, "country": s.country,
+                    "result": None,
+                }
+                for s in ticket.selections
+            ]
         tickets.append(entry)
 
     resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r["ticket"].total_odds]
