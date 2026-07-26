@@ -594,26 +594,30 @@ _ICON_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-widt
 HOW_STEPS = [
     (
         "Sbíráme data",
-        "Kurzy, statistiky týmů, forma, historie vzájemných zápasů — pro každou ligu, co model sleduje.",
+        "Kurzy, statistiky týmů, forma, historie vzájemných zápasů — z nich model odvodí očekávaný "
+        "počet gólů (xG) pro každý tým.",
         f'<svg {_ICON_ATTRS}><ellipse cx="12" cy="5.5" rx="8" ry="3"/>'
         '<path d="M4 5.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>'
         '<path d="M4 11.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>',
     ),
     (
         "Model spočítá pravděpodobnost",
-        "Pro každý možný výsledek — ne jen kdo vyhraje, i góly, karty, oba dají gól.",
+        "Z xG obou týmů, přes Poissonovo rozdělení (matematický model počtu gólů), spočítá "
+        "pravděpodobnost každého výsledku — výhry, přesného skóre, karet, i jestli skórují oba týmy.",
         f'<svg {_ICON_ATTRS}><path d="M3 17h3.5l2.5-10 4 14 2.5-9 2 5H21"/></svg>',
     ),
     (
         "Porovnáme s kurzem",
-        "Hledáme rozdíl mezi tím, co vidí model, a co nabízí sázková kancelář.",
+        "Kurz sázkové kanceláře přepočítáme na pravděpodobnost, očištěnou o její marži, a srovnáme "
+        "ji s tím, co spočítal model.",
         f'<svg {_ICON_ATTRS}><path d="M12 3v18"/><path d="M5 7h14"/>'
         '<path d="M5 7l-3.2 6.2a3.2 3.2 0 0 0 6.4 0z"/>'
         '<path d="M19 7l-3.2 6.2a3.2 3.2 0 0 0 6.4 0z"/></svg>',
     ),
     (
         "Vybereme jen výhodu",
-        "Když je rozdíl malý, tip nejde ven. Radši míň tipů než tip bez výhody.",
+        "Rozdílu se říká edge. Tip appka pošle, jen když model dané možnosti věří víc než trh — "
+        "jinak radši žádný tip, než tip bez výhody.",
         f'<svg {_ICON_ATTRS}><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.8"/>'
         '<circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>',
     ),
