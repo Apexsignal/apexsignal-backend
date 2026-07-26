@@ -2228,7 +2228,7 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 # appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
 # přihlašovacím tokenem konkrétního uživatele.
 # =====================================================================
-DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS]
+DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.BTTS]
 DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
 # Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného
 # tiketu. Rozpětí (ne pevná částka) appka volí náhodně, ať výkladní skříň
