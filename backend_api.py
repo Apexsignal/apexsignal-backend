@@ -451,7 +451,7 @@ class Repo:
     CALIBRATION_BUCKET_WIDTH_PCT = 10
 
     def __init__(self):
-        self._last_batch_match_ids: dict[int, list[int]] = {}  # user_id -> match_ids z posledního generování
+        self._last_batch_match_ids: dict[int, set[int]] = {}  # user_id -> match_ids ze VŠECH zatím nabídnutých (ne nutně uložených) tiketů od posledního uložení
         db.ensure_schema()
 
     # --- Tikety: persistované, viz db.py -------------------------------
@@ -705,10 +705,18 @@ class Repo:
         }
 
     def set_last_batch(self, user_id: int, match_ids: list[int]) -> None:
-        self._last_batch_match_ids[user_id] = match_ids
+        """Appka sem PŘIDÁVÁ (ne přepisuje) — jinak by druhé generování
+        (jiný risk_level, tedy jiný typ tiketu) v hned další appka nevědělo
+        o zápasech z toho prvního, dokud appka první tiket neuloží. Bez
+        tohohle appka klidně nabídla stejný zápas jako 'krátký' i 'střední'
+        tiket zároveň, protože obě generování běžela nezávisle na sobě.
+        Appka nemaže staré položky — zápas, co appka jednou nabídla, se v
+        rámci stejné (neuložené) session nemá vrátit ani za pár volání."""
+        existing = self._last_batch_match_ids.get(user_id, set())
+        self._last_batch_match_ids[user_id] = existing | set(match_ids)
 
     def get_last_batch(self, user_id: int) -> list[int]:
-        return self._last_batch_match_ids.get(user_id, [])
+        return list(self._last_batch_match_ids.get(user_id, set()))
 
 
 repo = Repo()
@@ -1496,7 +1504,11 @@ def _filter_within_days(matches: list[MatchInput], days: int) -> list[MatchInput
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
     _require_generation_enabled(user_id)
     _check_token_balance(user_id, req.risk_level)
-    exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
+    # Uložené zápasy + zápasy z JAKÉHOKOLIV předchozího generování v týhle
+    # (ještě neuložené) sérii — jinak by druhé volání (jiný risk_level =
+    # jiný typ tiketu) klidně nabídlo STEJNÝ zápas jako to první, protože
+    # by o něm ještě nevědělo (uloží se, až uživatel klikne "uložit").
+    exclude_ids = set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
     wider_days = req.time_frame_days + 3
 
     # Appka rovnou stáhne a obohatí ŠIRŠÍ okno (to je nejdražší část —
