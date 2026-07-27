@@ -668,7 +668,17 @@ class TicketGenerator:
         # BOOSTu je min_prob=0.55 nižší než 0.60/0.65 — bez seřazení by se
         # smyčka zastavila hned na nejvolnějším prahu a nikdy by nezkusila
         # kvalitnější kandidáty napřed.)
-        FALLBACK_THRESHOLDS = sorted({min_prob, 0.65, 0.60}, reverse=True)
+        #
+        # kratky/stredni appka na 60% dno záměrně přestala pouštět — appka
+        # tam viděla zobrazené výběry i pod 55 % (de-vigovaná tržní cena,
+        # viz probability), což u placeného kanálu vypadalo jako appka
+        # neplní vlastní slib "aspoň 60/65 %". BOOST si svoje 55% dno (a
+        # cestou k němu i 60 %) ponechává - je to jeho záměrně nejvolnější
+        # tier, ne omyl.
+        if ticket_key == "boost":
+            FALLBACK_THRESHOLDS = sorted({min_prob, 0.65, 0.60}, reverse=True)
+        else:
+            FALLBACK_THRESHOLDS = sorted({min_prob, 0.65}, reverse=True)
         ticket = None
         used_threshold = min_prob
         candidate_counts = {}
