@@ -486,7 +486,16 @@ class MarketEvaluator:
                 return 1.20 <= c.odds <= MAX_SELECTION_ODDS
             return MIN_SELECTION_ODDS <= c.odds <= MAX_SELECTION_ODDS
 
-        return [c for c in candidates if c.model_probability >= min_prob and passes_odds_filter(c)]
+        # DŮLEŽITÉ: appka dřív práh (70/65/60 %) kontrolovala jen na
+        # model_probability — c.probability (co appka reálně ukáže, tržní
+        # číslo když appka kurzy má) tak uměla vyjít o desítky bodů níž
+        # (viz #109 — 93,8% model, 55,8% zobrazeno). Appka teď vyžaduje
+        # OBĚ čísla nad prahem, ať práh platí i pro to, co appka doopravdy
+        # posílá klientovi, ne jen pro appčin interní odhad.
+        return [
+            c for c in candidates
+            if c.model_probability >= min_prob and c.probability >= min_prob and passes_odds_filter(c)
+        ]
 
     @staticmethod
     def _build_context_notes(match: MatchInput) -> list[str]:
