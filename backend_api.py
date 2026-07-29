@@ -765,12 +765,15 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # =====================================================================
 # Předplatné placeného Telegram kanálu — 1 krátký + 1 střední tiket
-# denně, v pátek navíc BOOST. Appka to prodává přes samostatný Stripe
-# Payment Link (STRIPE_CHANNEL_PAYMENT_LINK_URL, viz transparency_page)
-# — appka sama žádnou Checkout Session pro předplatné nevytváří, jen
-# zpracovává webhook událost, když někdo tím odkazem zaplatí.
+# denně. Appka to prodává přes samostatný Stripe Payment Link
+# (STRIPE_CHANNEL_PAYMENT_LINK_URL, viz transparency_page) — appka sama
+# žádnou Checkout Session pro předplatné nevytváří, jen zpracovává
+# webhook událost, když někdo tím odkazem zaplatí. CHANNEL_PRICE_KC je
+# jen popisná cena pro zobrazení (např. v /tokens/prices) — skutečnou
+# částku, co appka strhne, drží ten Payment Link na Stripe straně.
 # =====================================================================
 TELEGRAM_LINK_CODE_TTL_MINUTES = 60
+CHANNEL_PRICE_KC = 500
 
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
@@ -860,6 +863,8 @@ def get_token_prices():
         "packages": [{"tokens": t, "price_kc": t * TOKEN_KC_VALUE} for t in TOKEN_PACKAGES],
         "min_custom_tokens": MIN_CUSTOM_TOKENS,
         "max_custom_tokens": MAX_CUSTOM_TOKENS,
+        "channel_price_kc": CHANNEL_PRICE_KC,
+        "channel_payment_link_url": os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip(),
     }
 
 
