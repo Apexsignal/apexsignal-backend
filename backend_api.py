@@ -2313,8 +2313,8 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 
 # =====================================================================
 # Automatické denní generování tiketů (cron) — appka denně v 9:00 SEČ/SELČ
-# vygeneruje krátký + střední tiket, v úterý a pátek navíc i BOOST, uloží
-# je do historie zadaného účtu a pošle je jako obrázky do Telegramu.
+# vygeneruje 1 tiket (nejdřív zkusí stredni, fallback kratky), uloží ho
+# do historie zadaného účtu a pošle ho jako obrázek do Telegramu.
 # Volá se z vnějšku (naplánovaná úloha), ne appka sama ze sebe — proto
 # appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
 # přihlašovacím tokenem konkrétního uživatele.
