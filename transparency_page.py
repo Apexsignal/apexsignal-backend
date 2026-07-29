@@ -798,9 +798,9 @@ def render_page(
     <div class="offer primary">
       <span class="eyebrow">Kanál na Telegramu</span>
       <div class="offer-price">500 Kč <small>/ měsíc</small></div>
-      <p>Každé ráno appka pošle 1 tiket — nejdřív zkusí sestavit ten hodnotnější, střední,
-      a jen když pro něj trh zrovna nenabízí dost kvalitních zápasů, pošle krátký místo
-      něj. Nic si sám negeneruješ, appka pošle výběr rovnou na Telegram. {compare_line}</p>
+      <p>Každé ráno appka pošle 1 tiket — hlavně krátký, občas (když appka najde
+      opravdovou hodnotu) radši ten hodnotnější, střední. Nic si sám negeneruješ,
+      appka pošle výběr rovnou na Telegram. {compare_line}</p>
       <ol class="offer-steps">
         <li>Zaplatíš kartou přes Stripe — bez zakládání účtu.</li>
         <li>Hned ti přijde e-mail s odkazem na propojení Telegramu.</li>
