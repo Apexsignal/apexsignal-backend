@@ -29,7 +29,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Vygenerovat dnešní tikety (kratky/stredni, v patek i boost)
+      - name: Vygenerovat dnešní tikety (kratky/stredni, okno 2 dny na 70%)
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"

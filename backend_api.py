@@ -2339,17 +2339,22 @@ def run_daily_tickets(request: Request):
 
         # DAILY_TICKETS_USER_ID je zdroj pro PLACENÝ Telegram kanál
         # (_todays_client_picks/client-tickets-send) — appka tu chce přesně
-        # 1 kratky + 1 stredni denně, v pátek navíc 1 boost, žádnou
-        # "výkladní skříň" navíc (na tu appka má samostatný účet, viz
-        # TEST3_USER_ID níže). Okno je schválně ÚZKÉ (1 den) a appka bez
-        # fallbacku na širší okno (max_widen_days=0) — odběratel má dostat
-        # tip na dnešek/zítřek, ne na zápas za týden, i za cenu, že se
-        # někdy nic nevygeneruje.
+        # 1 kratky + 1 stredni denně, žádnou "výkladní skříň" navíc (na tu
+        # appka má samostatný účet, viz TEST3_USER_ID níže). BOOST appka
+        # přestala nabízet úplně — jeho nízká úspěšnost (viz historie) mu
+        # neodpovídala kvalitativní laťce, co appka drží u kratky/stredni.
+        #
+        # Okno je 2 dny (dnešek/zítřek), NE 1 — appka tak nejdřív zkusí
+        # sestavit tiket na 70 % z obou dní najednou, a teprve když ani tak
+        # 70 % nenajde, spadne v rámci TicketGenerator.generate() na 65% dno
+        # (viz FALLBACK_THRESHOLDS). Při úzkém 1denním okně appka dřív
+        # spadla na 65 % hned, i když by 70 % bylo k mání zítra — appka to
+        # bez rozšíření okna nikdy nezjistila. max_widen_days zůstává 0 —
+        # 2 dny je appce nastavený strop, dál appka couvat nesmí (odběratel
+        # má dostat tip na dnešek/zítřek, ne na zápas za týden).
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        plan = [("kratky", 20, 1, 1), ("stredni", 50, 1, 1)]
-        if today_prague.weekday() == 4:  # pátek
-            plan.append(("boost", 80, 2, 1))
+        plan = [("kratky", 20, 2, 1), ("stredni", 50, 2, 1)]
 
         results = []
         generated_today: list[tuple[Ticket, int]] = []
@@ -2516,7 +2521,7 @@ def run_test3_daily_tickets(request: Request):
     Appka na účtu TEST3_USER_ID (appky vlastní testovací/kontrolní účet)
     denně vygeneruje 2 kratky + 2 stredni tikety, na každý appka
     automaticky vsadí pevných 1000 Kč. Odděleno od DAILY_TICKETS_USER_ID
-    (placený Telegram kanál, přesně 1+1+pátek boost) i od
+    (placený Telegram kanál, přesně 1 kratky + 1 stredni, žádný boost) i od
     TRANSPARENCY_USER_ID (veřejná appka /public/transparency) — appka
     tenhle účet nemíchá s žádným z nich.
     """
@@ -2798,8 +2803,9 @@ def _ticket_still_sendable(ticket: Ticket, buffer_minutes: int = 30) -> bool:
 
 def _todays_client_picks(target_user_id: int) -> list[dict]:
     """Vybere z dnešních uložených tiketů appkina automatického účtu
-    (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni, v pátek
-    navíc nejlepší boost — stejný výběr pro náhled i pro odeslání."""
+    (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni — stejný
+    výběr pro náhled i pro odeslání. Appka BOOST už negeneruje ani
+    nenabízí (viz run_daily_tickets)."""
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
@@ -2820,12 +2826,7 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
         ]
         return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
 
-    picks = [p for p in (_best("kratky"), _best("stredni")) if p is not None]
-    if today_prague.weekday() == 4:  # pátek
-        boost_pick = _best("boost")
-        if boost_pick is not None:
-            picks.append(boost_pick)
-    return picks
+    return [p for p in (_best("kratky"), _best("stredni")) if p is not None]
 
 
 @app.get("/admin/client-tickets-preview")
