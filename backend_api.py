@@ -756,7 +756,7 @@ ticket_generator = TicketGenerator()
 # uplatňování kódů (viz db.py: user_tokens/token_transactions/redeem_codes).
 # =====================================================================
 TOKEN_KC_VALUE = 20  # 1 token = 20 Kč — appka to appce i frontendu drží na jednom místě
-TOKEN_COSTS = {"kratky": 6, "stredni": 11, "boost": 30}  # ceny podle potenciálu výhry (kurzu), ne podle spolehlivosti — BOOST je nejdražší
+TOKEN_COSTS = {"kratky": 6, "stredni": 11}  # ceny podle potenciálu výhry (kurzu), ne podle spolehlivosti — appka BOOST přestala nabízet úplně
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce

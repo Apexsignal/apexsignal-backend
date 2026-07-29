@@ -765,14 +765,14 @@ def render_page(
     app_offer_cta = f'<a class="btn" href="{escape(app_url)}">Otevřít appku</a>'
 
     offers = f"""<section>
-  <h2>Dvě cesty, jeden model</h2>
-  <p class="lede">Liší se jen tím, kdo dělá výběr — ty, nebo appka.</p>
+  <h2>Tři cesty, jeden model</h2>
+  <p class="lede">Liší se jen tím, kdo dělá výběr a kolik toho chceš — appka, ty sám, nebo appka bez omezení.</p>
   <div class="offers">
     <div class="offer primary">
       <span class="eyebrow">Kanál na Telegramu</span>
-      <div class="offer-price">2 500 Kč <small>/ měsíc</small></div>
-      <p>Každé ráno 1 krátký a 1 střední tiket, v pátek navíc BOOST s kurzem 10+.
-      Nic si sám negeneruješ, appka pošle výběr rovnou na Telegram. {compare_line}</p>
+      <div class="offer-price">500 Kč <small>/ měsíc</small></div>
+      <p>Každé ráno 1 krátký a 1 střední tiket. Nic si sám negeneruješ,
+      appka pošle výběr rovnou na Telegram. {compare_line}</p>
       <ol class="offer-steps">
         <li>Zaplatíš kartou přes Stripe — bez zakládání účtu.</li>
         <li>Hned ti přijde e-mail s odkazem na propojení Telegramu.</li>
@@ -781,9 +781,18 @@ def render_page(
       <a class="btn btn-fill" href="{escape(payment_link) if payment_link else '#'}">Aktivovat kanál</a>
     </div>
     <div class="offer">
-      <span class="eyebrow">Aplikace</span>
+      <span class="eyebrow">Aplikace — appka za pokus</span>
       <div class="offer-price">{app_offer_price}</div>
       <p>{app_offer_body}</p>
+      {app_offer_cta}
+    </div>
+    <div class="offer">
+      <span class="eyebrow">Neomezené generování</span>
+      <div class="offer-price">5 000 Kč <small>/ měsíc</small></div>
+      <p>Generuješ si sám, kolikrát chceš (strop 10× denně proti zneužití),
+      bez placení za jednotlivý tiket. Cílené na lidi, co appku chtějí
+      používat naplno — vlastní analýzu zápasů, nebo i vlastní tipsterský
+      byznys (založíš si skupinu a tikety, co appka vygeneruje, prodáváš dál sám).</p>
       {app_offer_cta}
     </div>
   </div>
