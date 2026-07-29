@@ -105,7 +105,7 @@ def send_welcome_email(to_email: str) -> bool:
     <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Vítej v ApexSignal!</p>
     <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
       Tvůj účet je založený a připravený k použití. Appka ti bude generovat
-      sázkové tikety na základě statistického modelu — krátký, střední i BOOST.
+      sázkové tikety na základě statistického modelu — krátký i střední.
     </p>
     <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
       Připomínka: appka je analytický nástroj, ne záruka výhry. Sázej zodpovědně, 18+.
@@ -136,8 +136,8 @@ def send_channel_welcome_email(to_email: str, telegram_deep_link: str) -> bool:
       a pošle ti nový.
     </p>
     <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
-      Od zítřejšího rána ti budou chodit 2 tikety denně (krátký a střední),
-      v pátek navíc BOOST. Sázku si vždycky klikáš sám, kde chceš.
+      Od zítřejšího rána ti budou chodit 2 tikety denně (krátký a střední).
+      Sázku si vždycky klikáš sám, kde chceš.
     </p>
     <p style="color:#8A93A8;font-size:12px;line-height:1.6;">
       18+. Hazardní hraní může být návykové. Sázej jen to, co si můžeš dovolit prohrát.
