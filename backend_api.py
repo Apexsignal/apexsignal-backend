@@ -3020,9 +3020,9 @@ def admin_telegram_sync(request: Request):
 
 TELEGRAM_WELCOME_MESSAGE = (
     "Ahoj! 👋 Účet je spárovaný, předplatné máš aktivní.\n\n"
-    "Od teď ti sem budu každé ráno posílat:\n"
-    "🎫 1× krátký tiket\n"
-    "🎫 1× střední tiket\n\n"
+    "Od teď ti sem budu každé ráno posílat 1 tiket 🎫 — appka nejdřív zkusí sestavit ten "
+    "hodnotnější, střední, a jen když pro něj trh zrovna nenabízí dost kvalitních zápasů, "
+    "pošle krátký místo něj.\n\n"
     "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
     "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
     "co sází místo tebe.\n\n"
@@ -3170,7 +3170,7 @@ async def telegram_webhook(request: Request):
             _send_telegram_message(
                 chat_id,
                 f"Předplatné je aktivní. Zaplaceno do {konec}.\n\n"
-                "Nic dalšího dělat nemusíš — tikety chodí automaticky každé ráno.",
+                "Nic dalšího dělat nemusíš — tiket chodí automaticky každé ráno.",
             )
         else:
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)

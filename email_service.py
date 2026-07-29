@@ -136,8 +136,9 @@ def send_channel_welcome_email(to_email: str, telegram_deep_link: str) -> bool:
       a pošle ti nový.
     </p>
     <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
-      Od zítřejšího rána ti budou chodit 2 tikety denně (krátký a střední).
-      Sázku si vždycky klikáš sám, kde chceš.
+      Od zítřejšího rána ti bude appka denně posílat 1 tiket — nejdřív zkusí sestavit
+      ten hodnotnější, střední, a jen když pro něj trh zrovna nenabízí dost kvalitních
+      zápasů, pošle krátký místo něj. Sázku si vždycky klikáš sám, kde chceš.
     </p>
     <p style="color:#8A93A8;font-size:12px;line-height:1.6;">
       18+. Hazardní hraní může být návykové. Sázej jen to, co si můžeš dovolit prohrát.
