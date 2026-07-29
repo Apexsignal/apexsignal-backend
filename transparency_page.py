@@ -579,7 +579,34 @@ RESEND_SCRIPT = """
   var form=document.getElementById('resend-form'); if(!form) return;
   var status=document.getElementById('resend-status');
   var input=document.getElementById('resend-email');
-  var btn=form.querySelector('button');
+  var btn=form.querySelector('button[type=submit]');
+  var cancelBtn=document.getElementById('cancel-sub-btn');
+  if(cancelBtn){
+    cancelBtn.addEventListener('click', function(){
+      var email=(input.value||'').trim();
+      if(!email){ input.reportValidity(); return; }
+      cancelBtn.disabled=true;
+      status.hidden=false;
+      status.className='resend-status';
+      status.textContent='Otevírám správu předplatného…';
+      fetch('%BACKEND_URL%/payments/billing-portal',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({email:email})
+      }).then(function(r){
+        return r.json().catch(function(){return {};}).then(function(body){
+          if(!r.ok) throw new Error(body.detail||'Nepodařilo se otevřít správu předplatného.');
+          return body;
+        });
+      }).then(function(body){
+        window.location.href=body.portal_url;
+      }).catch(function(err){
+        status.className='resend-status err';
+        status.textContent=err.message||'Nepodařilo se otevřít správu předplatného.';
+        cancelBtn.disabled=false;
+      });
+    });
+  }
   form.addEventListener('submit', function(e){
     e.preventDefault();
     var email=(input.value||'').trim();
@@ -863,6 +890,7 @@ def render_page(
   <form class="resend-form" id="resend-form">
     <input type="email" id="resend-email" name="email" placeholder="e-mail, kterým jsi platil" required autocomplete="email">
     <button type="submit" class="btn btn-fill">Poslat nový odkaz</button>
+    <button type="button" class="btn" id="cancel-sub-btn">Spravovat / zrušit předplatné</button>
   </form>
   <p class="resend-status" id="resend-status" role="status" hidden></p>
   <p class="resend-alt">Nebo máš jiný dotaz? <a class="resend-tg" href="https://t.me/D1990V05" target="_blank" rel="noopener noreferrer">Napiš mi rovnou na Telegram →</a></p>
