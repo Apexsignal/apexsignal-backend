@@ -321,6 +321,29 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Neomezené generování (5000 Kč/měsíc, viz _require_generation_enabled
+    # a _check_daily_generation_cap) — unlimited_until appka nechává NULL,
+    # dokud si uživatel tarif nekoupí; denni_generations_count/date appka
+    # počítá pokusy o generování, ne uložené tikety (appka platí za pokus,
+    # i kdyby uživatel výsledek nakonec neuložil).
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_until TIMESTAMPTZ")
+    except Exception:
+        pass
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generations_count INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generations_date DATE")
+    except Exception:
+        pass
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
@@ -785,8 +808,8 @@ def get_token_balance(user_id: int) -> int:
 def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
     """
     Přičte/odečte tokeny (amount může být záporné) a zaloguje transakci —
-    appka appka obojí dělá ve STEJNÉ transakci (get_cursor commituje na
-    konci celého bloku), ať zůstatek a log nikdy nerozjedou. Vrací NOVÝ
+    appka obojí dělá ve STEJNÉ transakci (get_cursor commituje na konci
+    celého bloku), ať zůstatek a log nikdy nerozjedou. Vrací NOVÝ
     zůstatek. Nekontroluje, jestli je výsledek záporný — to musí appka
     ověřit PŘED zavoláním (viz has_enough_tokens), ať se dá odlišit
     "nedostatek tokenů" od jiné chyby.
@@ -808,6 +831,48 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
             (user_id, amount, reason),
         )
         return new_balance
+
+
+# =====================================================================
+# Neomezené generování (5000 Kč/měsíc, strop 10 generování/den)
+# =====================================================================
+def get_unlimited_until(user_id: int) -> Optional[datetime]:
+    with get_cursor() as cur:
+        cur.execute("SELECT unlimited_until FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["unlimited_until"] if row else None
+
+
+def set_unlimited_until(user_id: int, until: datetime) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (until, user_id))
+
+
+def increment_daily_generation_count(user_id: int) -> int:
+    """
+    Appka tady atomicky (jeden UPDATE, ne SELECT+UPDATE) buď nastartuje
+    nový den na 1, nebo připočte k dnešnímu počtu — CASE běží uvnitř
+    databáze, takže dva souběžné požadavky appku nepřipraví o jeden
+    přírůstek (na rozdíl od "appka si přečte počet v Pythonu, přičte 1,
+    zapíše zpátky"). Appka počítá POKUSY o generování (volání appky
+    /tickets/generate), ne uložené tikety — appka platí za spuštění
+    appčina modelu, ne za to, jestli si uživatel výsledek nechá.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE users SET
+                daily_generations_count = CASE
+                    WHEN daily_generations_date = CURRENT_DATE THEN daily_generations_count + 1
+                    ELSE 1
+                END,
+                daily_generations_date = CURRENT_DATE
+            WHERE id = %s
+            RETURNING daily_generations_count
+            """,
+            (user_id,),
+        )
+        return cur.fetchone()["daily_generations_count"]
 
 
 def mark_stripe_event_if_new(event_id: str) -> bool:

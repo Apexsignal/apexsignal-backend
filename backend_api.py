@@ -99,8 +99,15 @@ GENERATION_ALLOWED_USER_IDS = {
 }
 
 
+def _has_active_unlimited(user_id: int) -> bool:
+    until = db.get_unlimited_until(user_id)
+    return until is not None and until > datetime.now(timezone.utc)
+
+
 def _require_generation_enabled(user_id: Optional[int] = None) -> None:
     if CLIENT_TICKET_GENERATION_ENABLED or (user_id is not None and user_id in GENERATION_ALLOWED_USER_IDS):
+        return
+    if user_id is not None and _has_active_unlimited(user_id):
         return
     raise HTTPException(
         status_code=503,
@@ -221,13 +228,12 @@ class GoogleAuthRequest(BaseModel):
 @app.post("/auth/google", response_model=AuthResponse)
 def google_auth(req: GoogleAuthRequest):
     """
-    Appka ověří Google ID token appka appce (podpis appka i cílový klient
-    appka appka appka ověří knihovnou google-auth, appka appce nedůvěřuje
-    ničemu, co appka nedostane přímo od Google) a podle e-mailu z něj buď
-    najde existující účet, nebo appka založí nový — appka novým Google
-    účtům nastaví náhodné, nikdy nepoužité heslo (appka appka appce
-    ho nikdy neřekne), appka běžné přihlášení heslem appce zůstane
-    funkční, pokud si ho appka appka appka někdy appka nastaví přes
+    Appka ověří Google ID token (podpis i cílový klient appka ověří
+    knihovnou google-auth, nedůvěřuje ničemu, co nedostane přímo od
+    Google) a podle e-mailu z něj buď najde existující účet, nebo
+    založí nový — novým Google účtům appka nastaví náhodné, nikdy
+    nepoužité heslo (uživateli ho neřekne), aby běžné přihlášení
+    heslem zůstalo funkční, pokud si ho uživatel někdy nastaví přes
     zapomenuté heslo.
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -356,7 +362,7 @@ def delete_account(req: DeleteAccountRequest, user_id: int = Depends(get_current
 # Pydantic schémata (request/response kontrakty)
 # =====================================================================
 class TicketGenerateRequest(BaseModel):
-    risk_level: int = Field(ge=0, le=100)
+    risk_level: int = Field(ge=0, le=60)  # appka BOOST (risk_level > 60) už nenabízí
     sports: list[Sport]
     market_types: list[MarketType]
     time_frame_days: int = Field(ge=1, le=5)  # Horizont: 1-5 dní (už ne konkrétní data)
@@ -774,6 +780,21 @@ def _pool_filter_for_risk(risk_level: int):
 
 
 def _check_token_balance(user_id: int, risk_level: int) -> None:
+    # Neomezený tarif appku vůbec neúčtuje v tokenech — appka místo toho
+    # počítá POKUSY o generování proti dennímu stropu (viz
+    # db.increment_daily_generation_count). Appka strop kontroluje TADY,
+    # před samotným (drahým) generováním, ne až po něm.
+    if _has_active_unlimited(user_id):
+        count = db.increment_daily_generation_count(user_id)
+        if count > UNLIMITED_GENERATION_DAILY_CAP:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Appka ti dnes už {UNLIMITED_GENERATION_DAILY_CAP}× vygenerovala — "
+                    "to je denní strop neomezeného tarifu. Zkus to zítra."
+                ),
+            )
+        return
     ticket_type = _ticket_type_for_risk_level(risk_level)
     cost = TOKEN_COSTS.get(ticket_type, 0)
     if cost <= 0:
@@ -787,6 +808,10 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
 
 
 def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
+    # Neomezený tarif appka nestrhává v tokenech — appka si tenhle pokus
+    # už započítala do denního stropu v _check_token_balance.
+    if _has_active_unlimited(user_id):
+        return
     cost = TOKEN_COSTS.get(ticket_type, 0)
     if cost > 0:
         db.adjust_tokens(user_id, -cost, f"UNLOCK_{ticket_type.upper()}")
@@ -847,6 +872,42 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
                 "quantity": 1,
             }],
             metadata={"user_id": str(user_id), "tokens": str(req.tokens)},
+            success_url=f"{frontend_url}/?payment=success",
+            cancel_url=f"{frontend_url}/?payment=cancelled",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return {"checkout_url": session.url}
+
+
+UNLIMITED_GENERATION_PRICE_KC = 5000
+UNLIMITED_GENERATION_DAILY_CAP = 10
+
+
+@app.post("/payments/create-unlimited-checkout-session")
+def create_unlimited_checkout_session(user_id: int = Depends(get_current_user_id)):
+    """Na rozdíl od nákupu tokenů tady appka záměrně nevolá
+    _require_generation_enabled — tenhle nákup je přesně to, co má
+    generování uživateli odemknout, takže by ho nemělo dávat smysl
+    podmiňovat tím, že generování je už odemčené."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "czk",
+                    "product_data": {"name": "Neomezené generování na měsíc — ApexSignal"},
+                    "unit_amount": UNLIMITED_GENERATION_PRICE_KC * 100,
+                },
+                "quantity": 1,
+            }],
+            metadata={"user_id": str(user_id), "unlimited_generation": "1"},
             success_url=f"{frontend_url}/?payment=success",
             cancel_url=f"{frontend_url}/?payment=cancelled",
         )
@@ -1037,12 +1098,16 @@ async def stripe_webhook(request: Request):
                 if subscription_row_id:
                     _send_telegram_onboarding_email(subscription_row_id, email)
         else:
-            # Jednorázový nákup tokenů (appka vázaná na účet) — beze změny.
+            # Jednorázový nákup appka vázaná na účet — buď tokeny, nebo
+            # neomezené generování na měsíc (metadata appku rozlišuje).
             metadata = obj.get("metadata") or {}
             user_id = int(metadata.get("user_id", 0)) or None
-            tokens = int(metadata.get("tokens", 0))
-            if user_id and tokens:
-                db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
+            if user_id and metadata.get("unlimited_generation") == "1":
+                db.set_unlimited_until(user_id, datetime.now(timezone.utc) + timedelta(days=30))
+            else:
+                tokens = int(metadata.get("tokens", 0))
+                if user_id and tokens:
+                    db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
 
     elif event_type.startswith("customer.subscription."):
         # created / updated / deleted — u deleted pošle Stripe status
@@ -1980,7 +2045,7 @@ def get_ticket_roi(user_id: int = Depends(get_current_user_id)):
 
 
 class TicketGenerateRequestWithExclude(BaseModel):
-    risk_level: int = Field(ge=0, le=100)
+    risk_level: int = Field(ge=0, le=60)  # appka BOOST (risk_level > 60) už nenabízí
     sports: list[Sport]
     market_types: list[MarketType]
     time_frame_days: int = Field(ge=1, le=5)
