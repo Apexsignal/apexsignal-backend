@@ -848,10 +848,22 @@ class RedeemCodeRequest(BaseModel):
 @app.get("/tokens/balance")
 def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
     until = db.get_unlimited_until(user_id)
+
+    # Kanál (500 Kč) appka drží úplně odděleně, podle e-mailu ve
+    # subscriptions — appka tu jen zkontroluje, jestli e-mail appky
+    # účtu náhodou nesedí na nějaké aktivní kanálové předplatné, ať appka
+    # ví, jestli má appka ukázat "koupit" nebo "spravovat/zrušit".
+    user = db.get_user_by_id(user_id)
+    channel_active = False
+    if user and user.get("email"):
+        sub = db.get_subscription_by_email(user["email"])
+        channel_active = bool(sub and db.has_active_subscription_id(sub["id"]))
+
     return {
         "balance": db.get_token_balance(user_id),
         "unlimited_active": _has_active_unlimited(user_id),
         "unlimited_until": until.isoformat() if until else None,
+        "channel_active": channel_active,
     }
 
 
@@ -2404,8 +2416,9 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 
 # =====================================================================
 # Automatické denní generování tiketů (cron) — appka denně v 9:00 SEČ/SELČ
-# vygeneruje 1 tiket (nejdřív zkusí stredni, fallback kratky), uloží ho
-# do historie zadaného účtu a pošle ho jako obrázek do Telegramu.
+# vygeneruje 1 tiket — hlavně kratky, jen každý třetí den appka navíc
+# zkusí stredni (pošle ho, jen když má hodnotu) — uloží ho do historie
+# zadaného účtu a pošle ho jako obrázek do Telegramu.
 # Volá se z vnějšku (naplánovaná úloha), ne appka sama ze sebe — proto
 # appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
 # přihlašovacím tokenem konkrétního uživatele.
@@ -2526,11 +2539,14 @@ def run_daily_tickets(request: Request):
         # nabízet úplně — jeho nízká úspěšnost (viz historie) mu
         # neodpovídala kvalitativní laťce, co appka drží u kratky/stredni.
         #
-        # Appka vždy nejdřív zkusí sestavit stredni (delší, hodnotnější
-        # tiket) — teprve když pro něj trh ten den nenabízí dost kvalitních
-        # zápasů (_generate_one_ticket_for_cron vrátí None i po 65%
-        # fallbacku), appka zkusí kratky místo něj. Odběratel dostane vždy
-        # to nejlepší, co appka ten den našla, ne mechanicky obojí.
+        # Appka posílá hlavně kratky. Jen každý třetí den appka navíc
+        # zkusí nejdřív sestavit stredni — a pošle ho MÍSTO kratky jen
+        # tehdy, když appka pro něj najde skutečnou hodnotu (kladný edge
+        # vůči tržnímu kurzu appka vyžaduje už uvnitř
+        # TicketGenerator._build_ticket, require_positive_edge=True — bez
+        # toho appka žádný stredni tiket nevrátí, viz probability_model).
+        # Když se stredni ten den nepovede sestavit (žádná hodnota nebo
+        # málo zápasů), appka spadne na kratky stejně jako každý jiný den.
         #
         # Okno je 2 dny (dnešek/zítřek), NE 1 — appka tak nejdřív zkusí
         # sestavit tiket na 70 % z obou dní najednou, a teprve když ani tak
@@ -2552,8 +2568,11 @@ def run_daily_tickets(request: Request):
         if already_today > 0:
             results.append({"type": "daily_pick", "status": "already_generated_today", "count": already_today})
         else:
+            is_stredni_day = today_prague.toordinal() % 3 == 0
+            candidates = (("stredni", 50), ("kratky", 20)) if is_stredni_day else (("kratky", 20),)
+
             ticket, label = None, None
-            for candidate_label, risk_level in (("stredni", 50), ("kratky", 20)):
+            for candidate_label, risk_level in candidates:
                 try:
                     ticket = _generate_one_ticket_for_cron(
                         target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 2,
@@ -2955,16 +2974,15 @@ def transparency_html(limit: int = 100):
 def _app_equivalent_monthly_kc() -> int:
     """
     Kolik by stálo přes appku/tokeny vygenerovat to samé, co appka posílá
-    v placeném kanálu za měsíc — appka posílá jen 1 tiket denně, vždy
-    nejdřív zkusí stredni a na kratky spadne jen když ho trh ten den
-    nenabízí (viz run_daily_tickets). Appka pro srovnání počítá s cenou
-    stredni, protože je to typ, o který se appka snaží primárně — kratky
-    je jen záložní. Appka to počítá živě z TOKEN_COSTS/TOKEN_KC_VALUE, ne
-    jako pevné číslo v textu landing page, ať se srovnání samo opraví,
-    když se ceník někdy změní.
+    v placeném kanálu za měsíc — appka posílá jen 1 tiket denně, hlavně
+    kratky, jen každý třetí den appka navíc zkusí stredni (viz
+    run_daily_tickets). Appka pro srovnání počítá s cenou kratky, protože
+    to je typ, co appka posílá naprostou většinu dní. Appka to počítá
+    živě z TOKEN_COSTS/TOKEN_KC_VALUE, ne jako pevné číslo v textu
+    landing page, ať se srovnání samo opraví, když se ceník někdy změní.
     """
     days_per_month = 30
-    daily_kc = TOKEN_COSTS["stredni"] * TOKEN_KC_VALUE
+    daily_kc = TOKEN_COSTS["kratky"] * TOKEN_KC_VALUE
     return daily_kc * days_per_month
 
 
@@ -3111,9 +3129,8 @@ def admin_telegram_sync(request: Request):
 
 TELEGRAM_WELCOME_MESSAGE = (
     "Ahoj! 👋 Účet je spárovaný, předplatné máš aktivní.\n\n"
-    "Od teď ti sem budu každé ráno posílat 1 tiket 🎫 — appka nejdřív zkusí sestavit ten "
-    "hodnotnější, střední, a jen když pro něj trh zrovna nenabízí dost kvalitních zápasů, "
-    "pošle krátký místo něj.\n\n"
+    "Od teď ti sem budu každé ráno posílat 1 tiket 🎫 — hlavně krátký, občas (když appka "
+    "najde opravdovou hodnotu) radši ten hodnotnější, střední.\n\n"
     "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
     "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
     "co sází místo tebe.\n\n"
