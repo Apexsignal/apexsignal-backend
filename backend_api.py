@@ -333,6 +333,27 @@ def admin_set_password(req: AdminSetPasswordRequest, request: Request):
     return {"status": "Heslo nastaveno"}
 
 
+class AdminSetUnlimitedRequest(BaseModel):
+    email: str
+    days: int = 30
+
+
+@app.post("/admin/set-unlimited")
+def admin_set_unlimited(req: AdminSetUnlimitedRequest, request: Request):
+    """Ruční nastavení neomezeného tarifu bez placení — appce se hodí na
+    dohodnuté výjimky (partnerství, náprava platebního omylu) i appce
+    samotné na ověření appky. days=0 unlimited rovnou appce vypne."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Uživatel nenalezen")
+    until = datetime.now(timezone.utc) + timedelta(days=req.days) if req.days > 0 else datetime.now(timezone.utc)
+    db.set_unlimited_until(user["id"], until)
+    return {"email": req.email, "unlimited_until": until.isoformat()}
+
+
 class DeleteAccountRequest(BaseModel):
     password: str
 
