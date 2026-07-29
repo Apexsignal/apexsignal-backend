@@ -847,7 +847,12 @@ class RedeemCodeRequest(BaseModel):
 
 @app.get("/tokens/balance")
 def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
-    return {"balance": db.get_token_balance(user_id)}
+    until = db.get_unlimited_until(user_id)
+    return {
+        "balance": db.get_token_balance(user_id),
+        "unlimited_active": _has_active_unlimited(user_id),
+        "unlimited_until": until.isoformat() if until else None,
+    }
 
 
 @app.get("/tokens/prices")
@@ -916,24 +921,35 @@ def create_unlimited_checkout_session(user_id: int = Depends(get_current_user_id
     """Na rozdíl od nákupu tokenů tady appka záměrně nevolá
     _require_generation_enabled — tenhle nákup je přesně to, co má
     generování uživateli odemknout, takže by ho nemělo dávat smysl
-    podmiňovat tím, že generování je už odemčené."""
+    podmiňovat tím, že generování je už odemčené.
+
+    mode="subscription" (ne jednorázová platba) — Stripe strhává platbu
+    sám každý měsíc. Datum konce appka nenastavuje napevno na +30 dní,
+    ale prodlužuje ho webhook (checkout.session.completed /
+    invoice.payment_succeeded) podle skutečně zaplaceného období."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
 
     frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
+    metadata = {"user_id": str(user_id), "unlimited_generation": "1"}
     try:
         session = stripe.checkout.Session.create(
-            mode="payment",
+            mode="subscription",
             payment_method_types=["card"],
             line_items=[{
                 "price_data": {
                     "currency": "czk",
                     "product_data": {"name": "Neomezené generování na měsíc — ApexSignal"},
                     "unit_amount": UNLIMITED_GENERATION_PRICE_KC * 100,
+                    "recurring": {"interval": "month"},
                 },
                 "quantity": 1,
             }],
-            metadata={"user_id": str(user_id), "unlimited_generation": "1"},
+            metadata=metadata,
+            # Metadata appka musí zopakovat i sem — appka jinak zůstane jen
+            # na Checkout Session, ale pozdější webhooky (obnovení,
+            # zrušení) appce posílají přímo objekt Subscription, ne Session.
+            subscription_data={"metadata": metadata},
             success_url=f"{frontend_url}/?payment=success",
             cancel_url=f"{frontend_url}/?payment=cancelled",
         )
@@ -941,6 +957,30 @@ def create_unlimited_checkout_session(user_id: int = Depends(get_current_user_id
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
 
     return {"checkout_url": session.url}
+
+
+@app.post("/payments/unlimited-billing-portal")
+def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
+    """Billing portál appka pro neomezený tarif drží zvlášť od
+    /payments/billing-portal — appka ten druhý dohledává zákazníka podle
+    e-mailu (Telegram kanál, žádný účet appky), kdežto tenhle je vázaný
+    na přihlášený appky účet."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    customer_id = db.get_unlimited_stripe_customer_id(user_id)
+    if not customer_id:
+        raise HTTPException(status_code=404, detail="Nemáš aktivní neomezené předplatné")
+
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=os.environ.get("APP_URL", "https://apexsignal.cz"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return {"portal_url": session.url}
 
 
 def _period_end_from_subscription(sub: dict) -> Optional[datetime]:
@@ -1099,10 +1139,37 @@ async def stripe_webhook(request: Request):
     if not relevant or not db.mark_stripe_event_if_new(event["id"]):
         return {"status": "ok"}
 
+    # Appka teď má DVĚ různé předplatné, obě mode="subscription":
+    #   1) Telegram kanál (500 Kč) — přes samostatný Stripe Payment Link,
+    #      žádný účet appky, appka zákazníka pozná jen podle e-mailu,
+    #      appka drží stav v tabulce subscriptions.
+    #   2) Neomezené generování (5000 Kč) — přes /payments/create-
+    #      unlimited-checkout-session, vázané na přihlášený user_id
+    #      appky (metadata.unlimited_generation == "1"), appka drží
+    #      stav přímo na users.unlimited_until.
+    # Appka je rozlišuje podle metadata.unlimited_generation, ne podle
+    # mode — obě appka teď mají mode="subscription".
     if event_type == "checkout.session.completed":
-        if obj.get("mode") == "subscription":
-            # Platba přes samostatný Stripe Payment Link — appka tu nemá
-            # žádné metadata.user_id (nikdo se nikde nepřihlašoval), jen
+        metadata = obj.get("metadata") or {}
+        user_id = int(metadata.get("user_id", 0)) or None
+
+        if user_id and metadata.get("unlimited_generation") == "1":
+            stripe_subscription_id = obj.get("subscription")
+            period_end = None
+            if stripe_subscription_id:
+                try:
+                    sub = stripe.Subscription.retrieve(stripe_subscription_id)
+                    period_end = _period_end_from_subscription(sub)
+                except Exception as e:
+                    print(f"[stripe] nepodařilo se načíst nové neomezené předplatné {stripe_subscription_id}: {e}")
+            db.set_unlimited_until(
+                user_id,
+                period_end or datetime.now(timezone.utc) + timedelta(days=30),
+                stripe_customer_id=obj.get("customer"),
+            )
+        elif obj.get("mode") == "subscription":
+            # Platba přes samostatný Stripe Payment Link (kanál) — appka
+            # tu nemá žádné metadata.user_id (nikdo se nepřihlašoval), jen
             # e-mail, který zákazník zadal do Stripe checkoutu.
             email = (obj.get("customer_details") or {}).get("email") or obj.get("customer_email")
             stripe_subscription_id = obj.get("subscription")
@@ -1124,36 +1191,60 @@ async def stripe_webhook(request: Request):
                 if subscription_row_id:
                     _send_telegram_onboarding_email(subscription_row_id, email)
         else:
-            # Jednorázový nákup appka vázaná na účet — buď tokeny, nebo
-            # neomezené generování na měsíc (metadata appku rozlišuje).
-            metadata = obj.get("metadata") or {}
-            user_id = int(metadata.get("user_id", 0)) or None
-            if user_id and metadata.get("unlimited_generation") == "1":
-                db.set_unlimited_until(user_id, datetime.now(timezone.utc) + timedelta(days=30))
-            else:
-                tokens = int(metadata.get("tokens", 0))
-                if user_id and tokens:
-                    db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
+            # Jednorázový nákup vázaný na účet — tokeny.
+            tokens = int(metadata.get("tokens", 0))
+            if user_id and tokens:
+                db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
 
     elif event_type.startswith("customer.subscription."):
-        # created / updated / deleted — u deleted pošle Stripe status
-        # 'canceled', takže appka nepotřebuje větvit, stačí zrcadlit.
-        if not db.update_subscription_by_stripe_id(
-            obj["id"], obj.get("status", "inactive"), _period_end_from_subscription(obj)
-        ):
-            _sync_subscription_from_stripe(obj)
+        sub_metadata = obj.get("metadata") or {}
+        if sub_metadata.get("unlimited_generation") == "1":
+            # Obnovení appka řeší přes invoice.payment_succeeded níž (tam
+            # appka ví jistě, že platba prošla) — tady appka jen zrcadlí
+            # aktivní stav, kdyby přišel dřív. Zrušení appka neřeší
+            # zkrácením — přístup nechá doběhnout do konce už zaplaceného
+            # období, neutne ho hned.
+            sub_user_id = int(sub_metadata.get("user_id", 0)) or None
+            if sub_user_id and obj.get("status") in ("active", "trialing"):
+                period_end = _period_end_from_subscription(obj)
+                if period_end:
+                    db.set_unlimited_until(sub_user_id, period_end, stripe_customer_id=obj.get("customer"))
+        else:
+            # created / updated / deleted (kanál) — u deleted pošle Stripe
+            # status 'canceled', appka nepotřebuje větvit, stačí zrcadlit.
+            if not db.update_subscription_by_stripe_id(
+                obj["id"], obj.get("status", "inactive"), _period_end_from_subscription(obj)
+            ):
+                _sync_subscription_from_stripe(obj)
 
     elif event_type in ("invoice.payment_succeeded", "invoice.payment_failed"):
-        # Obnovení nebo neúspěšné strhnutí — appka si dotáhne aktuální
-        # stav předplatného, ať 'past_due' nebo prodloužené období
-        # dorazí do DB i bez samostatné customer.subscription.updated.
         subscription_id = obj.get("subscription")
         if subscription_id:
             try:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                _sync_subscription_from_stripe(sub)
             except Exception as e:
                 print(f"[stripe] nepodařilo se načíst předplatné {subscription_id}: {e}")
+                sub = None
+            if sub is not None:
+                sub_metadata = sub.get("metadata") or {}
+                if sub_metadata.get("unlimited_generation") == "1":
+                    # Tohle je ten skutečný měsíční obnovovací moment —
+                    # každá úspěšná faktura prodlouží unlimited_until na
+                    # nové zaplacené období.
+                    if event_type == "invoice.payment_succeeded":
+                        inv_user_id = int(sub_metadata.get("user_id", 0)) or None
+                        period_end = _period_end_from_subscription(sub)
+                        if inv_user_id and period_end:
+                            db.set_unlimited_until(inv_user_id, period_end, stripe_customer_id=sub.get("customer"))
+                    # payment_failed appka nijak aktivně neřeší — přístup
+                    # doběhne do konce už zaplaceného období, opakované
+                    # pokusy o strhnutí řeší Stripe sám podle svého plánu.
+                else:
+                    # Obnovení nebo neúspěšné strhnutí (kanál) — appka si
+                    # dotáhne aktuální stav předplatného, ať 'past_due'
+                    # nebo prodloužené období dorazí do DB i bez
+                    # samostatné customer.subscription.updated.
+                    _sync_subscription_from_stripe(sub)
 
     return {"status": "ok"}
 

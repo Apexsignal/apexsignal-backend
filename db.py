@@ -332,6 +332,15 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Stripe customer ID appka potřebuje, aby appka uměla otevřít billing
+    # portál (zrušení/změna karty) — bez něj appka nemá jak dohledat, který
+    # Stripe zákazník k danému appky účtu patří.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_stripe_customer_id TEXT")
+    except Exception:
+        pass
+
     try:
         with get_cursor() as cur:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generations_count INTEGER NOT NULL DEFAULT 0")
@@ -843,9 +852,22 @@ def get_unlimited_until(user_id: int) -> Optional[datetime]:
         return row["unlimited_until"] if row else None
 
 
-def set_unlimited_until(user_id: int, until: datetime) -> None:
+def set_unlimited_until(user_id: int, until: datetime, stripe_customer_id: Optional[str] = None) -> None:
     with get_cursor() as cur:
-        cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (until, user_id))
+        if stripe_customer_id is not None:
+            cur.execute(
+                "UPDATE users SET unlimited_until = %s, unlimited_stripe_customer_id = %s WHERE id = %s",
+                (until, stripe_customer_id, user_id),
+            )
+        else:
+            cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (until, user_id))
+
+
+def get_unlimited_stripe_customer_id(user_id: int) -> Optional[str]:
+    with get_cursor() as cur:
+        cur.execute("SELECT unlimited_stripe_customer_id FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["unlimited_stripe_customer_id"] if row else None
 
 
 def increment_daily_generation_count(user_id: int) -> int:
