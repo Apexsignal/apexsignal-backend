@@ -2429,11 +2429,17 @@ def run_daily_tickets(request: Request):
                 settled_count += 1
 
         # DAILY_TICKETS_USER_ID je zdroj pro PLACENÝ Telegram kanál
-        # (_todays_client_picks/client-tickets-send) — appka tu chce přesně
-        # 1 kratky + 1 stredni denně, žádnou "výkladní skříň" navíc (na tu
-        # appka má samostatný účet, viz TEST3_USER_ID níže). BOOST appka
-        # přestala nabízet úplně — jeho nízká úspěšnost (viz historie) mu
+        # (_todays_client_picks/client-tickets-send) — appka posílá JEDEN
+        # tiket denně, žádnou "výkladní skříň" navíc (na tu appka má
+        # samostatný účet, viz TEST3_USER_ID níže). BOOST appka přestala
+        # nabízet úplně — jeho nízká úspěšnost (viz historie) mu
         # neodpovídala kvalitativní laťce, co appka drží u kratky/stredni.
+        #
+        # Appka vždy nejdřív zkusí sestavit stredni (delší, hodnotnější
+        # tiket) — teprve když pro něj trh ten den nenabízí dost kvalitních
+        # zápasů (_generate_one_ticket_for_cron vrátí None i po 65%
+        # fallbacku), appka zkusí kratky místo něj. Odběratel dostane vždy
+        # to nejlepší, co appka ten den našla, ne mechanicky obojí.
         #
         # Okno je 2 dny (dnešek/zítřek), NE 1 — appka tak nejdřív zkusí
         # sestavit tiket na 70 % z obou dní najednou, a teprve když ani tak
@@ -2445,35 +2451,33 @@ def run_daily_tickets(request: Request):
         # má dostat tip na dnešek/zítřek, ne na zápas za týden).
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        plan = [("kratky", 20, 2, 1), ("stredni", 50, 2, 1)]
 
         results = []
         generated_today: list[tuple[Ticket, int]] = []
-        for label, risk_level, days, target_count in plan:
-            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
-            to_generate = target_count - already_today
-            if to_generate <= 0:
-                results.append({"type": label, "status": "already_generated_today", "count": already_today})
-                continue
-
-            for _ in range(to_generate):
-                # 12+ tiketů v jednom běhu appce zvyšuje šanci, že jedno
-                # generování narazí na dočasný výpadek/rate-limit u
-                # externího API — appka to zaloguje a zkusí další typ, místo
-                # aby appka jednou chybou shodila CELÝ zbytek běhu (500).
+        already_today = (
+            db.count_tickets_since(target_user_id, "kratky", today_start_utc_naive)
+            + db.count_tickets_since(target_user_id, "stredni", today_start_utc_naive)
+        )
+        if already_today > 0:
+            results.append({"type": "daily_pick", "status": "already_generated_today", "count": already_today})
+        else:
+            ticket, label = None, None
+            for candidate_label, risk_level in (("stredni", 50), ("kratky", 20)):
                 try:
                     ticket = _generate_one_ticket_for_cron(
-                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 2,
                         max_widen_days=0,
                     )
                 except Exception as e:
-                    print(f"[daily-tickets] {label}: generování selhalo: {e}")
-                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    print(f"[daily-tickets] {candidate_label}: generování selhalo: {e}")
+                    ticket = None
+                if ticket is not None:
+                    label = candidate_label
                     break
-                if ticket is None:
-                    results.append({"type": label, "status": "failed_to_generate"})
-                    break  # appka pro tenhle typ zjevně došly použitelné zápasy, další pokus by zase selhal
 
+            if ticket is None:
+                results.append({"type": "daily_pick", "status": "failed_to_generate"})
+            else:
                 ticket_id = repo.save_ticket(target_user_id, ticket)
                 stake = random.choice(DAILY_TICKETS_STAKE_CHOICES)
                 repo.set_actual_stake(ticket_id, stake, ticket.total_odds)
@@ -2860,13 +2864,16 @@ def transparency_html(limit: int = 100):
 def _app_equivalent_monthly_kc() -> int:
     """
     Kolik by stálo přes appku/tokeny vygenerovat to samé, co appka posílá
-    v placeném kanálu za měsíc — 1 krátký + 1 střední denně (viz
-    _todays_client_picks, appka BOOST v kanálu už nenabízí). Appka to
-    počítá živě z TOKEN_COSTS/TOKEN_KC_VALUE, ne jako pevné číslo v textu
-    landing page, ať se srovnání samo opraví, když se ceník někdy změní.
+    v placeném kanálu za měsíc — appka posílá jen 1 tiket denně, vždy
+    nejdřív zkusí stredni a na kratky spadne jen když ho trh ten den
+    nenabízí (viz run_daily_tickets). Appka pro srovnání počítá s cenou
+    stredni, protože je to typ, o který se appka snaží primárně — kratky
+    je jen záložní. Appka to počítá živě z TOKEN_COSTS/TOKEN_KC_VALUE, ne
+    jako pevné číslo v textu landing page, ať se srovnání samo opraví,
+    když se ceník někdy změní.
     """
     days_per_month = 30
-    daily_kc = (TOKEN_COSTS["kratky"] + TOKEN_COSTS["stredni"]) * TOKEN_KC_VALUE
+    daily_kc = TOKEN_COSTS["stredni"] * TOKEN_KC_VALUE
     return daily_kc * days_per_month
 
 
