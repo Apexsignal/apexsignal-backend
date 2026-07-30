@@ -372,6 +372,10 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius
 .eyebrow{font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0}
 section{display:flex;flex-direction:column;gap:18px}
 .lede{color:var(--muted);font-size:1.05rem}
+.history-recap{font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace;
+font-size:.95rem;color:var(--muted);margin:-6px 0 4px;padding:10px 14px;background:var(--raise);
+border:1px solid var(--line);border-radius:10px;width:fit-content}
+.history-recap strong{color:var(--ink)}
 .up{color:var(--up)}.down{color:var(--down)}
 header{position:relative;padding-top:8px}
 header::before{content:"";position:absolute;top:-40px;left:-20px;right:-20px;height:280px;z-index:-1;
@@ -705,6 +709,16 @@ def render_page(
 
     cards = _ticket_groups(tickets)
 
+    win_rate = (stats or {}).get("win_rate_pct")
+    history_recap = ""
+    if resolved_count:
+        history_recap = (
+            '<p class="history-recap">'
+            f'ROI <strong class="{_trend_class(roi)}">{_fmt_signed(roi, 1, " %")}</strong> · '
+            f'Úspěšnost <strong>{_fmt_num(win_rate, 1, " %")}</strong> na {resolved_count} vyhodnocených tiketech'
+            "</p>"
+        )
+
     units_profit = (stats or {}).get("units_profit")
     hero_stat = ""
     if resolved_count and units_profit is not None:
@@ -868,6 +882,7 @@ def render_page(
   <p class="lede">Zápasy appka ukazuje hned u každého tiketu. Skrytá zůstává jen samotná sázka — trh, konkrétní
   výběr a kurz té jedné nohy — dokud appka tiket nevyhodnotí. Jde tak dopředu ověřit, na co appka sází, ale
   nejde si to okopírovat, ani appka nemůže zpětně tvrdit něco jiného, než na co skutečně vsadila.</p>
+  {history_recap}
   <div class="ticket-groups">{cards}</div>
 </section>
 
