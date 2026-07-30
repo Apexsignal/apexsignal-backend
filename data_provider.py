@@ -1458,11 +1458,14 @@ class APIFootballProvider(SportsDataProvider):
         except Exception as e:
             print(f"[cache] DB cache nedostupná, pokračuju bez ní: {e}")
 
-        # Appka cílí na rovnoměrné rozdělení limitu PŘES VŠECHNY požadované
-        # dny, ne na hladové vybrání jen těch nejbližších zápasů — jinak by
-        # se appka u time_frame_days=3 klidně omezila jen na příštích pár
-        # hodin a dny 2-3 by appka vůbec neviděla.
-        per_day_limit = max(MAX_FIXTURES_PER_REQUEST // max(len(dates), 1), 1)
+        # Appka dřív limit rovnoměrně DĚLILA přes všechny požadované dny
+        # (MAX_FIXTURES_PER_REQUEST // len(dates)) — na řídký den (pondělí,
+        # pár soutěží) to appce zbytečně ubralo z bohatého dne (sobota),
+        # i když ten bohatý den měl kandidátů dost sám o sobě. Appka teď
+        # jde po dnech PO POŘADÍ (dnes, zítra, ...) a bere z KAŽDÉHO,
+        # co zbývá ze stropu MAX_FIXTURES_PER_REQUEST — na další den appka
+        # sáhne, jen když jí ten předchozí nedal dost. Běžná sobota tak
+        # appce klidně stačí celá sama, bez zbytečných volání na další dny.
         fixtures: list[dict] = []
         today_str = date.today().isoformat()
         now_utc = datetime.utcnow()
@@ -1493,6 +1496,9 @@ class APIFootballProvider(SportsDataProvider):
             return True
 
         for day_str in dates:
+            remaining = MAX_FIXTURES_PER_REQUEST - len(fixtures)
+            if remaining <= 0:
+                break  # strop už je plný — appka nemá důvod volat další (dražší) dny
             day_fixtures = self._get("/fixtures", {"date": day_str})
             day_fixtures = [f for f in day_fixtures if f.get("league", {}).get("id") in TIPSPORT_LEAGUE_IDS]
             # Budoucí dny — filtruj jen NS (nezačalo), dnes — filtruj podle času
@@ -1514,10 +1520,8 @@ class APIFootballProvider(SportsDataProvider):
             else:
                 day_fixtures = [f for f in day_fixtures if is_upcoming(f)]
             day_fixtures.sort(key=lambda f: f.get("fixture", {}).get("date", ""))
-            fixtures.extend(day_fixtures[:per_day_limit])
+            fixtures.extend(day_fixtures[:remaining])
             time.sleep(0.3)
-
-        fixtures = fixtures[:MAX_FIXTURES_PER_REQUEST]
 
         # Ulož do obou cache — in-memory pro tuto session, DB pro příští restart
         self._cache.set(cache_key, fixtures)
