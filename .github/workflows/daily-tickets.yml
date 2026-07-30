@@ -40,9 +40,14 @@ jobs:
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/test3-daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
 
-      - name: Vygenerovat dnesni tikety na transparentni ucet (2x kratky, 1x stredni, sazka 500 Kc)
+      - name: Vygenerovat dnesni tikety na transparentni ucet (2x kratky, 1x stredni, sazka 2000 Kc)
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/transparency-daily-tickets \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      - name: Vygenerovat dnesni tikety na d.voves@seznam.cz (2x kratky, 1x stredni, sazka 2000 Kc)
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/dvoves-daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
 
       - name: Rozeslat dnesni vyber platicim predplatitelum na Telegram

@@ -2781,6 +2781,7 @@ _GENERATION_LOCKS = {
     "daily_tickets": threading.Lock(),
     "transparency_daily_tickets": threading.Lock(),
     "test3_daily_tickets": threading.Lock(),
+    "dvoves_daily_tickets": threading.Lock(),
 }
 
 
@@ -3006,6 +3007,79 @@ def run_transparency_daily_tickets(request: Request):
         return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
     finally:
         _GENERATION_LOCKS["transparency_daily_tickets"].release()
+
+
+DVOVES_STAKE = 2000.0
+DVOVES_EMAIL = "d.voves@seznam.cz"
+
+
+@app.post("/admin/dvoves-daily-tickets")
+def run_dvoves_daily_tickets(request: Request):
+    """
+    Appka na testovacím účtu d.voves@seznam.cz denně vygeneruje 2 kratky +
+    1 stredni tiket, na každý appka automaticky vsadí pevných 2000 Kč —
+    stejný plán jako u transparentního účtu (run_transparency_daily_tickets),
+    jen na jiném účtu a bez env var (appka ho hledá přes e-mail, protože
+    tohle je běžný registrovaný uživatel appky, ne appčin vlastní systémový
+    účet s DVOVES_USER_ID). Generování jde mimo tokenový systém stejně jako
+    u appčiných ostatních cronových účtů.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["dvoves_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/dvoves-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user = db.get_user_by_email(DVOVES_EMAIL)
+        if not target_user:
+            raise HTTPException(status_code=500, detail=f"Účet {DVOVES_EMAIL} v appce neexistuje")
+        target_user_id = target_user["id"]
+
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 1)]
+
+        results = []
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[dvoves-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, DVOVES_STAKE, ticket.total_odds)
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": DVOVES_STAKE})
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["dvoves_daily_tickets"].release()
 
 
 TEST3_STAKE = 1000.0
