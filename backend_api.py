@@ -2449,9 +2449,23 @@ class TicketGenerateRequestWithExclude(BaseModel):
 
 @app.post("/tickets/replace-selection")
 def replace_selection(req: TicketGenerateRequestWithExclude, user_id: int = Depends(get_current_user_id)):
-    """Vygeneruje nový tiket bez vyloučených zápasů — používá se po kliknutí ✕ u výběru."""
+    """Vygeneruje nový tiket bez vyloučených zápasů — používá se po kliknutí ✕ u výběru.
+
+    Appce tu dřív chyběly STEJNÉ pojistky co u /tickets/generate —
+    _filter_future_matches (appka mohla nabídnout náhradu za zápas, co
+    už kopl nebo kopne za pár minut), _filter_within_days (appka mohla
+    vrátit náhradu mimo zvolené okno, potichu, bez horizon_note) a
+    vyloučení zápasů z JIŽ ULOŽENÝCH tiketů (frontend appce posílá jen
+    zápasy odklinuté ✕ v týhle editační session, ne celou historii —
+    appka tak uměla nabídnout náhradu za zápas, co uživatel má vsazený
+    v jiném, dřív uloženém tiketu). Appka to appce doplňuje, ať nemá
+    různě bezpečná chování pro v podstatě stejnou operaci (generování
+    tiketu)."""
+    exclude_ids = set(req.exclude_match_ids) | set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
     matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
-    matches = [m for m in matches if m.match_id not in set(req.exclude_match_ids)]
+    matches = [m for m in matches if m.match_id not in exclude_ids]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+    matches = _filter_within_days(matches, req.time_frame_days)
     result = ticket_generator.generate(
         matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
         pool_filter=_pool_filter_for_risk(req.risk_level),
