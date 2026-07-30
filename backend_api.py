@@ -848,6 +848,20 @@ class Repo:
     def get_last_batch(self, user_id: int) -> list[int]:
         return list(self._last_batch_match_ids.get(user_id, set()))
 
+    def clear_last_batch(self, user_id: int) -> None:
+        """Appka tohle měla volat od začátku při každém uložení tiketu (viz
+        komentář u set_last_batch — 'od posledního uložení'), ale appka na
+        to nikdy neměla kód, jen popis v komentáři. V praxi appka set_last_batch
+        jen SČÍTALA a nikdy nečistila — u účtu s opakovaným generováním bez
+        ukládání (typicky appčino vlastní testování) appka tak postupně
+        vyloučila čím dál víc zápasů, až appce nakonec nezbylo dost kandidátů
+        na sestavení náročnějších tiketů (stredni, 5 nohou v úzkém rozsahu
+        kurzu) — appka pak vracela 'tiket se nepovedl', i když syrový trh měl
+        kandidátů dost. Appka teď po každém uložení list vyčistí — uživatel
+        se rozhodl, co chce, appka tak nemá důvod dál blokovat nevybrané
+        zápasy z předchozích (neuložených) pokusů."""
+        self._last_batch_match_ids.pop(user_id, None)
+
 
 repo = Repo()
 ticket_generator = TicketGenerator()
@@ -2016,7 +2030,16 @@ def save_ticket(req: SaveTicketRequest, user_id: int = Depends(get_current_user_
         recommended_stake_pct=req.recommended_stake_pct,
     )
     ticket_id = repo.save_ticket(user_id, ticket)
-    
+
+    # Uložením appka považuje "prohlížecí session" za uzavřenou — nevybrané
+    # zápasy z předchozích (neuložených) generování téhle appka user_id se
+    # tak zase smí objevit příště (viz Repo.clear_last_batch). Bez tohohle
+    # by opakované generování/regenerování bez ukládání postupně appce
+    # vyloučilo čím dál víc zápasů, až by appce nakonec nezbylo dost
+    # kandidátů — appka pak vracela "tiket se nepovedl", i když trh měl
+    # kandidátů dost (nahlásil uživatel).
+    repo.clear_last_batch(user_id)
+
     # IHNED se pokusit vyhodnotit - aby se selection results uložily do DB hned!
     try:
         row = db.fetch_ticket_rows(ticket_id=ticket_id)
