@@ -1776,19 +1776,23 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     # jiný typ tiketu) klidně nabídlo STEJNÝ zápas jako to první, protože
     # by o něm ještě nevědělo (uloží se, až uživatel klikne "uložit").
     exclude_ids = set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
-    wider_days = req.time_frame_days + 3
 
-    # Appka rovnou stáhne a obohatí ŠIRŠÍ okno (to je nejdražší část —
-    # ~6 síťových volání na zápas) a užší okno appka získá jen jako jeho
-    # podmnožinu filtrováním podle data. Appka dřív při nenalezení
-    # kombinace stahovala a obohacovala zápasy ZNOVU od nuly pro širší
-    # okno — to zdvojnásobovalo dobu generování přesně v případech, kdy
-    # appka napoprvé nic nenašla.
-    all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
-    all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
-    all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
-
-    matches = _filter_within_days(all_wider_matches, req.time_frame_days)
+    # Appka nejdřív obohatí jen ZVOLENÉ (užší) okno — obohacení je
+    # nejdražší část (~11 síťových volání na zápas přes rate limiter) a
+    # drtivá většina požadavků má v tomhle okně kandidátů dost (viz
+    # /admin/candidate-pool-preview). Širší okno appka stahuje a
+    # obohacuje AŽ na neúspěch, ne pořád dopředu "pro jistotu" — appka
+    # dřív širší okno stahovala VŽDY, i když ji přes 90 % požadavků
+    # vůbec nepoužilo, což generování zbytečně natahovalo o desítky
+    # sekund až minuty (nahlášeno uživatelem — 2 minuty na krátký tiket
+    # s 1denním oknem). Sdílený cache týmových statistik (1 h, viz
+    # data_provider.get_provider) navíc dělá dodatečné stažení širšího
+    # okna při neúspěchu podstatně levnější, ne dvojnásobně drahé — týmy
+    # z užšího okna už appka má obohacené.
+    matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
+    matches = [m for m in matches if m.match_id not in exclude_ids]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+    matches = _filter_within_days(matches, req.time_frame_days)
 
     horizon_note = None
     result = ticket_generator.generate(
@@ -1803,6 +1807,10 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
     # co appka reálně udělala.
     if result["safe"] is None:
+        wider_days = req.time_frame_days + 3
+        all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
+        all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
+        all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
         wider_result = ticket_generator.generate(
             all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
             pool_filter=_pool_filter_for_risk(req.risk_level),
@@ -1834,15 +1842,13 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     combined_exclude = set(previous_ids) | set(exclude_ids)
-    wider_days = req.time_frame_days + 3
 
-    # Viz stejná poznámka v generate_tickets — appka stáhne a obohatí
-    # ŠIRŠÍ okno jen JEDNOU, užší je jeho podmnožina filtrovaná podle data.
-    all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
-    all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
-    all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
-
-    matches = _filter_within_days(all_wider_matches, req.time_frame_days)
+    # Viz stejná poznámka v generate_tickets — appka obohatí jen zvolené
+    # okno, širší dotáhne až na neúspěch.
+    matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
+    matches = [m for m in matches if m.match_id not in combined_exclude]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+    matches = _filter_within_days(matches, req.time_frame_days)
 
     horizon_note = None
     result = ticket_generator.regenerate(
@@ -1853,6 +1859,10 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
     # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
     # zkusí, ale vždycky to řekne přes horizon_note.
     if result["safe"] is None:
+        wider_days = req.time_frame_days + 3
+        all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
+        all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
+        all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
         wider_result = ticket_generator.regenerate(
             all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
             pool_filter=_pool_filter_for_risk(req.risk_level),
