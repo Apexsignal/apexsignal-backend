@@ -769,10 +769,10 @@ def render_page(
         )
 
     if app_generation_enabled:
-        app_offer_price = 'Tokeny <small>120–600 Kč / tiket</small>'
+        app_offer_price = 'Tokeny <small>200–300 Kč / tiket</small>'
         app_offer_body = (
-            "Generuješ si sám — vybereš ligy, míru rizika, časový rámec. "
-            "Platíš jen za to, co si necháš vygenerovat."
+            "Generuješ si sám — vybereš jen krátký, nebo střední tiket, appka sama najde "
+            "ligy a zápasy. Platíš jen za to, co si necháš vygenerovat."
         )
     else:
         # Registrace a přihlášení appka nechává OTEVŘENÉ i bez peněz na
