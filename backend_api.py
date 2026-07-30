@@ -1739,16 +1739,28 @@ def _filter_within_days(matches: list[MatchInput], days: int) -> list[MatchInput
     aby při rozšiřování horizontu (viz /tickets/generate) appka nemusela
     stahovat a obohacovat zápasy DVAKRÁT (jednou pro užší okno, znovu pro
     širší) — appka rovnou stáhne širší okno a užší je jen jeho podmnožina.
+
+    Appka dřív při chybě parsování zápas ROVNOU PONECHALA ("false-positive
+    je lepší než false-negative") — ale u zápasů s appkou ještě
+    nepotvrzeným přesným časem výkopu appka dostává kickoff_time jako
+    prázdný řetězec, takže "2026-08-02T:00Z" appce vždycky spadlo na
+    chybu a appka takový zápas propustila BEZ OHLEDU na zvolené okno
+    (nahlášeno uživatelem — zvolil 1denní okno, appka mu tiše vrátila
+    zápas 3 dny dopředu, bez horizon_note, protože z pohledu appky
+    "žádná chyba/rozšíření" nenastalo). Appka teď chybějící čas bere
+    jako půlnoc daného dne (nejpřísnější odhad pro "je to v okně?") — a
+    když appka nemá k dispozici ani datum, zápas radši VYNECHÁ, než aby
+    tvrdila, že splňuje kritérium, které appka vůbec nemohla ověřit.
     """
     cutoff = datetime.now(timezone.utc) + timedelta(days=days)
     result = []
     for m in matches:
         try:
-            kickoff_dt = datetime.fromisoformat(f"{m.kickoff_date}T{m.kickoff_time}:00Z".replace('Z', '+00:00'))
+            kickoff_dt = datetime.fromisoformat(f"{m.kickoff_date}T{m.kickoff_time or '00:00'}:00Z".replace('Z', '+00:00'))
             if kickoff_dt <= cutoff:
                 result.append(m)
         except (ValueError, AttributeError, TypeError):
-            result.append(m)  # nejasné datum → bezpečně ponech (false-positive je lepší než false-negative)
+            pass  # appka nemůže ověřit, jestli je zápas v okně — radši ho vynechá
     return result
 
 
