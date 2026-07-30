@@ -860,6 +860,10 @@ def render_page(
     <strong>Sázka je skrytá do konce zápasu</strong>
     <span>Zápasy vidíš hned. Skrytá zůstává jen samotná sázka — trh, výběr, kurz té nohy — dokud appka tiket nevyhodnotí, pak ji odhalí natrvalo.</span>
   </div>
+  <div class="rule">
+    <strong>Appka se pořád vyvíjí</strong>
+    <span>Model i appka samotná měly cestou chyby a technické problémy — appka je průběžně opravuje. Tahle stránka je ukazuje takové, jaké skutečně byly, ne zpětně vyladěné.</span>
+  </div>
 </section>
 
 {offers}
