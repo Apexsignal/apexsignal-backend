@@ -864,7 +864,7 @@ def render_page(
   </div>
   <div class="rule">
     <strong>Appka se pořád vyvíjí</strong>
-    <span>Model i appka samotná měly cestou chyby a technické problémy — appka je průběžně opravuje. Tahle stránka je ukazuje takové, jaké skutečně byly, ne zpětně vyladěné.</span>
+    <span>Model i appka samotná měly cestou chyby a technické problémy — appka je průběžně opravuje. Historii appka zpětně neupravuje ani nemaže — vidíš ji takovou, jaká skutečně byla.</span>
   </div>
 </section>
 
