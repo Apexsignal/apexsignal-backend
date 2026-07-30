@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
+    MarketEvaluator,
 )
 import data_provider
 import ai_reviewer
@@ -3042,6 +3043,38 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
         return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
 
     return [p for p in (_best("kratky"), _best("stredni")) if p is not None]
+
+
+@app.get("/admin/candidate-pool-preview")
+def candidate_pool_preview(request: Request, time_frame_days: int = 2):
+    """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
+    z nich prošlo jako kandidát na 70%/65% prahu (stejná čísla, co appka
+    jinak jen loguje jako '[kratky] 70%: N kandidátů'). NIC neukládá,
+    NIC neposílá — bezpečné volat kdykoli ke kontrole, jestli appka má
+    dost zápasů na to, aby denní generování mělo z čeho vybírat. Používá
+    stejnou cache jako reálné generování (zápasy 30 min, statistiky
+    24 h), takže krátce po skutečném běhu je skoro zadarmo."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+
+    candidates_by_threshold = {}
+    for threshold in (0.70, 0.65):
+        pool = []
+        for m in matches:
+            pool.extend([
+                c for c in MarketEvaluator.build_candidates(m, min_prob=threshold)
+                if c.market_type in DAILY_TICKETS_MARKETS
+            ])
+        candidates_by_threshold[f"{int(threshold * 100)}%"] = len(pool)
+
+    return {
+        "time_frame_days": time_frame_days,
+        "fixtures_fetched": len(matches),
+        "candidates_by_threshold": candidates_by_threshold,
+    }
 
 
 @app.get("/admin/client-tickets-preview")
