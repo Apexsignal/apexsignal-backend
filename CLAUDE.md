@@ -181,7 +181,12 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
 
 - **"Nejdriv semnou konzultuj vzdy nez neco budes menit!!!"** — vždy
   nejdřív konzultovat, než se něco změní. (V praxi: pokud přijde jasný,
-  přímý příkaz, ten už JE konzultace/schválení — neptat se znovu na to samé.)
+  přímý příkaz na OBSAH změny, ten už JE konzultace/schválení pro tu
+  změnu samotnou — neptat se znovu na to samé. ALE i po jasném příkazu
+  na obsah appka počká na výslovné potvrzení PŘED samotným nasazením
+  (push na `main`, Netlify deploy) — uživatel to 2026-07-31 explicitně
+  upřesnil: "priste se semnou porad nez to nasadis". Připravit/otestovat
+  změnu jde rovnou, publikovat ji naživo ne bez potvrzení.)
 - **SportBreak.cz nahrávání tiketů musí zůstat manuální, human-in-the-loop.**
   Uživatel explicitně: "Automaticky to nejde protoze ja davam realne sazky
   na tipsportu." — appka nesmí sama automatizovat nahrávání reálných sázek,
