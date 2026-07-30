@@ -1593,6 +1593,11 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
                 MarketType.OVER_GAMES: match.over_games_odds,
             }[totals_market]
             target_dict[threshold] = odds
+            # Under appka zatím řeší jen pro góly (fotbal/hokej) — basketbal
+            # a tenis appka v produkci nepoužívá, viz build_candidates.
+            if totals_market == MarketType.OVER_GOALS and adapted.get("under_odds") is not None:
+                match.market_implied_probabilities[f"{totals_market.value}:under_{threshold}"] = adapted["under_probability"]
+                match.under_goals_odds[threshold] = adapted["under_odds"]
 
     print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched_count}/{len(matches)} zápasů napárováno")
 

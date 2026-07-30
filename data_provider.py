@@ -214,6 +214,7 @@ def normalize_to_match_input(
         away_dead_rubber=away_dead_rubber,
         favorite_win_market_odds=favorite_odds,
         over_goals_odds=odds_raw.get("over_goals", {}),     # {2.5: 1.85, 3.5: 2.60, ...}
+        under_goals_odds=odds_raw.get("under_goals", {}),   # {2.5: 1.95, ...} — skutečné tržní kurzy
         btts_yes_odds=odds_raw.get("btts_yes"),
         over_cards_odds=odds_raw.get("over_cards", {}),     # {3.5: 1.90, 4.5: 2.40, ...}
         # Market-consensus pravděpodobnosti spočítané z mediánu napříč VŠEMI
@@ -1073,6 +1074,7 @@ def adapt_odds_api_event(event: dict) -> dict:
         "favorite_win_market_odds": None,
         "market_implied_probabilities": {},
         "over_threshold": None, "over_odds": None, "over_probability": None,
+        "under_odds": None, "under_probability": None,
         "btts_yes_odds": None,
         "bookmaker_count": len(event.get("bookmakers", [])),
     }
@@ -1082,7 +1084,7 @@ def adapt_odds_api_event(event: dict) -> dict:
 
     home_probs, away_probs, home_prices = [], [], []
     btts_probs, btts_prices = [], []
-    totals_by_threshold: dict[float, list[tuple[float, float]]] = {}  # threshold -> [(cena_over, p_over), ...]
+    totals_by_threshold: dict[float, list[tuple[float, float, float, float]]] = {}  # threshold -> [(cena_over, p_over, cena_under, p_under), ...]
 
     for bm in bookmakers:
         markets = bm.get("markets", [])
@@ -1111,8 +1113,10 @@ def adapt_odds_api_event(event: dict) -> dict:
             over_o = next((o for o in totals["outcomes"] if o["name"] == "Over"), None)
             under_o = next((o for o in totals["outcomes"] if o["name"] == "Under"), None)
             if over_o and under_o:
-                p_over, _ = devig_two_way(over_o["price"], under_o["price"])
-                totals_by_threshold.setdefault(over_o["point"], []).append((over_o["price"], p_over))
+                p_over, p_under = devig_two_way(over_o["price"], under_o["price"])
+                totals_by_threshold.setdefault(over_o["point"], []).append(
+                    (over_o["price"], p_over, under_o["price"], p_under)
+                )
 
     if home_probs:
         result["market_implied_probabilities"]["match_winner:home"] = sum(home_probs) / len(home_probs)
@@ -1130,8 +1134,10 @@ def adapt_odds_api_event(event: dict) -> dict:
         threshold = max(totals_by_threshold, key=lambda t: len(totals_by_threshold[t]))
         prices_and_probs = totals_by_threshold[threshold]
         result["over_threshold"] = threshold
-        result["over_odds"] = _median([p for p, _ in prices_and_probs])
-        result["over_probability"] = sum(p for _, p in prices_and_probs) / len(prices_and_probs)
+        result["over_odds"] = _median([p for p, _, _, _ in prices_and_probs])
+        result["over_probability"] = sum(p for _, p, _, _ in prices_and_probs) / len(prices_and_probs)
+        result["under_odds"] = _median([p for _, _, p, _ in prices_and_probs])
+        result["under_probability"] = sum(p for _, _, _, p in prices_and_probs) / len(prices_and_probs)
 
     return result
 
@@ -1813,7 +1819,7 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
     bez druhého (the-odds-api) zdroje dat, viz _enrich_with_market_odds.
     """
     result: dict = {
-        "match_winner": {}, "over_goals": {}, "btts_yes": None, "over_cards": {},
+        "match_winner": {}, "over_goals": {}, "under_goals": {}, "btts_yes": None, "over_cards": {},
         "market_implied_probabilities": {}, "bookmaker_count": len(odds_response.get("bookmakers", [])),
     }
     bookmakers = odds_response.get("bookmakers", [])
@@ -1894,8 +1900,11 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
             continue
         result["over_goals"][threshold] = _median(prices)
         if threshold in under_goals_prices:
-            p_over, _ = devig_two_way(_median(prices), _median(under_goals_prices[threshold]))
+            under_price = _median(under_goals_prices[threshold])
+            p_over, p_under = devig_two_way(_median(prices), under_price)
             result["market_implied_probabilities"][f"over_goals:over_{threshold}"] = p_over
+            result["under_goals"][threshold] = under_price
+            result["market_implied_probabilities"][f"over_goals:under_{threshold}"] = p_under
 
     for threshold, prices in over_cards_prices.items():
         if not _is_standard_line(threshold):

@@ -300,6 +300,7 @@ class MatchInput:
 
     favorite_win_market_odds: float = 1.0
     over_goals_odds: dict[float, float] = field(default_factory=dict)            # {2.5: 1.85, ...}
+    under_goals_odds: dict[float, float] = field(default_factory=dict)           # {2.5: 1.95, ...} — jen skutečné tržní kurzy, nikdy dopočítané z modelu
     btts_yes_odds: Optional[float] = None      # kurz na "oba týmy dají gól: ano"
     over_cards_odds: dict[float, float] = field(default_factory=dict)            # {3.5: 1.90, ...}
     over_penalty_minutes_odds: dict[float, float] = field(default_factory=dict)  # {8.5: 1.90, ...}
@@ -433,11 +434,18 @@ class MarketEvaluator:
             for threshold, odds in match.over_goals_odds.items():
                 prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
                 candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
-                # Under góly - VYPNUTO! (nevychází)
-                # under_prob = 1.0 - prob
-                # under_odds = round(1.0 / max(under_prob, 0.01), 2) if odds else None
-                # if under_odds and under_odds >= MIN_SELECTION_ODDS:
-                #     candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"under_{threshold}", under_prob, under_odds))
+
+                # Under góly appka dřív dopočítávala z 1/(1-prob) — tím
+                # srovnávala model sám se sebou, ne se skutečným trhem, takže
+                # kontrola kladného edge (viz _candidate/_build_ticket)
+                # nedávala smysl. Teď appka bere jen SKUTEČNÝ tržní kurz na
+                # under (match.under_goals_odds, viz adapt_api_football_odds
+                # a _enrich_with_market_odds) — pokud appka žádný nemá, appka
+                # kandidáta na under prostě nenabídne, nic si nevymýšlí.
+                under_odds = match.under_goals_odds.get(threshold)
+                if under_odds and under_odds >= MIN_SELECTION_ODDS:
+                    under_prob = 1.0 - prob
+                    candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"under_{threshold}", under_prob, under_odds))
 
             if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
