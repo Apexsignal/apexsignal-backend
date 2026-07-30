@@ -16,6 +16,7 @@ Spuštění (dev):
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,47 @@ import stripe
 # _api_football_rate_limiter v data_provider.py) appka zvedla i tohle,
 # ať appka tu vyšší propustnost reálně využije.
 FIXTURE_ENRICHMENT_WORKERS = 40
+
+# Sdílený stav pro SKUTEČNÝ postup obohacování zápasů (kolikátý z kolika
+# appka právě zpracovala) — appka ho drží v paměti procesu, ne v DB,
+# protože ho potřebuje jen po dobu jednoho generování (pár desítek
+# sekund), a nevadí, že se po restartu ztratí. Páruje se jen přes
+# appkou vygenerovaný request_id (viz TicketGenerateRequest), nikdy na
+# uživatele. Stará se sama uklízí (TTL), ať dict časem neroste do
+# nekonečna, kdyby generování náhodou nedoběhlo do konce (a tím pádem
+# se neprovedlo finally, které za normálních okolností záznam smaže).
+_GENERATION_PROGRESS: dict[str, dict] = {}
+_GENERATION_PROGRESS_LOCK = threading.Lock()
+_GENERATION_PROGRESS_TTL_SECONDS = 600
+
+
+def _progress_set_total(request_id: Optional[str], total: int) -> None:
+    if not request_id:
+        return
+    now = time.monotonic()
+    with _GENERATION_PROGRESS_LOCK:
+        _GENERATION_PROGRESS[request_id] = {"done": 0, "total": total, "ts": now}
+        stale = [k for k, v in _GENERATION_PROGRESS.items() if now - v["ts"] > _GENERATION_PROGRESS_TTL_SECONDS]
+        for k in stale:
+            _GENERATION_PROGRESS.pop(k, None)
+
+
+def _progress_increment(request_id: Optional[str]) -> None:
+    if not request_id:
+        return
+    with _GENERATION_PROGRESS_LOCK:
+        entry = _GENERATION_PROGRESS.get(request_id)
+        if entry:
+            entry["done"] += 1
+            entry["ts"] = time.monotonic()
+
+
+def _progress_clear(request_id: Optional[str]) -> None:
+    if not request_id:
+        return
+    with _GENERATION_PROGRESS_LOCK:
+        _GENERATION_PROGRESS.pop(request_id, None)
+
 
 # Logger setup
 logger = logging.getLogger("apexsignal")
@@ -443,6 +485,11 @@ class TicketGenerateRequest(BaseModel):
     sports: list[Sport]
     market_types: list[MarketType]
     time_frame_days: int = Field(ge=1, le=5)  # Horizont: 1-5 dní (už ne konkrétní data)
+    # Appka podle tohohle (appkou vygenerovaný náhodný řetězec, appka ho
+    # nijak neověřuje ani nepáruje na uživatele) hlásí SKUTEČNÝ postup
+    # generování přes GET /tickets/generate-progress — appka bez něj
+    # zůstane u předchozího chování (žádné sledování postupu).
+    request_id: Optional[str] = None
 
 
 class SelectionResponse(BaseModel):
@@ -1516,7 +1563,7 @@ def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lo
     )
 
 
-def _build_football_matches(provider, raw_fixtures: list[dict]) -> list[MatchInput]:
+def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Optional[str] = None) -> list[MatchInput]:
     """
     Appka zpracuje zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
     druhém — appka na každý zápas potřebuje ~6 síťových volání, a ty
@@ -1528,6 +1575,8 @@ def _build_football_matches(provider, raw_fixtures: list[dict]) -> list[MatchInp
     standings_cache: dict = {}
     standings_lock = threading.Lock()
     matches: list[MatchInput] = []
+
+    _progress_set_total(request_id, len(raw_fixtures))
 
     with ThreadPoolExecutor(max_workers=FIXTURE_ENRICHMENT_WORKERS) as executor:
         future_to_idx = {
@@ -1542,7 +1591,8 @@ def _build_football_matches(provider, raw_fixtures: list[dict]) -> list[MatchInp
                     matches.append(match)
             except Exception as exc:
                 print(f"[ERROR] _enrich_one_fixture failed for fixture index {idx}: {exc}")  # Viditelný log!
-        
+            _progress_increment(request_id)
+
     return matches
 
 
@@ -1658,16 +1708,20 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched_count}/{len(matches)} zápasů napárováno")
 
 
-def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int) -> list[MatchInput]:
+def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_id: Optional[str] = None) -> list[MatchInput]:
     """
     Vrátí zápasy v daném horziontu dnů (bez konkrétních dat).
     Důvod: horizont (1-4 dny) je jednodušší, přirozený a bez chyb
     oproti parsování konkrétního YYYY-MM-DD data.
-    
+
     Filtrování na ligy dostupné na Tipsportu (podle league_id) se děje
     už v data_provider.py (TIPSPORT_LEAGUE_IDS, aplikováno v
     get_upcoming_matches) — zde se NEDUPLIKUJE, aby nedocházelo k
     rozporu mezi dvěma nezávislými seznamy ID.
+
+    request_id appka posílá jen fotbalu (_build_football_matches) — jediný
+    sport, co appka reálně v produkci nabízí a jediný s obohacovací
+    smyčkou dost dlouhou na to, aby appce dávalo smysl ukazovat postup.
     """
     builders = {
         Sport.FOOTBALL: _build_football_matches,
@@ -1676,7 +1730,7 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int) -> list[
         Sport.TENNIS: _build_tennis_matches,
     }
     matches: list[MatchInput] = []
-    
+
     for sport in sports:
         try:
             provider = data_provider.get_provider(sport)
@@ -1695,7 +1749,10 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int) -> list[
             print(f"[_fetch_candidate_matches] {sport}: nepodařilo se stáhnout zápasy: {e}")
             continue
 
-        sport_matches = builders[sport](provider, raw_items)
+        if sport == Sport.FOOTBALL:
+            sport_matches = _build_football_matches(provider, raw_items, request_id=request_id)
+        else:
+            sport_matches = builders[sport](provider, raw_items)
 
         _enrich_with_market_odds(sport_matches, sport)
         matches.extend(sport_matches)
@@ -1767,6 +1824,24 @@ def _filter_within_days(matches: list[MatchInput], days: int) -> list[MatchInput
 # =====================================================================
 # REST endpointy — Generátor tiketů
 # =====================================================================
+@app.get("/tickets/generate-progress")
+def get_generate_progress(request_id: str):
+    """
+    Tenhle endpoint appce (frontendu) umožní zeptat se, jak appka pokročila
+    v běžícím /tickets/generate (nebo /regenerate) — appka na tohle
+    pravidelně pollne, dokud hlavní požadavek neskončí, a appka z toho
+    vykreslí SKUTEČNÉ procento (dřív jen dekorativní animaci bez vazby
+    na realitu). Záměrně bez přihlášení — nese jen dvě čísla, ke
+    spárování stačí appkou vygenerovaný request_id, a uhodnutí cizího by
+    prozradilo maximálně počet zápasů, žádná citlivá data.
+    """
+    with _GENERATION_PROGRESS_LOCK:
+        entry = _GENERATION_PROGRESS.get(request_id)
+    if not entry:
+        return {"known": False, "done": 0, "total": 0}
+    return {"known": True, "done": entry["done"], "total": entry["total"]}
+
+
 @app.post("/tickets/generate", response_model=TicketPairResponse)
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
     _require_generation_enabled(user_id)
@@ -1777,62 +1852,67 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
     # by o něm ještě nevědělo (uloží se, až uživatel klikne "uložit").
     exclude_ids = set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
 
-    # Appka nejdřív obohatí jen ZVOLENÉ (užší) okno — obohacení je
-    # nejdražší část (~11 síťových volání na zápas přes rate limiter) a
-    # drtivá většina požadavků má v tomhle okně kandidátů dost (viz
-    # /admin/candidate-pool-preview). Širší okno appka stahuje a
-    # obohacuje AŽ na neúspěch, ne pořád dopředu "pro jistotu" — appka
-    # dřív širší okno stahovala VŽDY, i když ji přes 90 % požadavků
-    # vůbec nepoužilo, což generování zbytečně natahovalo o desítky
-    # sekund až minuty (nahlášeno uživatelem — 2 minuty na krátký tiket
-    # s 1denním oknem). Sdílený cache týmových statistik (1 h, viz
-    # data_provider.get_provider) navíc dělá dodatečné stažení širšího
-    # okna při neúspěchu podstatně levnější, ne dvojnásobně drahé — týmy
-    # z užšího okna už appka má obohacené.
-    matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
-    matches = [m for m in matches if m.match_id not in exclude_ids]
-    matches = _filter_future_matches(matches, buffer_minutes=5)
-    matches = _filter_within_days(matches, req.time_frame_days)
+    try:
+        # Appka nejdřív obohatí jen ZVOLENÉ (užší) okno — obohacení je
+        # nejdražší část (~11 síťových volání na zápas přes rate limiter) a
+        # drtivá většina požadavků má v tomhle okně kandidátů dost (viz
+        # /admin/candidate-pool-preview). Širší okno appka stahuje a
+        # obohacuje AŽ na neúspěch, ne pořád dopředu "pro jistotu" — appka
+        # dřív širší okno stahovala VŽDY, i když ji přes 90 % požadavků
+        # vůbec nepoužilo, což generování zbytečně natahovalo o desítky
+        # sekund až minuty (nahlášeno uživatelem — 2 minuty na krátký tiket
+        # s 1denním oknem). Sdílený cache týmových statistik (1 h, viz
+        # data_provider.get_provider) navíc dělá dodatečné stažení širšího
+        # okna při neúspěchu podstatně levnější, ne dvojnásobně drahé — týmy
+        # z užšího okna už appka má obohacené.
+        matches = _fetch_candidate_matches(req.sports, req.time_frame_days, request_id=req.request_id)
+        matches = [m for m in matches if m.match_id not in exclude_ids]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+        matches = _filter_within_days(matches, req.time_frame_days)
 
-    horizon_note = None
-    result = ticket_generator.generate(
-        matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
-        pool_filter=_pool_filter_for_risk(req.risk_level),
-    )
-
-    # Appka dřív tohle rozšíření dělala TICHOU — uživatel si vybral "1 den"
-    # a dostal zpátky tiket se zápasy klidně 4 dny dopředu, aniž by o tom
-    # appka řekla jediné slovo. Teď to appka pořád zkusí (ať appka nenechá
-    # uživatele zbytečně čekat na "nic nenašla", i když je opravdu ochotná
-    # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
-    # co appka reálně udělala.
-    if result["safe"] is None:
-        wider_days = req.time_frame_days + 3
-        all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
-        all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
-        all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
-        wider_result = ticket_generator.generate(
-            all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
+        horizon_note = None
+        result = ticket_generator.generate(
+            matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
             pool_filter=_pool_filter_for_risk(req.risk_level),
         )
-        if wider_result["safe"] is not None:
-            result = wider_result
-            horizon_note = (
-                f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
-                f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
-                f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+
+        # Appka dřív tohle rozšíření dělala TICHOU — uživatel si vybral "1 den"
+        # a dostal zpátky tiket se zápasy klidně 4 dny dopředu, aniž by o tom
+        # appka řekla jediné slovo. Teď to appka pořád zkusí (ať appka nenechá
+        # uživatele zbytečně čekat na "nic nenašla", i když je opravdu ochotná
+        # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
+        # co appka reálně udělala.
+        if result["safe"] is None:
+            wider_days = req.time_frame_days + 3
+            all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
+            all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
+            all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+            wider_result = ticket_generator.generate(
+                all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
+                pool_filter=_pool_filter_for_risk(req.risk_level),
             )
+            if wider_result["safe"] is not None:
+                result = wider_result
+                horizon_note = (
+                    f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                    f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
+                    f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+                )
 
-    used_ids = [s.match_id for t in result.values() if t for s in t.selections]
-    repo.set_last_batch(user_id, used_ids)
+        used_ids = [s.match_id for t in result.values() if t for s in t.selections]
+        repo.set_last_batch(user_id, used_ids)
 
-    if result["safe"] is not None:
-        _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
+        if result["safe"] is not None:
+            _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
-    return TicketPairResponse(
-        safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
-        aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
-    )
+        return TicketPairResponse(
+            safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
+            aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
+        )
+    finally:
+        # I na chybu appka záznam o postupu uklidí — appka na něj po
+        # skončení requestu (úspěšném i ne) nemá frontend co ptát.
+        _progress_clear(req.request_id)
 
 
 @app.post("/tickets/regenerate", response_model=TicketPairResponse)
@@ -1843,48 +1923,51 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     combined_exclude = set(previous_ids) | set(exclude_ids)
 
-    # Viz stejná poznámka v generate_tickets — appka obohatí jen zvolené
-    # okno, širší dotáhne až na neúspěch.
-    matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
-    matches = [m for m in matches if m.match_id not in combined_exclude]
-    matches = _filter_future_matches(matches, buffer_minutes=5)
-    matches = _filter_within_days(matches, req.time_frame_days)
+    try:
+        # Viz stejná poznámka v generate_tickets — appka obohatí jen zvolené
+        # okno, širší dotáhne až na neúspěch.
+        matches = _fetch_candidate_matches(req.sports, req.time_frame_days, request_id=req.request_id)
+        matches = [m for m in matches if m.match_id not in combined_exclude]
+        matches = _filter_future_matches(matches, buffer_minutes=5)
+        matches = _filter_within_days(matches, req.time_frame_days)
 
-    horizon_note = None
-    result = ticket_generator.regenerate(
-        matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
-        pool_filter=_pool_filter_for_risk(req.risk_level),
-    )
-
-    # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
-    # zkusí, ale vždycky to řekne přes horizon_note.
-    if result["safe"] is None:
-        wider_days = req.time_frame_days + 3
-        all_wider_matches = _fetch_candidate_matches(req.sports, wider_days)
-        all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
-        all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
-        wider_result = ticket_generator.regenerate(
-            all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
+        horizon_note = None
+        result = ticket_generator.regenerate(
+            matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
             pool_filter=_pool_filter_for_risk(req.risk_level),
         )
-        if wider_result["safe"] is not None:
-            result = wider_result
-            horizon_note = (
-                f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
-                f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
-                f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+
+        # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
+        # zkusí, ale vždycky to řekne přes horizon_note.
+        if result["safe"] is None:
+            wider_days = req.time_frame_days + 3
+            all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
+            all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
+            all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+            wider_result = ticket_generator.regenerate(
+                all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
+                pool_filter=_pool_filter_for_risk(req.risk_level),
             )
+            if wider_result["safe"] is not None:
+                result = wider_result
+                horizon_note = (
+                    f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                    f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
+                    f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
+                )
 
-    used_ids = [s.match_id for t in result.values() if t for s in t.selections]
-    repo.set_last_batch(user_id, used_ids)
+        used_ids = [s.match_id for t in result.values() if t for s in t.selections]
+        repo.set_last_batch(user_id, used_ids)
 
-    if result["safe"] is not None:
-        _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
+        if result["safe"] is not None:
+            _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
-    return TicketPairResponse(
-        safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
-        aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
-    )
+        return TicketPairResponse(
+            safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
+            aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
+        )
+    finally:
+        _progress_clear(req.request_id)
 
 
 class SaveSelectionRequest(BaseModel):
