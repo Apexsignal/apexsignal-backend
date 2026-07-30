@@ -1170,17 +1170,17 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # Appka teď tyhle požadavky dělá SOUBĚŽNĚ (víc vláken najednou, viz
 # FIXTURE_ENRICHMENT_WORKERS v backend_api.py), ne sekvenčně — díky tomu
 # appka zvládne víc zápasů v rozumném čase bez rizika timeoutu na
-# straně Render/Cloudflare. 150 zápasů × ~11 volání ≈ 1650 požadavků na
-# jedno "studené" generování (bez cache) — na Pro plánu (7 500/den) appka
-# snese cca 4-5 takových za den. Díky cache týmových statistik (24 h) a
-# seznamu zápasů (30 min) jsou DALŠÍ generování ten samý den výrazně
-# levnější — reálně jich appka zvládne o dost víc než 4-5, pokud se
-# přes den generuje opakovaně (typický provoz appky) místo z čisté cache.
-# Pokud budeš zvyšovat dál (300-500), zvaž i vyšší plán API-Football —
-# na 40 zápasech appka narážela na příliš málo kandidátů pro BOOST,
-# ale skok rovnou na 300-500 by na Pro plánu mohl kvótu vyčerpat po
-# jednom až dvou generováních za den.
-MAX_FIXTURES_PER_REQUEST = 150
+# straně Render/Cloudflare. ~11 volání na zápas (statistiky, kurzy,
+# forma, zranění, tabulka...).
+#
+# Po přechodu na Mega plán (150 000 req/den, viz _api_football_rate_limiter)
+# appka zvedla limit ze 150 na 400: 400 × ~11 ≈ 4400 požadavků na jedno
+# "studené" generování (bez cache) — appka jich denní kvótou snese cca
+# 30+, i bez počítání s tím, že cache týmových statistik (24 h) a
+# seznamu zápasů (30 min) dělá DALŠÍ generování ten samý den výrazně
+# levnější. Předtím appka na Pro plánu (7 500/den, 150 zápasů) snesla jen
+# 4-5 takových za den.
+MAX_FIXTURES_PER_REQUEST = 400
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
@@ -1350,8 +1350,8 @@ class _RateLimiter:
     téhle brzdy by vlákna nezávisle na sobě klidně vystřelila víc
     požadavků ve stejné vteřině, než plán dovoluje (appka tohle naživo
     ověřila — Pro plán 5 req/s, appka dostávala zpátky 'Too many
-    requests'). Appka jede na 4 req/s, ne na povolených 5 — malá
-    rezerva proti drobným časovým nepřesnostem.
+    requests'). Appka jede vždy jen na cca 80 % povoleného stropu plánu —
+    malá rezerva proti drobným časovým nepřesnostem.
     """
     def __init__(self, max_per_second: float = 4.0):
         self._min_interval = 1.0 / max_per_second
@@ -1370,7 +1370,11 @@ class _RateLimiter:
 # Appka chce JEDEN limiter pro VŠECHNY instance APIFootballProvider (ne
 # jeden per instanci) — limit je vázaný na klíč/účet, ne na to, kolikrát
 # appka v kódu provider vytvoří.
-_api_football_rate_limiter = _RateLimiter(max_per_second=4.0)
+#
+# Mega plán API-Football: 900 req/min = 15 req/s tvrdý strop, 150 000
+# req/den (appka dřív jela na Pro — 5 req/s, 7 500/den). Appka jede na
+# 12 req/s (80 % z 15), stejná bezpečnostní rezerva jako dřív na Pro.
+_api_football_rate_limiter = _RateLimiter(max_per_second=12.0)
 
 
 class APIFootballProvider(SportsDataProvider):

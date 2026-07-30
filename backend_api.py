@@ -54,9 +54,13 @@ import stripe
 # druhém — viz _build_football_matches. Volání čekají hlavně na síť
 # (API-Football, Open-Meteo), ne na CPU appky, takže vlákna appce reálně
 # zkrátí celkový čas bez zvýšení spotřeby denní kvóty API (appka udělá
-# stejný POČET volání, jen je nedělá postupně). Appka teď zkouší 16 —
-# víc by zase mohlo narazit na limit požadavků za minutu u API-Football.
-FIXTURE_ENRICHMENT_WORKERS = 16
+# stejný POČET volání, jen je nedělá postupně). Appka dřív držela 16,
+# protože víc by narazilo na tehdejší limit 4 req/s (Pro plán) — appka by
+# jen měla víc vláken čekajících na frontu limiteru, ne reálně víc
+# souběžných požadavků. Po přechodu na Mega (12 req/s, viz
+# _api_football_rate_limiter v data_provider.py) appka zvedla i tohle,
+# ať appka tu vyšší propustnost reálně využije.
+FIXTURE_ENRICHMENT_WORKERS = 40
 
 # Logger setup
 logger = logging.getLogger("apexsignal")
