@@ -2428,7 +2428,7 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 # appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
 # přihlašovacím tokenem konkrétního uživatele.
 # =====================================================================
-DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.BTTS]
+DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS]
 DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
 # Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného
 # tiketu. Rozpětí (ne pevná částka) appka volí náhodně, ať výkladní skříň
@@ -2484,6 +2484,7 @@ def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
                 "home_team": s.home_team, "away_team": s.away_team,
                 "league": s.league, "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
                 "odds": s.odds, "probability": s.probability, "selection": s.selection,
+                "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
             }
             for s in ticket.selections
         ],

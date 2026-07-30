@@ -77,6 +77,13 @@ def evaluate_selection_outcome(selection: "SelectionCandidate", home_goals: int,
             return None
         return (home_goals + away_goals) > threshold
 
+    if selection.market_type == MarketType.UNDER_GOALS:
+        try:
+            threshold = float(selection.selection.replace("under_", ""))
+        except ValueError:
+            return None
+        return (home_goals + away_goals) < threshold
+
     if selection.market_type == MarketType.BTTS:
         return home_goals >= 1 and away_goals >= 1
 
@@ -115,6 +122,10 @@ def kelly_stake_fraction(probability: float, decimal_odds: float) -> float:
 class MarketType(str, Enum):
     MATCH_WINNER = "match_winner"
     OVER_GOALS = "over_goals"
+    UNDER_GOALS = "under_goals"              # fotbal/hokej — appka to drží jako VLASTNÍ typ trhu
+                                              # (ne jen selekci v rámci OVER_GOALS), ať appka umí
+                                              # under filtrovat/vyhodnotit nezávisle na over (viz
+                                              # evaluate_selection_outcome, market_types filtr)
     BTTS = "btts"                            # fotbal — oba týmy dají gól (Both Teams To Score)
     OVER_CARDS = "over_cards"
     OVER_GAMES = "over_games"               # tenis — celkový počet gamů v zápase
@@ -127,11 +138,55 @@ class MarketType(str, Enum):
 # Které trhy dávají u kterého sportu smysl — používá to i frontend (mapování
 # nabízených chipů), aby se u tenisu nenabízel "Over gólů" apod.
 SPORT_MARKETS: dict[Sport, list[MarketType]] = {
-    Sport.FOOTBALL: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.BTTS, MarketType.OVER_CARDS],
+    Sport.FOOTBALL: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS, MarketType.OVER_CARDS],
     Sport.TENNIS: [MarketType.MATCH_WINNER, MarketType.OVER_GAMES, MarketType.OVER_ACES],
-    Sport.HOCKEY: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.OVER_PENALTY_MINUTES],
+    Sport.HOCKEY: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.OVER_PENALTY_MINUTES],
     Sport.BASKETBALL: [MarketType.MATCH_WINNER, MarketType.OVER_POINTS, MarketType.OVER_THREES],
 }
+
+# Jedno místo pravdy pro lidsky čitelné popisky trhu/výběru — appka to
+# sdílí mezi transparentním účtem (transparency_page.py), Telegram
+# sázenkou (ticket_telegram.py) i frontendovým appkovým zobrazením tiketu,
+# ať se popisky mezi appkou a appkou nikde nerozejdou.
+MARKET_LABELS: dict[str, str] = {
+    MarketType.MATCH_WINNER.value: "Vítěz zápasu",
+    MarketType.OVER_GOALS.value: "Počet gólů",
+    MarketType.UNDER_GOALS.value: "Počet gólů",
+    MarketType.BTTS.value: "Oba týmy skórují",
+    MarketType.OVER_CARDS.value: "Počet karet",
+    MarketType.OVER_GAMES.value: "Počet gamů",
+    MarketType.OVER_ACES.value: "Počet es",
+    MarketType.OVER_PENALTY_MINUTES.value: "Trestné minuty",
+    MarketType.OVER_POINTS.value: "Počet bodů",
+    MarketType.OVER_THREES.value: "Počet trojek",
+}
+
+SELECTION_LABELS: dict[str, str] = {
+    "home": "Domácí", "away": "Hosté", "draw": "Remíza", "yes": "Ano", "no": "Ne",
+}
+
+
+def market_label(code: Optional[str]) -> str:
+    if not code:
+        return ""
+    return MARKET_LABELS.get(code, code.replace("_", " "))
+
+
+def selection_label(code: Optional[str]) -> str:
+    """'over_1.5' → 'Přes 1,5', 'under_2.5' → 'Pod 2,5', 'home' → 'Domácí'.
+    Neznámý kód appka vrátí, jak přišel — radši srozumitelné torzo než prázdno."""
+    if not code:
+        return ""
+    if code in SELECTION_LABELS:
+        return SELECTION_LABELS[code]
+    for prefix, word in (("over_", "Přes"), ("under_", "Pod")):
+        if code.startswith(prefix):
+            rest = code[len(prefix):]
+            try:
+                return f"{word} {float(rest):g}".replace(".", ",")
+            except ValueError:
+                return f"{word} {rest}".replace(".", ",")
+    return code
 
 
 # ---------------------------------------------------------------------
@@ -445,7 +500,10 @@ class MarketEvaluator:
                 under_odds = match.under_goals_odds.get(threshold)
                 if under_odds and under_odds >= MIN_SELECTION_ODDS:
                     under_prob = 1.0 - prob
-                    candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"under_{threshold}", under_prob, under_odds))
+                    candidates.append(cls._candidate(
+                        match, MarketType.UNDER_GOALS, f"under_{threshold}", under_prob, under_odds,
+                        market_key_type=MarketType.OVER_GOALS,
+                    ))
 
             if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
@@ -560,6 +618,10 @@ class MarketEvaluator:
             threshold = selection.replace("over_", "")
             total_xg = round(match.home_expected_goals + match.away_expected_goals, 2)
             base = f"Součet očekávaných gólů obou týmů (xG celkem {total_xg}) dává {model_pct} % šanci na víc než {threshold} gólu/ů."
+        elif market_type == MarketType.UNDER_GOALS:
+            threshold = selection.replace("under_", "")
+            total_xg = round(match.home_expected_goals + match.away_expected_goals, 2)
+            base = f"Součet očekávaných gólů obou týmů (xG celkem {total_xg}) dává {model_pct} % šanci na míň než {threshold} gólu/ů."
         elif market_type == MarketType.BTTS:
             base = (
                 f"Při xG {match.home_expected_goals} (domácí) a {match.away_expected_goals} (hosté) "
@@ -624,15 +686,26 @@ class MarketEvaluator:
         return "Podklady: " + " · ".join(parts) if parts else ""
 
     @staticmethod
-    def _candidate(match: MatchInput, market_type: MarketType, selection: str, probability: float, odds: float) -> SelectionCandidate:
+    def _candidate(match: MatchInput, market_type: MarketType, selection: str, probability: float, odds: float,
+                    market_key_type: Optional[MarketType] = None) -> SelectionCandidate:
         # model_probability je VŽDY náš vlastní heuristický odhad, nezávisle
         # na tom, jestli appka má tržní data. Pokud reálnou (de-vigovanou)
         # tržní pravděpodobnost pro tuhle přesnou selekci máme, použijeme ji
         # jako finální 'probability' pro staking — je to spolehlivější vstup
         # (viz devig_market výše) — ale model_probability si appka uchová
         # zvlášť, ať lze spočítat edge (viz SelectionCandidate.edge).
+        #
+        # market_key_type appka potřebuje jen u under gólů: SelectionCandidate
+        # má market_type=UNDER_GOALS (aby šel nezávisle filtrovat/vyhodnotit,
+        # viz evaluate_selection_outcome), ale _enrich_with_market_odds i
+        # data_provider.adapt_*_odds appka ukládají tržní pravděpodobnost
+        # under gólů pod klíč "over_goals:under_X" (jsou to dvě strany TÉŽE
+        # tržní nabídky, appka je odjakživa páruje pod jednu). Bez týhle
+        # výjimky by lookup pod "under_goals:under_X" nikdy nic nenašel a
+        # appka by tak nedopatřením přeskočila kontrolu kladného edge u
+        # KAŽDÉHO under výběru (viz require_positive_edge v _build_ticket).
         model_probability = probability
-        market_key = f"{market_type.value}:{selection}"
+        market_key = f"{(market_key_type or market_type).value}:{selection}"
         market_probability = match.market_implied_probabilities.get(market_key)
         final_probability = market_probability if market_probability is not None else model_probability
         reasoning = MarketEvaluator._build_reasoning(match, market_type, selection, model_probability, market_probability)

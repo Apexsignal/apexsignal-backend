@@ -29,6 +29,8 @@ from datetime import datetime
 from html import escape
 from typing import Optional
 
+from probability_model import market_label, selection_label
+
 SITE_URL = "https://apexsignal.cz/transparentni-ucet"
 
 TICKET_TYPE_LABELS = {
@@ -54,45 +56,11 @@ MONTHS_CS = [
 
 # V databázi jsou trhy i výběry uložené jako kódy ('over_goals',
 # 'over_1.5'). Na veřejné stránce nemají co dělat — čte ji člověk, ne API.
-MARKET_LABELS = {
-    "match_winner": "Vítěz zápasu",
-    "over_goals": "Počet gólů",
-    "over_cards": "Počet karet",
-    "over_points": "Počet bodů",
-    "over_games": "Počet gamů",
-    "btts": "Oba týmy skórují",
-}
-
-SELECTION_LABELS = {
-    "home": "Domácí",
-    "away": "Hosté",
-    "draw": "Remíza",
-    "yes": "Ano",
-    "no": "Ne",
-}
-
-
-def _market_label(code: Optional[str]) -> str:
-    if not code:
-        return ""
-    return MARKET_LABELS.get(code, code.replace("_", " "))
-
-
-def _selection_label(code: Optional[str]) -> str:
-    """'over_1.5' → 'Přes 1,5', 'home' → 'Domácí'. Neznámý kód appka
-    vrátí, jak přišel — radši srozumitelné torzo než prázdno."""
-    if not code:
-        return ""
-    if code in SELECTION_LABELS:
-        return SELECTION_LABELS[code]
-    for prefix, word in (("over_", "Přes"), ("under_", "Pod")):
-        if code.startswith(prefix):
-            line = code[len(prefix):]
-            try:
-                return f"{word} {float(line):g}".replace(".", ",")
-            except ValueError:
-                return f"{word} {line}".replace(".", ",")
-    return code
+# Popisky appka bere z probability_model (market_label/selection_label),
+# ať appka nemá dvě nezávislé kopie, co se snadno rozejdou (viz i
+# ticket_telegram.py, který ze stejného zdroje čte pro sázenku).
+_market_label = market_label
+_selection_label = selection_label
 
 
 def _parse_dt(raw) -> Optional[datetime]:

@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+from probability_model import market_label, selection_label
+
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 
 
@@ -145,9 +147,19 @@ def render_ticket(ticket: dict) -> Image.Image:
             font=f_odds, fill=GREEN, anchor="ra",
         )
         prob = s.get("probability", 0) * 100
-        selection_txt = s.get("selection", "")
+        # Appka dřív kreslila syrový kód selekce ("under_2.5", "home"...)
+        # přímo tak, jak přišel z backendu — klient v sázence viděl
+        # nesrozumitelný text místo "Počet gólů / Pod 2,5". Popisky bere
+        # ze stejného zdroje jako transparentní účet (probability_model).
+        market_txt = market_label(s.get("market_type"))
+        pick_txt = selection_label(s.get("selection"))
+        if market_txt:
+            draw.text(
+                (WIDTH - PADDING - 20, row_top + 38), market_txt,
+                font=f_small, fill=SUBTEXT, anchor="ra",
+            )
         draw.text(
-            (WIDTH - PADDING - 20, row_top + 44), f"{selection_txt} ({prob:.0f}%)",
+            (WIDTH - PADDING - 20, row_top + 60), f"{pick_txt} ({prob:.0f}%)",
             font=f_small, fill=SUBTEXT, anchor="ra",
         )
 
