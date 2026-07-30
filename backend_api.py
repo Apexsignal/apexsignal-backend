@@ -1483,6 +1483,46 @@ def create_redeem_code_endpoint(req: CreateRedeemCodeRequest, request: Request):
     return {"code": code, "tokens": req.tokens, "max_uses": req.max_uses, "expires_at": expires_at.isoformat() if expires_at else None}
 
 
+@app.post("/admin/create-channel-payment-link")
+def admin_create_channel_payment_link(request: Request):
+    """
+    Appka takhle jednorázově vytvoří NOVÝ Stripe Payment Link pro
+    Telegram kanál — appka ho používá při přecenění (viz CHANNEL_PRICE_KC),
+    protože stávající Payment Link má cenu zapečenou na Stripe straně a
+    appka ji odsud změnit nemůže. Appka stejnou strukturu (CZK, měsíční
+    předplatné) používá jako u /payments/create-unlimited-checkout-session,
+    jen appka místo dynamické Checkout Session vytváří TRVALÝ odkaz — appka
+    tenhle produkt neváže na přihlášeného uživatele (kanál appka pozná
+    jen podle e-mailu z platby).
+
+    Appka vrácenou URL nikam sama neuloží — appka STRIPE_CHANNEL_PAYMENT_LINK_URL
+    na Renderu musí ručně přepnout appce, appka na proměnné prostředí
+    odsud přístup nemá.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
+    try:
+        price = stripe.Price.create(
+            currency="czk",
+            unit_amount=CHANNEL_PRICE_KC * 100,
+            recurring={"interval": "month"},
+            product_data={"name": "Telegram kanál na měsíc — ApexSignal"},
+        )
+        payment_link = stripe.PaymentLink.create(
+            line_items=[{"price": price.id, "quantity": 1}],
+            after_completion={"type": "redirect", "redirect": {"url": f"{frontend_url}/?payment=success"}},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    return {"price_id": price.id, "payment_link_id": payment_link.id, "payment_link_url": payment_link.url, "price_kc": CHANNEL_PRICE_KC}
+
+
 # =====================================================================
 # Pomocné funkce — stahují zápasy pro každý sport a skládají MatchInput
 # =====================================================================
