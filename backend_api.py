@@ -2040,6 +2040,7 @@ class SaveSelectionRequest(BaseModel):
     league: str = ""
     country: str = ""
     kickoff_date: str = ""
+    kickoff_time: str = ""
 
 
 class SaveTicketRequest(BaseModel):
@@ -2061,7 +2062,7 @@ def save_ticket(req: SaveTicketRequest, user_id: int = Depends(get_current_user_
             probability=s.probability, odds=s.odds,
             model_probability=s.model_probability, market_probability=s.market_probability,
             reasoning=s.reasoning, data_quality=s.data_quality,
-            league=s.league, country=s.country, kickoff_date=s.kickoff_date,
+            league=s.league, country=s.country, kickoff_date=s.kickoff_date, kickoff_time=s.kickoff_time,
         ) for s in req.selections
     ]
     ticket = Ticket(
@@ -2101,19 +2102,55 @@ def backfill_results(user_id: int = Depends(get_current_user_id)):
     """Backfill old tickets - compute selection results for tickets missing them"""
     provider = data_provider.get_provider(Sport.FOOTBALL)
     updated = 0
-    
+
     for row in repo.get_saved_tickets(user_id):
         selection_ids = [s.get("id") for s in row.get("selections", [])]
         if not selection_ids:
             continue
-        
+
         new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
         if new_status is not None:
             if row["status"] != new_status:
                 repo.set_ticket_status(row["ticket_id"], new_status)
                 updated += 1
-    
+
     return {"backfilled": updated}
+
+
+@app.post("/admin/settle-all-pending")
+def admin_settle_all_pending(request: Request):
+    """
+    Appčin vlastní denní kanál (DAILY_TICKETS_USER_ID) si pending tikety
+    dosettluje sám, jako první krok run_daily_tickets — ale BĚŽNÉ účty
+    (appka si sama generuje/ukládá tikety v appce) tohle nemají vůbec —
+    /tickets/save appka zkusí vyhodnotit jen JEDNOU, hned při uložení,
+    kdy zápas skoro nikdy neskončil, a appka na to nemá žádný pravidelný
+    "zkus to znovu později" mechanismus (nahlásil uživatel — zápasy
+    dávno dohrané, appka je pořád ukazovala jako pending). Tenhle
+    endpoint projde PENDING tikety napříč VŠEMI účty najednou — volá ho
+    denní naplánovaná úloha vedle appčina vlastního kanálu, teď když je
+    appka generování odemčené naostro všem.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    rows = db.fetch_ticket_rows(status="pending")
+    checked = 0
+    updated = 0
+
+    for row in rows:
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        if not selection_ids:
+            continue
+        checked += 1
+        new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+        if new_status is not None:
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            updated += 1
+
+    return {"checked": checked, "updated": updated}
 
 
 @app.post("/tickets/check-duplicates")
@@ -3612,7 +3649,7 @@ def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
             probability=s.probability, odds=s.odds,
             model_probability=s.model_probability, market_probability=s.market_probability,
             reasoning=s.reasoning, data_quality=s.data_quality,
-            league=s.league, country=s.country, kickoff_date=s.kickoff_date,
+            league=s.league, country=s.country, kickoff_date=s.kickoff_date, kickoff_time=s.kickoff_time,
         ) for s in req.selections
     ]
     ticket = Ticket(

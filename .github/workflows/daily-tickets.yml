@@ -49,3 +49,15 @@ jobs:
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/telegram-sync \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      # Appčin vlastní kanál (DAILY_TICKETS_USER_ID) si pending tikety
+      # dosettluje sám (viz run_daily_tickets) — ale BĚŽNÉ účty appky
+      # (kdokoli si sám generuje/ukládá tikety v appce) tohle neměly
+      # vůbec, appka je zkusila vyhodnotit jen JEDNOU při uložení, kdy
+      # zápas skoro nikdy neskončil. Nezávislé na předchozích krocích,
+      # proto vždy.
+      - name: Dosettlovat pending tikety napříč VŠEMI účty appky
+        if: always()
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/settle-all-pending \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
