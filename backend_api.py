@@ -890,7 +890,7 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 # částku, co appka strhne, drží ten Payment Link na Stripe straně.
 # =====================================================================
 TELEGRAM_LINK_CODE_TTL_MINUTES = 60
-CHANNEL_PRICE_KC = 500
+CHANNEL_PRICE_KC = 990
 
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
@@ -966,7 +966,7 @@ class RedeemCodeRequest(BaseModel):
 def get_token_balance_endpoint(user_id: int = Depends(get_current_user_id)):
     until = db.get_unlimited_until(user_id)
 
-    # Kanál (500 Kč) appka drží úplně odděleně, podle e-mailu ve
+    # Kanál (990 Kč) appka drží úplně odděleně, podle e-mailu ve
     # subscriptions — appka tu jen zkontroluje, jestli e-mail appky
     # účtu náhodou nesedí na nějaké aktivní kanálové předplatné, ať appka
     # ví, jestli má appka ukázat "koupit" nebo "spravovat/zrušit".
@@ -1041,7 +1041,7 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
     return {"checkout_url": session.url}
 
 
-UNLIMITED_GENERATION_PRICE_KC = 5000
+UNLIMITED_GENERATION_PRICE_KC = 4990
 UNLIMITED_GENERATION_DAILY_CAP = 10
 
 
@@ -1269,10 +1269,10 @@ async def stripe_webhook(request: Request):
         return {"status": "ok"}
 
     # Appka teď má DVĚ různé předplatné, obě mode="subscription":
-    #   1) Telegram kanál (500 Kč) — přes samostatný Stripe Payment Link,
+    #   1) Telegram kanál (990 Kč) — přes samostatný Stripe Payment Link,
     #      žádný účet appky, appka zákazníka pozná jen podle e-mailu,
     #      appka drží stav v tabulce subscriptions.
-    #   2) Neomezené generování (5000 Kč) — přes /payments/create-
+    #   2) Neomezené generování (4990 Kč) — přes /payments/create-
     #      unlimited-checkout-session, vázané na přihlášený user_id
     #      appky (metadata.unlimited_generation == "1"), appka drží
     #      stav přímo na users.unlimited_until.

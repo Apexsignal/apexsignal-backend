@@ -321,7 +321,7 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
-    # Neomezené generování (5000 Kč/měsíc, viz _require_generation_enabled
+    # Neomezené generování (4990 Kč/měsíc, viz _require_generation_enabled
     # a _check_daily_generation_cap) — unlimited_until appka nechává NULL,
     # dokud si uživatel tarif nekoupí; denni_generations_count/date appka
     # počítá pokusy o generování, ne uložené tikety (appka platí za pokus,
@@ -436,11 +436,11 @@ def get_stripe_payments_for_user(user_id: int) -> list[dict]:
 
 def get_conversion_funnel(days: int = 30) -> dict:
     """
-    Appka appce ukazuje, kde lidi ubývají mezi registrací a placením:
+    Appka tímhle ukazuje, kde lidi ubývají mezi registrací a placením:
     kolik se jich zaregistrovalo, kolik z nich appce uložilo aspoň jeden
     tiket (appka to bere jako 'reálně appku vyzkoušeli'), a kolik z nich
     appce aspoň jednou zaplatilo. `days` appka omezí jen na nedávné
-    registrace, ať appka appce neukazuje historicky zkreslené číslo
+    registrace, ať appka neukazuje historicky zkreslené číslo
     kombinující starý i nový provoz appky.
     """
     with get_cursor() as cur:
@@ -843,7 +843,7 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
 
 
 # =====================================================================
-# Neomezené generování (5000 Kč/měsíc, strop 10 generování/den)
+# Neomezené generování (4990 Kč/měsíc, strop 10 generování/den)
 # =====================================================================
 def get_unlimited_until(user_id: int) -> Optional[datetime]:
     with get_cursor() as cur:
