@@ -417,9 +417,8 @@ font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas
 font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
 .hero-sub{font-size:.82rem;color:var(--muted)}
 .offers{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
-.offer{background:var(--raise);border:1px solid var(--line);border-radius:6px;padding:22px;
+.offer{background:var(--raise);border:1px solid var(--accent);box-shadow:0 0 0 1px var(--accent);border-radius:6px;padding:22px;
 display:flex;flex-direction:column;gap:12px}
-.offer.primary{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .offer-price{font-size:1.6rem;font-weight:700;letter-spacing:-.02em;
 font-family:ui-monospace,"SF Mono",SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace}
 .offer-price small{font-size:.78rem;font-weight:400;color:var(--muted);letter-spacing:0}
