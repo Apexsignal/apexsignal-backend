@@ -3280,6 +3280,7 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
 
     candidates_by_threshold = {}
+    candidates_by_market_65 = {}
     for threshold in (0.70, 0.65):
         pool = []
         for m in matches:
@@ -3288,11 +3289,15 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
                 if c.market_type in DAILY_TICKETS_MARKETS
             ])
         candidates_by_threshold[f"{int(threshold * 100)}%"] = len(pool)
+        if threshold == 0.65:
+            for c in pool:
+                candidates_by_market_65[c.market_type.value] = candidates_by_market_65.get(c.market_type.value, 0) + 1
 
     return {
         "time_frame_days": time_frame_days,
         "fixtures_fetched": len(matches),
         "candidates_by_threshold": candidates_by_threshold,
+        "candidates_by_market_at_65pct": candidates_by_market_65,
     }
 
 
