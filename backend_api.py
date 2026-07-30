@@ -2928,12 +2928,12 @@ TRANSPARENCY_STAKE = 500.0
 def run_transparency_daily_tickets(request: Request):
     """
     Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
-    denně vygeneruje 2 kratky + 2 stredni tikety (v pátek navíc 1 boost),
-    na každý appka automaticky vsadí pevných 500 Kč — appka tenhle účet
-    nikdy nemaskuje ani neupravuje, jde čistě o transparentní ukázku
-    appčina výkonu (viz GET /public/transparency). Odděleno od
-    DAILY_TICKETS_USER_ID (appky vlastní účet pro Telegram/showcase) —
-    appka tenhle nový účet nemíchá s tím starým.
+    denně vygeneruje 2 kratky + 1 stredni tiket, na každý appka
+    automaticky vsadí pevných 500 Kč — appka tenhle účet nikdy nemaskuje
+    ani neupravuje, jde čistě o transparentní ukázku appčina výkonu (viz
+    GET /public/transparency). Odděleno od DAILY_TICKETS_USER_ID (appky
+    vlastní účet pro Telegram/showcase) — appka tenhle nový účet nemíchá
+    s tím starým.
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
@@ -2966,9 +2966,7 @@ def run_transparency_daily_tickets(request: Request):
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
         # Horizont rozšířen z 2 na 4 dny stejně jako u run_daily_tickets výš —
         # viz komentář tam.
-        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 2)]
-        if today_prague.weekday() == 4:  # pátek
-            plan.append(("boost", 80, 5, 1))
+        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 1)]
 
         results = []
         for label, risk_level, days, target_count in plan:

@@ -10,10 +10,11 @@
 # úlohy, ať appka nemusí řešit, jestli některý krok náhodou neběží dřív
 # než ten, na kterém závisí.
 #
-# Veřejná transparentní stránka (TRANSPARENCY_USER_ID) teď ukazuje STEJNÝ
-# účet jako placený kanál (DAILY_TICKETS_USER_ID) — appka pro ni už
-# nemá samostatný generovací krok, /public/transparency čte to samé,
-# co appka posílá platícím odběratelům.
+# Veřejná transparentní stránka (TRANSPARENCY_USER_ID) je SAMOSTATNÝ účet,
+# oddělený od placeného kanálu (DAILY_TICKETS_USER_ID) — má vlastní
+# generovací krok níže (/admin/transparency-daily-tickets), appka na něj
+# dřív žádný cron neměla zapojený, což byl skutečný důvod, proč stránka
+# ukazovala starou/tenkou historii (ověřeno 2026-07-30).
 #
 # Vyžaduje repozitářový secret ADMIN_TASK_KEY (Settings → Secrets and
 # variables → Actions → New repository secret) se stejnou hodnotou, jakou
@@ -37,6 +38,11 @@ jobs:
       - name: Vygenerovat dnesni tikety na test3 (2x kratky, 2x stredni, sazka 1000 Kc)
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/test3-daily-tickets \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      - name: Vygenerovat dnesni tikety na transparentni ucet (2x kratky, 1x stredni, sazka 500 Kc)
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/transparency-daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
 
       - name: Rozeslat dnesni vyber platicim predplatitelum na Telegram
