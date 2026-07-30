@@ -359,6 +359,57 @@ def admin_set_unlimited(req: AdminSetUnlimitedRequest, request: Request):
     return {"email": req.email, "unlimited_until": until.isoformat()}
 
 
+class AdminProvisionAccountRequest(BaseModel):
+    email: str
+    password: str
+    tokens: int = 0
+    reset: bool = True  # appka existující účet vynuluje (historie tiketů, neomezený tarif, tokeny) před nahráním tokens
+
+
+@app.post("/admin/provision-account")
+def admin_provision_account(req: AdminProvisionAccountRequest, request: Request):
+    """Ručně založí nebo kompletně resetuje účet (heslo appka nastaví bez
+    e-mailového reset flow, stejně jako /admin/set-password) a nahraje
+    přesně `tokens` tokenů — appka to používá pro účty, co appka chce
+    'od nuly' (partnerství, náprava chyby, appka sama pro test)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Heslo musí mít aspoň 8 znaků")
+
+    user = db.get_user_by_email(req.email)
+    was_existing = user is not None
+    tickets_deleted = 0
+
+    if not user:
+        user_id = db.create_user(req.email, auth.hash_password(req.password))
+    else:
+        user_id = user["id"]
+        db.update_password_hash(user_id, auth.hash_password(req.password))
+        if req.reset:
+            saved_tickets = repo.get_saved_tickets(user_id)
+            for row in saved_tickets:
+                db.delete_ticket(row["ticket_id"])
+            tickets_deleted = len(saved_tickets)
+            db.set_unlimited_until(user_id, None)
+            current_balance = db.get_token_balance(user_id)
+            if current_balance != 0:
+                db.adjust_tokens(user_id, -current_balance, "ADMIN_RESET_ACCOUNT")
+
+    if req.tokens:
+        db.adjust_tokens(user_id, req.tokens, "ADMIN_PROVISION_ACCOUNT")
+
+    return {
+        "user_id": user_id,
+        "email": req.email,
+        "was_existing": was_existing,
+        "reset_applied": was_existing and req.reset,
+        "tickets_deleted": tickets_deleted,
+        "token_balance": db.get_token_balance(user_id),
+    }
+
+
 class DeleteAccountRequest(BaseModel):
     password: str
 
