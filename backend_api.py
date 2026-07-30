@@ -2921,7 +2921,7 @@ def run_daily_tickets(request: Request):
         _GENERATION_LOCKS["daily_tickets"].release()
 
 
-TRANSPARENCY_STAKE = 500.0
+TRANSPARENCY_STAKE = 2000.0
 
 
 @app.post("/admin/transparency-daily-tickets")
@@ -2929,11 +2929,12 @@ def run_transparency_daily_tickets(request: Request):
     """
     Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
     denně vygeneruje 2 kratky + 1 stredni tiket, na každý appka
-    automaticky vsadí pevných 500 Kč — appka tenhle účet nikdy nemaskuje
+    automaticky vsadí pevných 2000 Kč — appka tenhle účet nikdy nemaskuje
     ani neupravuje, jde čistě o transparentní ukázku appčina výkonu (viz
     GET /public/transparency). Odděleno od DAILY_TICKETS_USER_ID (appky
     vlastní účet pro Telegram/showcase) — appka tenhle nový účet nemíchá
-    s tím starým.
+    s tím starým. Každý vygenerovaný tiket appka navíc pošle na appčin
+    vlastní Telegram (TELEGRAM_CHAT_ID), stejně jako u run_daily_tickets.
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
@@ -2991,7 +2992,16 @@ def run_transparency_daily_tickets(request: Request):
 
                 ticket_id = repo.save_ticket(target_user_id, ticket)
                 repo.set_actual_stake(ticket_id, TRANSPARENCY_STAKE, ticket.total_odds)
-                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE})
+
+                telegram_status = "skipped"
+                if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                    try:
+                        ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                        telegram_status = "sent"
+                    except Exception as e:
+                        telegram_status = f"error: {e}"
+
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE, "telegram": telegram_status})
 
         return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
     finally:
