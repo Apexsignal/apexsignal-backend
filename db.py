@@ -341,6 +341,24 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Zkušební kódy appka umí omezit na nižší denní strop, než má placený
+    # neomezený tarif (UNLIMITED_GENERATION_DAILY_CAP) — např. "3 dny
+    # zdarma, max 5 generování/den". NULL = appka použije standardní
+    # strop. set_unlimited_until appka volá jen z PLACENÝCH/administrátorem
+    # schválených cest (Stripe webhook, /admin/set-unlimited), takže appka
+    # tam override vždy vynuluje — jinak by kdysi uplatněný zkušební kód
+    # navždy omezoval i pozdějšího platícího zákazníka.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generation_cap_override INTEGER")
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE redeem_codes ADD COLUMN IF NOT EXISTS daily_cap_override INTEGER")
+    except Exception:
+        pass
+
     # Stripe customer ID appka potřebuje, aby appka uměla otevřít billing
     # portál (zrušení/změna karty) — bez něj appka nemá jak dohledat, který
     # Stripe zákazník k danému appky účtu patří.
@@ -862,14 +880,27 @@ def get_unlimited_until(user_id: int) -> Optional[datetime]:
 
 
 def set_unlimited_until(user_id: int, until: datetime, stripe_customer_id: Optional[str] = None) -> None:
+    """Appka tudy pouští jen placené (Stripe webhook) nebo administrátorem
+    schválené (/admin/set-unlimited, /admin/provision-account) aktivace —
+    proto appka při každém volání zároveň vynuluje daily_generation_cap_override:
+    jinak by dřív uplatněný zkušební kód s nižším stropem navždy omezoval
+    i zákazníka, co si pak koupí plný tarif. Nižší strop appka nastavuje
+    JEN uvnitř redeem_code, pro konkrétní zkušební kódy."""
     with get_cursor() as cur:
         if stripe_customer_id is not None:
             cur.execute(
-                "UPDATE users SET unlimited_until = %s, unlimited_stripe_customer_id = %s WHERE id = %s",
+                "UPDATE users SET unlimited_until = %s, unlimited_stripe_customer_id = %s, daily_generation_cap_override = NULL WHERE id = %s",
                 (until, stripe_customer_id, user_id),
             )
         else:
-            cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (until, user_id))
+            cur.execute("UPDATE users SET unlimited_until = %s, daily_generation_cap_override = NULL WHERE id = %s", (until, user_id))
+
+
+def get_daily_generation_cap_override(user_id: int) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT daily_generation_cap_override FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["daily_generation_cap_override"] if row else None
 
 
 def get_unlimited_stripe_customer_id(user_id: int) -> Optional[str]:
@@ -921,11 +952,14 @@ def mark_stripe_event_if_new(event_id: str) -> bool:
         return cur.fetchone() is not None
 
 
-def create_redeem_code(code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "", unlimited_days: int = 0) -> None:
+def create_redeem_code(
+    code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "",
+    unlimited_days: int = 0, daily_cap_override: int = 0,
+) -> None:
     with get_cursor() as cur:
         cur.execute(
-            "INSERT INTO redeem_codes (code, tokens, max_uses, expires_at, note, unlimited_days) VALUES (%s, %s, %s, %s, %s, %s)",
-            (code, tokens, max_uses, expires_at, note, unlimited_days or None),
+            "INSERT INTO redeem_codes (code, tokens, max_uses, expires_at, note, unlimited_days, daily_cap_override) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (code, tokens, max_uses, expires_at, note, unlimited_days or None, daily_cap_override or None),
         )
 
 
@@ -981,11 +1015,18 @@ def redeem_code(code: str, user_id: int) -> dict:
             now = datetime.now(timezone.utc)
             base = max(current_until, now) if current_until and current_until > now else now
             new_unlimited_until = base + timedelta(days=row["unlimited_days"])
-            cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (new_unlimited_until, user_id))
+            if row.get("daily_cap_override"):
+                cur.execute(
+                    "UPDATE users SET unlimited_until = %s, daily_generation_cap_override = %s WHERE id = %s",
+                    (new_unlimited_until, row["daily_cap_override"], user_id),
+                )
+            else:
+                cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (new_unlimited_until, user_id))
 
         return {
             "ok": True, "tokens": row["tokens"], "balance": new_balance,
             "unlimited_until": new_unlimited_until.isoformat() if new_unlimited_until else None,
+            "daily_cap_override": row.get("daily_cap_override"),
         }
 
 

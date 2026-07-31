@@ -927,11 +927,15 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
     # před samotným (drahým) generováním, ne až po něm.
     if _has_active_unlimited(user_id):
         count = db.increment_daily_generation_count(user_id)
-        if count > UNLIMITED_GENERATION_DAILY_CAP:
+        # Zkušební kódy appka umí omezit na nižší strop, než má placený
+        # tarif (viz db.redeem_code/daily_generation_cap_override) — appka
+        # tenhle override respektuje, jinak spadne na standardní konstantu.
+        cap = db.get_daily_generation_cap_override(user_id) or UNLIMITED_GENERATION_DAILY_CAP
+        if count > cap:
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    f"Appka ti dnes už {UNLIMITED_GENERATION_DAILY_CAP}× vygenerovala — "
+                    f"Appka ti dnes už {cap}× vygenerovala — "
                     "to je denní strop neomezeného tarifu. Zkus to zítra."
                 ),
             )
@@ -1467,6 +1471,7 @@ class CreateRedeemCodeRequest(BaseModel):
     note: str = ""
     code: Optional[str] = None  # vlastní text kódu (např. "BOOST") — jinak appka vygeneruje náhodný
     unlimited_days: int = 0  # >0 = kód navíc odemkne neomezené generování na N dní
+    daily_cap_override: int = 0  # >0 = po dobu unlimited_days nižší denní strop než UNLIMITED_GENERATION_DAILY_CAP
 
 
 @app.post("/admin/tokens/create-code")
@@ -1480,10 +1485,11 @@ def create_redeem_code_endpoint(req: CreateRedeemCodeRequest, request: Request):
         datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
         if req.expires_in_days else None
     )
-    db.create_redeem_code(code, req.tokens, req.max_uses, expires_at, req.note, req.unlimited_days)
+    db.create_redeem_code(code, req.tokens, req.max_uses, expires_at, req.note, req.unlimited_days, req.daily_cap_override)
     return {
         "code": code, "tokens": req.tokens, "max_uses": req.max_uses,
         "unlimited_days": req.unlimited_days or None,
+        "daily_cap_override": req.daily_cap_override or None,
         "expires_at": expires_at.isoformat() if expires_at else None,
     }
 
