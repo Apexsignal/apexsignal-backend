@@ -53,13 +53,19 @@ MAX_RECOMMENDED_STAKE_PCT = 5.0  # tvrdý strop, i kdyby Kelly počítal víc
 CORRELATION_DISCOUNT_PER_EXTRA_SAME_LEAGUE_PAIR = 0.95  # viz _apply_correlation_discount
 
 
-def evaluate_selection_outcome(selection: "SelectionCandidate", home_goals: int, away_goals: int) -> Optional[bool]:
+def evaluate_selection_outcome(
+    selection: "SelectionCandidate", home_goals: int, away_goals: int, total_cards: Optional[int] = None,
+) -> Optional[bool]:
     """
-    Vyhodnotí, jestli se tahle konkrétní selekce podle finálního skóre
-    potvrdila (True/False). Appka umí rozhodnout jen trhy odvozené čistě
-    ze skóre (MATCH_WINNER, OVER_GOALS) — cokoli jiného (karty, tenisové/
-    basketbalové trhy) appka automaticky nevyhodnotí a vrátí None; tiket
-    pak zůstane 'pending', dokud ho někdo nevyhodnotí jinak.
+    Vyhodnotí, jestli se tahle konkrétní selekce podle finálního výsledku
+    potvrdila (True/False). Appka umí rozhodnout trhy odvozené ze skóre
+    (MATCH_WINNER, OVER_GOALS, UNDER_GOALS, BTTS) rovnou, a OVER_CARDS
+    tehdy, když jí appka dodá total_cards (appka ho dotahuje zvlášť,
+    jen když appka trh potřebuje — viz _settle_one_leg v backend_api.py,
+    ať appka nevolá API-Football statistiky zbytečně u trhů, co je
+    nepotřebují). Tenisové/basketbalové trhy appka pořád nevyhodnotí a
+    vrátí None; tiket pak zůstane 'pending', dokud ho někdo nevyhodnotí
+    jinak.
     """
     if selection.market_type == MarketType.MATCH_WINNER:
         if selection.selection == "home":
@@ -86,6 +92,15 @@ def evaluate_selection_outcome(selection: "SelectionCandidate", home_goals: int,
 
     if selection.market_type == MarketType.BTTS:
         return home_goals >= 1 and away_goals >= 1
+
+    if selection.market_type == MarketType.OVER_CARDS:
+        if total_cards is None:
+            return None
+        try:
+            threshold = float(selection.selection.replace("over_", ""))
+        except ValueError:
+            return None
+        return total_cards > threshold
 
     return None
 

@@ -1652,6 +1652,35 @@ class APIFootballProvider(SportsDataProvider):
             pass
         return data
 
+    def get_fixture_statistics(self, match_id: str) -> list[dict]:
+        """
+        Statistiky (mj. počet karet) k jednomu odehranému zápasu — appka
+        tohle volá jen při dosettlování Over Cards tiketů (viz
+        _settle_one_leg v backend_api.py), ne u každé nohy každého
+        tiketu, ať appka zbytečně neplýtvá API budgetem na trhy, co ho
+        nepotřebují.
+        """
+        cache_key = f"fixture_statistics:{match_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        response = self._get("/fixtures/statistics", {"fixture": match_id})
+        self._cache.set(cache_key, response)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, response, ttl_seconds=10 * 60)
+        except Exception:
+            pass
+        return response
+
     def get_injuries(self, match_id: str) -> list[dict]:
         """
         Hráči nahlášení jako zranění/vyloučení pro konkrétní zápas. POZOR:
@@ -1737,6 +1766,32 @@ def adapt_fixture_result(fixture: dict) -> dict:
         "home_goals": goals.get("home"),
         "away_goals": goals.get("away"),
     }
+
+
+def adapt_fixture_card_count(statistics: list[dict]) -> Optional[int]:
+    """
+    statistics = odpověď z get_fixture_statistics() (/fixtures/statistics
+    ?fixture=X) — appka sečte žluté i červené karty OBOU týmů. API appce
+    u některých soutěží (hlavně nižších) statistiky vůbec neposílá —
+    appka to pozná podle prázdné odpovědi/chybějícího typu a vrátí
+    None, ať appka tiket nechá 'pending' místo špatného odhadu.
+    """
+    if not statistics:
+        return None
+    total = 0
+    found_any = False
+    for team_stats in statistics:
+        for stat in (team_stats.get("statistics") or []):
+            stat_type = (stat.get("type") or "").strip().lower()
+            if stat_type in ("yellow cards", "red cards"):
+                value = stat.get("value")
+                if value is not None:
+                    try:
+                        total += int(value)
+                        found_any = True
+                    except (ValueError, TypeError):
+                        pass
+    return total if found_any else None
 
 
 def adapt_api_football_fixture(fixture: dict) -> dict:

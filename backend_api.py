@@ -2483,7 +2483,19 @@ def _settle_one_leg(provider, i: int, selection, selection_id: Optional[int]) ->
             print(f"      → saved pending id={selection_id}")
         return None
 
-    outcome = evaluate_selection_outcome(selection, result["home_goals"], result["away_goals"])
+    total_cards = None
+    if selection.market_type == MarketType.OVER_CARDS:
+        # Appka statistiky (počet karet) tahá jen tady, ne pro každou
+        # nohu — jiné trhy je nepotřebují a appka nechce plýtvat API
+        # budgetem navíc.
+        try:
+            stats = provider.get_fixture_statistics(selection.match_id)
+            total_cards = data_provider.adapt_fixture_card_count(stats)
+            print(f"  [{i}] karty: {total_cards}")
+        except Exception as e:
+            print(f"  [{i}] karty API ERROR: {str(e)}")
+
+    outcome = evaluate_selection_outcome(selection, result["home_goals"], result["away_goals"], total_cards)
     print(f"      → Match finished, outcome={outcome}")
     if selection_id is not None:
         result_str = "won" if outcome is True else "lost" if outcome is False else "pending"
