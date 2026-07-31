@@ -780,7 +780,7 @@ def render_page(
   <div class="offers">
     <div class="offer primary">
       <span class="eyebrow">Kanál na Telegramu</span>
-      <div class="offer-price">990 Kč <small>/ měsíc</small></div>
+      <div class="offer-price">490 Kč <small>/ měsíc</small></div>
       <p>Každé ráno appka pošle 1 tiket — hlavně krátký, občas (když appka najde
       opravdovou hodnotu) radši ten hodnotnější, střední. Nic si sám negeneruješ,
       appka pošle výběr rovnou na Telegram. {compare_line}</p>
@@ -799,7 +799,7 @@ def render_page(
     </div>
     <div class="offer">
       <span class="eyebrow">Neomezené generování</span>
-      <div class="offer-price">4 990 Kč <small>/ měsíc</small></div>
+      <div class="offer-price">9 900 Kč <small>/ měsíc</small></div>
       <p>Generuješ si sám, kolikrát chceš (strop 10× denně proti zneužití),
       bez placení za jednotlivý tiket. Cílené na lidi, co appku chtějí
       používat naplno — vlastní analýzu zápasů, nebo i vlastní tipsterský

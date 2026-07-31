@@ -321,7 +321,7 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
-    # Neomezené generování (4990 Kč/měsíc, viz _require_generation_enabled
+    # Neomezené generování (9900 Kč/měsíc, viz _require_generation_enabled
     # a _check_daily_generation_cap) — unlimited_until appka nechává NULL,
     # dokud si uživatel tarif nekoupí; denni_generations_count/date appka
     # počítá pokusy o generování, ne uložené tikety (appka platí za pokus,
@@ -852,7 +852,7 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
 
 
 # =====================================================================
-# Neomezené generování (4990 Kč/měsíc, strop 10 generování/den)
+# Neomezené generování (9900 Kč/měsíc, strop 10 generování/den)
 # =====================================================================
 def get_unlimited_until(user_id: int) -> Optional[datetime]:
     with get_cursor() as cur:
