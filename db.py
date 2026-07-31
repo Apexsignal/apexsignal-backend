@@ -506,6 +506,18 @@ def get_conversion_funnel(days: int = 30) -> dict:
         }
 
 
+def get_recent_registrations(days: int = 1) -> list[dict]:
+    """Appka tímhle appce vypíše e-maily a čas registrace nedávno
+    založených účtů — doplněk ke get_conversion_funnel, který appce dá
+    jen počet, ne kdo konkrétně."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT email, created_at FROM users WHERE created_at > now() - %s * interval '1 day' ORDER BY created_at DESC",
+            (days,),
+        )
+        return [{"email": row["email"], "created_at": row["created_at"]} for row in cur.fetchall()]
+
+
 def get_user_by_id(user_id: int) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))

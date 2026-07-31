@@ -232,6 +232,20 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _notify_owner_new_registration(email: str, source: str) -> None:
+    """Appka appce pošle upozornění na appčin vlastní Telegram
+    (TELEGRAM_CHAT_ID) při KAŽDÉ nové registraci — appka to volá jen
+    tehdy, když appka reálně založila nový účet, ne při běžném loginu.
+    Selhání appka jen zaloguje, nikdy tím nesmí shodit registraci."""
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        return
+    try:
+        _send_telegram_message(int(chat_id), f"🆕 Nová registrace ({source}): {email}")
+    except Exception as e:
+        print(f"[register] Nepodařilo se poslat Telegram upozornění: {e}")
+
+
 @app.post("/auth/register", response_model=AuthResponse)
 def register(req: RegisterRequest, request: Request):
     client_ip = _client_ip(request)
@@ -249,6 +263,7 @@ def register(req: RegisterRequest, request: Request):
         email_service.send_welcome_email(req.email)
     except Exception as e:
         print(f"[register] Uvítací e-mail se nepodařilo odeslat: {e}")
+    _notify_owner_new_registration(req.email, "e-mail")
     return AuthResponse(token=auth.create_token(user_id), user_id=user_id, email=req.email, is_new_user=True)
 
 
@@ -305,6 +320,7 @@ def google_auth(req: GoogleAuthRequest):
             email_service.send_welcome_email(email)
         except Exception as e:
             print(f"[google_auth] Uvítací e-mail se nepodařilo odeslat: {e}")
+        _notify_owner_new_registration(email, "Google")
     else:
         user_id = user["id"]
 
@@ -1402,6 +1418,17 @@ def admin_conversion_funnel(request: Request, days: int = 30):
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
     return db.get_conversion_funnel(days)
+
+
+@app.get("/admin/recent-registrations")
+def admin_recent_registrations(request: Request, days: int = 1):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    rows = db.get_recent_registrations(days)
+    return {"period_days": days, "registrations": [
+        {"email": r["email"], "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows
+    ]}
 
 
 class RefundRequest(BaseModel):
