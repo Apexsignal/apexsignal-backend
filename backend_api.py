@@ -632,8 +632,19 @@ class Repo:
         return rows
 
     def get_all_saved_match_ids(self, user_id: int) -> list[int]:
-        """Vrátí všechny match_ids z uložených tiketů — pro vyloučení duplikátů."""
-        rows = db.fetch_ticket_rows(user_id=user_id)
+        """
+        Vrátí match_ids, co appka nemá nabízet znovu — jen z PENDING
+        tiketů. Dřív appka brala úplně všechny uložené tikety bez ohledu
+        na status, což natrvalo vyřazovalo i zápasy, co se ještě
+        neodehrály, jen proto, že appka celý tiket označila "prohraný"
+        kvůli JINÉ noze (parlay: jedna prohraná noha = celý tiket
+        prohraný, i když appka ostatní zápasy ještě nestihla vyhodnotit
+        — viz _try_settle_ticket). Won/lost tikety appka z vyloučení
+        vypouští: zápasy z nich už appka nikdy jako budoucí kandidáty
+        nenabídne (jsou v minulosti), takže na výsledek to nemá vliv —
+        kromě přesně týhle situace, kterou appka opravuje.
+        """
+        rows = db.fetch_ticket_rows(user_id=user_id, status="pending")
         match_ids = set()
         for row in rows:
             ticket = row.get("ticket")
