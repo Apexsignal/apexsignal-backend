@@ -1446,6 +1446,51 @@ def admin_recent_registrations(request: Request, days: int = 1):
     ]}
 
 
+# Appka appce vezme jen tyhle typy událostí — cokoli jiného appka odmítne,
+# ať appce do tabulky nikdo nenacpe libovolná data přes veřejný endpoint.
+ALLOWED_EVENT_TYPES = {"session_start", "heartbeat", "click_generate", "generate_success", "generate_failed", "ticket_saved"}
+
+
+class TrackEventRequest(BaseModel):
+    event_type: str
+    session_id: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+@app.post("/events/track")
+def track_event(req: TrackEventRequest, user_id: int = Depends(get_current_user_id)):
+    if req.event_type not in ALLOWED_EVENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Neznámý typ události: {req.event_type}")
+    db.log_user_event(user_id, req.event_type, req.session_id, req.metadata)
+    return {"status": "ok"}
+
+
+@app.get("/admin/user-activity")
+def admin_user_activity(request: Request, days: int = 1):
+    """
+    Appka appce ukáže, co registrovaní uživatelé za posledních `days` dní
+    reálně dělali — kliky na Vygenerovat, úspěšná/neúspěšná generování,
+    kolik tiketů uložili a odhad minut strávených na webu (ze session
+    heartbeatů, viz get_user_activity_summary).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    rows = db.get_user_activity_summary(days)
+    return {"period_days": days, "users": [
+        {
+            "email": r["email"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "clicked_generate": r["clicked_generate"],
+            "generated": r["generated"],
+            "generate_failed": r["generate_failed"],
+            "saved": r["saved"],
+            "minutes_on_site": round((r["seconds_on_site"] or 0) / 60, 1),
+        }
+        for r in rows
+    ]}
+
+
 class RefundRequest(BaseModel):
     email: str
     session_id: str

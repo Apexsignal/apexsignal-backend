@@ -380,6 +380,37 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Appka tímhle sleduje, co registrovaní uživatelé reálně dělají — klik
+    # na Vygenerovat, úspěšné/neúspěšné generování, uložení tiketu, a
+    # pravidelný heartbeat (dá odhad času stráveného na webu — appka ho
+    # posílá z frontendu, dokud je karta aktivní/viditelná).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    event_type VARCHAR(40) NOT NULL,
+                    session_id VARCHAR(64),
+                    metadata JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_events_user_id ON user_events (user_id)")
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_events_session ON user_events (session_id)")
+    except Exception:
+        pass
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
@@ -516,6 +547,70 @@ def get_recent_registrations(days: int = 1) -> list[dict]:
             (days,),
         )
         return [{"email": row["email"], "created_at": row["created_at"]} for row in cur.fetchall()]
+
+
+def log_user_event(user_id: int, event_type: str, session_id: Optional[str] = None, metadata: Optional[dict] = None) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_events (user_id, event_type, session_id, metadata) VALUES (%s, %s, %s, %s)",
+            (user_id, event_type, session_id, json.dumps(metadata) if metadata is not None else None),
+        )
+
+
+def get_user_activity_summary(days: int = 1) -> list[dict]:
+    """
+    Appka appce ukáže, co nedávno registrovaní uživatelé reálně dělají:
+    kolikrát klikli na Vygenerovat, kolikrát appka reálně vygenerovala,
+    kolik tiketů si uložili (appka to bere z tabulky tickets, ne z
+    eventů — je to zdroj pravdy, event by mohl chybět, kdyby appka
+    frontend někdy zapomněla zalogovat), a odhad času na webu appka
+    spočítá ze session_id heartbeatů (poslední mínus první v rámci
+    jedné session, sečteno přes všechny appky session appky uživatele).
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            WITH recent_users AS (
+                SELECT id, email, created_at FROM users WHERE created_at > now() - %s * interval '1 day'
+            ),
+            session_spans AS (
+                SELECT user_id, session_id, MIN(created_at) AS started, MAX(created_at) AS ended
+                FROM user_events
+                WHERE session_id IS NOT NULL
+                GROUP BY user_id, session_id
+            ),
+            time_per_user AS (
+                SELECT user_id, SUM(EXTRACT(EPOCH FROM (ended - started))) AS seconds
+                FROM session_spans
+                GROUP BY user_id
+            ),
+            clicks AS (
+                SELECT user_id,
+                    COUNT(*) FILTER (WHERE event_type = 'click_generate') AS clicked_generate,
+                    COUNT(*) FILTER (WHERE event_type = 'generate_success') AS generated,
+                    COUNT(*) FILTER (WHERE event_type = 'generate_failed') AS generate_failed
+                FROM user_events
+                GROUP BY user_id
+            ),
+            saved AS (
+                SELECT user_id, COUNT(*) AS n FROM tickets GROUP BY user_id
+            )
+            SELECT
+                ru.id AS user_id, ru.email, ru.created_at,
+                COALESCE(c.clicked_generate, 0) AS clicked_generate,
+                COALESCE(c.generated, 0) AS generated,
+                COALESCE(c.generate_failed, 0) AS generate_failed,
+                COALESCE(s.n, 0) AS saved,
+                COALESCE(tp.seconds, 0) AS seconds_on_site
+            FROM recent_users ru
+            LEFT JOIN clicks c ON c.user_id = ru.id
+            LEFT JOIN saved s ON s.user_id = ru.id
+            LEFT JOIN time_per_user tp ON tp.user_id = ru.id
+            ORDER BY ru.created_at DESC
+            """,
+            (days,),
+        )
+        return cur.fetchall()
 
 
 def get_user_by_id(user_id: int) -> Optional[dict]:
