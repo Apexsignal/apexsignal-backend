@@ -1119,6 +1119,21 @@ def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
 
     customer_id = db.get_unlimited_stripe_customer_id(user_id)
     if not customer_id:
+        # Appka neomezené generování umí aktivovat i mimo Stripe (redeem
+        # kód, /admin/set-unlimited) — tam appka žádného Stripe zákazníka
+        # nemá, takže portál nejde otevřít. Appka to musí odlišit od
+        # "nemáš to vůbec", jinak appka tvrdí opak toho, co appka sama
+        # ukazuje o řádek výš (unlimited_active).
+        if _has_active_unlimited(user_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Neomezené generování máš aktivní, ale ne přes placené Stripe "
+                    "předplatné (aktivováno ručně/kódem) — appka pro něj nemá co "
+                    "otevřít ve správě plateb. Platnost mu prostě doběhne sama, "
+                    "nic rušit nemusíš."
+                ),
+            )
         raise HTTPException(status_code=404, detail="Nemáš aktivní neomezené předplatné")
 
     try:
