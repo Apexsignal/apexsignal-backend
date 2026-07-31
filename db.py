@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import psycopg2
@@ -329,6 +329,15 @@ def ensure_schema() -> None:
     try:
         with get_cursor() as cur:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_until TIMESTAMPTZ")
+    except Exception:
+        pass
+
+    # Kódy appka dřív uměly připsat jen tokeny — teď appka umí kódem
+    # odemknout i neomezené generování na N dní (viz redeem_code níže).
+    # unlimited_days appka nechává NULL/0 u čistě tokenových kódů.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE redeem_codes ADD COLUMN IF NOT EXISTS unlimited_days INTEGER")
     except Exception:
         pass
 
@@ -912,11 +921,11 @@ def mark_stripe_event_if_new(event_id: str) -> bool:
         return cur.fetchone() is not None
 
 
-def create_redeem_code(code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "") -> None:
+def create_redeem_code(code: str, tokens: int, max_uses: int = 1, expires_at=None, note: str = "", unlimited_days: int = 0) -> None:
     with get_cursor() as cur:
         cur.execute(
-            "INSERT INTO redeem_codes (code, tokens, max_uses, expires_at, note) VALUES (%s, %s, %s, %s, %s)",
-            (code, tokens, max_uses, expires_at, note),
+            "INSERT INTO redeem_codes (code, tokens, max_uses, expires_at, note, unlimited_days) VALUES (%s, %s, %s, %s, %s, %s)",
+            (code, tokens, max_uses, expires_at, note, unlimited_days or None),
         )
 
 
@@ -925,8 +934,12 @@ def redeem_code(code: str, user_id: int) -> dict:
     Uplatní kód pro daného uživatele. Appka v jedné DB transakci: zamkne
     řádek kódu (FOR UPDATE, ať appka neuplatní stejný kód 2x souběžně nad
     limit), ověří platnost/limit/že ho tenhle uživatel ještě nepoužil,
-    připíše tokeny a zaloguje použití. Vrací {"ok": True, "tokens": N,
-    "balance": N} nebo {"ok": False, "error": "..."}.
+    připíše tokeny (i 0, u čistě "unlimited" kódů) a zaloguje použití.
+    Pokud má kód nastavené unlimited_days, appka navíc prodlouží/nastaví
+    unlimited_until — od PODZDĚJŠÍHO z (teď, appka appky stávající
+    unlimited_until), ať kód nikdy nezkrátí už běžící neomezený tarif.
+    Vrací {"ok": True, "tokens": N, "balance": N, "unlimited_until": ISO|None}
+    nebo {"ok": False, "error": "..."}.
     """
     with get_cursor() as cur:
         cur.execute("SELECT * FROM redeem_codes WHERE code = %s FOR UPDATE", (code,))
@@ -960,7 +973,20 @@ def redeem_code(code: str, user_id: int) -> dict:
             "INSERT INTO token_transactions (user_id, amount, reason) VALUES (%s, %s, %s)",
             (user_id, row["tokens"], f"REDEEM_CODE:{code}"),
         )
-        return {"ok": True, "tokens": row["tokens"], "balance": new_balance}
+
+        new_unlimited_until = None
+        if row.get("unlimited_days"):
+            cur.execute("SELECT unlimited_until FROM users WHERE id = %s FOR UPDATE", (user_id,))
+            current_until = cur.fetchone()["unlimited_until"]
+            now = datetime.now(timezone.utc)
+            base = max(current_until, now) if current_until and current_until > now else now
+            new_unlimited_until = base + timedelta(days=row["unlimited_days"])
+            cur.execute("UPDATE users SET unlimited_until = %s WHERE id = %s", (new_unlimited_until, user_id))
+
+        return {
+            "ok": True, "tokens": row["tokens"], "balance": new_balance,
+            "unlimited_until": new_unlimited_until.isoformat() if new_unlimited_until else None,
+        }
 
 
 def add_telegram_subscriber(chat_id: int, first_name: Optional[str]) -> bool:

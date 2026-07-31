@@ -1461,11 +1461,12 @@ def redeem_token_code(req: RedeemCodeRequest, user_id: int = Depends(get_current
 
 
 class CreateRedeemCodeRequest(BaseModel):
-    tokens: int
+    tokens: int = 0
     max_uses: int = 1
     expires_in_days: Optional[int] = None
     note: str = ""
     code: Optional[str] = None  # vlastní text kódu (např. "BOOST") — jinak appka vygeneruje náhodný
+    unlimited_days: int = 0  # >0 = kód navíc odemkne neomezené generování na N dní
 
 
 @app.post("/admin/tokens/create-code")
@@ -1479,8 +1480,12 @@ def create_redeem_code_endpoint(req: CreateRedeemCodeRequest, request: Request):
         datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
         if req.expires_in_days else None
     )
-    db.create_redeem_code(code, req.tokens, req.max_uses, expires_at, req.note)
-    return {"code": code, "tokens": req.tokens, "max_uses": req.max_uses, "expires_at": expires_at.isoformat() if expires_at else None}
+    db.create_redeem_code(code, req.tokens, req.max_uses, expires_at, req.note, req.unlimited_days)
+    return {
+        "code": code, "tokens": req.tokens, "max_uses": req.max_uses,
+        "unlimited_days": req.unlimited_days or None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+    }
 
 
 @app.post("/admin/create-channel-payment-link")
