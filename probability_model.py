@@ -161,7 +161,7 @@ class MarketType(str, Enum):
 # Které trhy dávají u kterého sportu smysl — používá to i frontend (mapování
 # nabízených chipů), aby se u tenisu nenabízel "Over gólů" apod.
 SPORT_MARKETS: dict[Sport, list[MarketType]] = {
-    Sport.FOOTBALL: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS, MarketType.OVER_CARDS],
+    Sport.FOOTBALL: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS],
     Sport.TENNIS: [MarketType.MATCH_WINNER, MarketType.OVER_GAMES, MarketType.OVER_ACES],
     Sport.HOCKEY: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.OVER_PENALTY_MINUTES],
     Sport.BASKETBALL: [MarketType.MATCH_WINNER, MarketType.OVER_POINTS, MarketType.OVER_THREES],
@@ -532,11 +532,14 @@ class MarketEvaluator:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
                 candidates.append(cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds))
 
-            if match.sport == Sport.FOOTBALL:
-                for threshold, odds in match.over_cards_odds.items():
-                    prob = prob_over(match.expected_cards, threshold)
-                    candidates.append(cls._candidate(match, MarketType.OVER_CARDS, f"over_{threshold}", prob, odds))
-            else:  # HOCKEY
+            # Karty appka přestala nabízet (rozhodnuto 2026-08-01) — žádný
+            # reálný tržní kurz appka na ně nikdy neměla (the-odds-api
+            # nevrací "under" stranu, takže appka neuměla de-vigovat), jely
+            # tak čistě na holém modelu bez pojistky. evaluate_selection_
+            # outcome a MARKET_LABELS appka pro OVER_CARDS nechává, ať se
+            # historické výběry v historii uživatelů dál vyhodnotí a
+            # zobrazí správně (transparentnost > úklid).
+            if match.sport == Sport.HOCKEY:
                 for threshold, odds in match.over_penalty_minutes_odds.items():
                     prob = prob_over(match.expected_penalty_minutes, threshold)
                     candidates.append(cls._candidate(match, MarketType.OVER_PENALTY_MINUTES, f"over_{threshold}", prob, odds))
