@@ -2262,6 +2262,41 @@ def admin_settle_all_pending(request: Request):
     return {"checked": checked, "updated": updated}
 
 
+@app.post("/admin/resettle-ticket")
+def admin_resettle_ticket(ticket_id: int, request: Request):
+    """
+    Přesettluje JEDEN konkrétní tiket bez ohledu na jeho aktuální status —
+    na rozdíl od /admin/settle-all-pending, co bere jen 'pending' tikety.
+    Appka tohle přidala k opravě tiketu 318 (viz /admin/verify-results,
+    2026-08-01): noha under_3.5 na Pafos vs. HNK Hajduk Split měla uložené
+    'lost', i když skutečné skóre 2:0 z ní dělá výhru — appka to nikdy
+    nepřesettlovala znovu, protože jednou uložené won/lost appka
+    automaticky nepřezkoumává. Použije stejnou logiku (_try_settle_ticket)
+    jako settle-all-pending, jen bez filtru na status.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    row = rows[0]
+    selection_ids = [s.get("id") for s in row.get("selections", [])]
+    old_status = row["status"]
+    new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+    if new_status is not None:
+        repo.set_ticket_status(ticket_id, new_status)
+
+    return {
+        "ticket_id": ticket_id,
+        "old_status": old_status,
+        "new_status": new_status if new_status is not None else old_status,
+        "selection_results": [s.get("result") for s in db.fetch_ticket_rows(ticket_id=ticket_id)[0].get("selections", [])],
+    }
+
+
 @app.post("/tickets/check-duplicates")
 def check_duplicate_matches(req: dict = Body(...), user_id: int = Depends(get_current_user_id)):
     """
