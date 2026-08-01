@@ -52,6 +52,14 @@ MAX_RECOMMENDED_STAKE_PCT = 5.0  # tvrdý strop, i kdyby Kelly počítal víc
 
 CORRELATION_DISCOUNT_PER_EXTRA_SAME_LEAGUE_PAIR = 0.95  # viz _apply_correlation_discount
 
+MAX_MODEL_MARKET_GAP = 0.08  # appka model_probability pro edge/vklad neumožní vzdálit
+                              # se od tržní pravděpodobnosti o víc než 8 pb (rozhodnuto
+                              # 2026-08-01 na reálných datech: under gólů s průměrným
+                              # rozdílem 11,3 pb mělo jen 44 % úspěšnost, over gólů
+                              # s rozdílem 5,0 pb mělo 73 % — čím dál model utíká od
+                              # trhu, tím spíš je model špatně, ne že appka "našla
+                              # hodnotu". Viz edge_capped_model_probability.
+
 
 def evaluate_selection_outcome(
     selection: "SelectionCandidate", home_goals: int, away_goals: int, total_cards: Optional[int] = None,
@@ -736,6 +744,17 @@ class MarketEvaluator:
         )
 
 
+def edge_capped_model_probability(selection: "SelectionCandidate") -> float:
+    """
+    model_probability pro účely edge/vkladu appka nenechá vzdálit se od
+    tržní pravděpodobnosti o víc než MAX_MODEL_MARKET_GAP — bez tržního
+    kurzu appka model neomezuje (nemá s čím srovnat).
+    """
+    if selection.market_probability is None:
+        return selection.model_probability
+    return min(selection.model_probability, selection.market_probability + MAX_MODEL_MARKET_GAP)
+
+
 class TicketGenerator:
     """
     Sestavuje kombinované tikety z poolu kandidátů (SelectionCandidate),
@@ -964,9 +983,16 @@ class TicketGenerator:
             # stovkou kandidátů a přesto "Tiket se nepovedl". Model_probability
             # je NAŠE vlastní víra (nezávislá na trhu) — teprve srovnání
             # NAŠÍ pravděpodobnosti s REÁLNÝM kurzem dává smysluplný edge.
+            #
+            # model_probability appka navíc stropuje proti tržní (viz
+            # edge_capped_model_probability, MAX_MODEL_MARKET_GAP) — čím
+            # dál model utíká od trhu, tím spíš je model špatně, ne že
+            # appka "našla hodnotu" (ověřeno na reálných datech 2026-08-01:
+            # under gólů s průměrným rozdílem 11,3 pb mělo jen 44 %
+            # úspěšnost, over gólů s rozdílem 5,0 pb mělo 73 %).
             edge_probability = 1.0
             for c in selected:
-                edge_probability *= c.model_probability
+                edge_probability *= edge_capped_model_probability(c)
             edge_probability = self._apply_correlation_discount(selected, edge_probability)
 
             recommended_stake_pct = round(
@@ -989,7 +1015,7 @@ class TicketGenerator:
                     v_running_odds *= c.odds
                 v_edge_probability = 1.0
                 for c in verified:
-                    v_edge_probability *= c.model_probability
+                    v_edge_probability *= edge_capped_model_probability(c)
                 v_edge_probability = self._apply_correlation_discount(verified, v_edge_probability)
                 edge_ok = kelly_stake_fraction(v_edge_probability, v_running_odds) > 0
             else:
