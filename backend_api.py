@@ -4008,19 +4008,31 @@ def admin_export_db(request: Request, tables: str = ""):
 def showcase_tickets(limit: int = 20):
     """
     Veřejná "výkladní skříň" appky — bez přihlášení appka vrátí poslední
-    VYHRANÉ tikety ze svého vlastního denního automatického generování
-    (DAILY_TICKETS_USER_ID, viz /admin/daily-tickets), NIKDY tikety
-    běžných uživatelů appky. Slouží jako sociální důkaz na hlavní
-    obrazovce appky pro nové návštěvníky.
+    VYHRANÉ tikety appčiných dvou vlastních automatických účtů
+    (DAILY_TICKETS_USER_ID a TRANSPARENCY_USER_ID), NIKDY tikety běžných
+    uživatelů appky. U obou účtů appka posílá skutečně uložený
+    actual_stake_amount/actual_profit_loss — u TRANSPARENCY_USER_ID je to
+    vždy pevných 2000 Kč (viz TRANSPARENCY_STAKE), u DAILY_TICKETS_USER_ID
+    částka náhodně vybraná z DAILY_TICKETS_STAKE_CHOICES (viz komentář
+    tam) — appka appka NEVYMÝŠLÍ číslo za běhu, appka jen posílá to, co už
+    má uložené v DB. Slouží jako sociální důkaz na hlavní obrazovce appky
+    pro nové návštěvníky.
     """
     limit = max(1, min(limit, 50))
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if not target_user_id_raw:
+    target_ids = [
+        int(v) for v in (
+            os.environ.get("DAILY_TICKETS_USER_ID"),
+            os.environ.get("TRANSPARENCY_USER_ID"),
+        )
+        if v
+    ]
+    if not target_ids:
         return {"tickets": []}
-    target_user_id = int(target_user_id_raw)
 
-    rows = repo.get_saved_tickets(target_user_id)
-    won_rows = [r for r in rows if r["status"] == "won"]
+    won_rows = []
+    for target_user_id in target_ids:
+        rows = repo.get_saved_tickets(target_user_id)
+        won_rows.extend(r for r in rows if r["status"] == "won")
     won_rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
     won_rows = won_rows[:limit]
 
