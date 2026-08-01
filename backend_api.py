@@ -33,7 +33,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
@@ -3436,25 +3436,18 @@ def public_transparency(limit: int = 100):
     return {"tickets": tickets, "stats": stats, "equity_curve": equity_curve}
 
 
-@app.get("/transparentni-ucet", response_class=HTMLResponse)
-def transparency_html(limit: int = 100):
+@app.get("/transparentni-ucet")
+def transparency_html():
     """
-    Veřejná stránka transparentního účtu — stejná data jako
-    /public/transparency, jen v HTML. Je to zároveň landing page:
-    odkaz z fóra, z Telegramu i z profilu na Instagramu vede sem.
-
-    Vykresluje se na serveru schválně — hlavní web je aplikace v
-    JavaScriptu a náhled jejího odkazu je všude prázdný, což u odkazu na
-    tipérskou službu vypadá podezřele. Tahle stránka ukáže čísla i
-    crawlerovi.
+    Appka tenhle veřejný přehled tiketů přestala zobrazovat (rozhodnutí
+    2026-08-01, appka teď vede prodejně přes hlavní stránku) — appka ale
+    nechává starou adresu jako REDIRECT, ne 404, protože na ni pořád vede
+    odkaz z fóra, Telegramu i z profilu na Instagramu, které appka
+    zpětně nemůže opravit. /public/transparency (JSON) i appčino denní
+    generování na TRANSPARENCY_USER_ID appka nechává běžet beze změny —
+    z něj appka pořád tahá reálné vyhrané tikety do /showcase/tickets.
     """
-    data = public_transparency(limit=limit)
-    return HTMLResponse(
-        content=transparency_page.render_page(
-            data["tickets"], data["stats"], data.get("equity_curve"), _app_equivalent_monthly_kc(),
-            app_generation_enabled=CLIENT_TICKET_GENERATION_ENABLED,
-        )
-    )
+    return RedirectResponse(url="https://apexsignal.cz/", status_code=302)
 
 
 def _app_equivalent_monthly_kc() -> int:
