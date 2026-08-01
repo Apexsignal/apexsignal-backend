@@ -60,7 +60,7 @@ MAX_MODEL_MARKET_GAP = 0.08  # appka model_probability pro edge/vklad neumožní
                               # trhu, tím spíš je model špatně, ne že appka "našla
                               # hodnotu". Viz edge_capped_model_probability.
 
-MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 3  # pod tímhle appka týmu nedůvěřuje
+MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedůvěřuje
                               # dost na to, aby nabídla over góly/BTTS (viz build_candidates)
                               # — s tak málo odehranými zápasy jede xG hlavně z
                               # LEAGUE_AVERAGE_GOALS_PER_TEAM (univerzální odhad), ne ze
@@ -70,6 +70,10 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 3  # pod tímhle appka týmu nedů
                               # reálná data: 9 z 11 proher BTTS a skoro všechny prohry
                               # over_1.5 padly přesně na tenhle typ zápasu). Výhra a under
                               # góly appka tímhle neomezuje — tam appka problém neviděla.
+                              # Původně appka nastavila 3, ale bez jistoty, kolik zápasů
+                              # konkrétní opakovaně prohrávající kandidát (Deportivo Maldonado
+                              # vs. Juventud, uruguayská Apertura) reálně měl, appka radši
+                              # utáhla na 6 — víc jistoty na úkor trochu menšího poolu.
 
 
 def evaluate_selection_outcome(
