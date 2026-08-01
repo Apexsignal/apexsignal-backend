@@ -60,6 +60,17 @@ MAX_MODEL_MARKET_GAP = 0.08  # appka model_probability pro edge/vklad neumožní
                               # trhu, tím spíš je model špatně, ne že appka "našla
                               # hodnotu". Viz edge_capped_model_probability.
 
+MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 3  # pod tímhle appka týmu nedůvěřuje
+                              # dost na to, aby nabídla over góly/BTTS (viz build_candidates)
+                              # — s tak málo odehranými zápasy jede xG hlavně z
+                              # LEAGUE_AVERAGE_GOALS_PER_TEAM (univerzální odhad), ne ze
+                              # skutečné formy, a přesně tahle situace appce dřív vyráběla
+                              # přehnaně sebevědomé (a prohrávající) tipy u týmů na začátku
+                              # sezóny / v evropských kvalifikacích (rozhodnuto 2026-08-01,
+                              # reálná data: 9 z 11 proher BTTS a skoro všechny prohry
+                              # over_1.5 padly přesně na tenhle typ zápasu). Výhra a under
+                              # góly appka tímhle neomezuje — tam appka problém neviděla.
+
 
 def evaluate_selection_outcome(
     selection: "SelectionCandidate", home_goals: int, away_goals: int, total_cards: Optional[int] = None,
@@ -509,9 +520,20 @@ class MarketEvaluator:
                     match, MarketType.MATCH_WINNER, favorite_side,
                     winner_probs[favorite_side], match.favorite_win_market_odds,
                 ))
+
+            # Viz MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS — over góly a
+            # BTTS appka nenabídne, dokud appka o obou týmech nemá dost
+            # odehraných zápasů v sezóně. Výhra a under góly zůstávají bez
+            # omezení.
+            has_reliable_form = (
+                match.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS
+                and match.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS
+            )
+
             for threshold, odds in match.over_goals_odds.items():
                 prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
-                candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
+                if has_reliable_form:
+                    candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
 
                 # Under góly appka dřív dopočítávala z 1/(1-prob) — tím
                 # srovnávala model sám se sebou, ne se skutečným trhem, takže
@@ -528,7 +550,7 @@ class MarketEvaluator:
                         market_key_type=MarketType.OVER_GOALS,
                     ))
 
-            if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None:
+            if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None and has_reliable_form:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
                 candidates.append(cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds))
 
