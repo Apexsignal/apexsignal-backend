@@ -348,11 +348,19 @@ class MatchInput:
     away_expected_goals: float = 0.0
     expected_cards: float = 0.0                # fotbal
     expected_penalty_minutes: float = 0.0      # hokej
-    # Kolik zápasů má tým v sezóně odehráno — slouží jen jako metadata pro
-    # transparentnost (appka sama o sobě se s nízkým vzorkem opatrnější chová
-    # už dřív, přes "shrinkage" v data_provider._estimate_expected_goals).
+    # Kolik zápasů má tým v AKTUÁLNÍ SEZÓNĚ odehráno — appka na start nové
+    # sezóny (kdy tohle je u VŠECH týmů nutně nízké, viz
+    # MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS) nespoléhá SAMOTNÉ, právě
+    # proto appka vedle toho nese i home/away_recent_form_available níž.
     home_games_played: int = 0
     away_games_played: int = 0
+    # Appka má formu týmu i z posledních zápasů NAPŘÍČ sezónami (poslední
+    # dokončené zápasy, ne jen ty v aktuální sezóně — viz get_recent_form/
+    # adapt_recent_form_goals) — na začátku nové sezóny je tohle appčin
+    # jediný skutečný zdroj formy, protože games_played výše je skoro u
+    # všech týmů blízko nule. True = appka reálná (ne None) data dostala.
+    home_recent_form_available: bool = False
+    away_recent_form_available: bool = False
     # Jméno rozhodčího (API-Football ho vrací zadarmo u každého zápasu).
     # Zatím se nepoužívá k úpravě pravděpodobnosti karet — na to chybí
     # historická data (průměr karet per rozhodčí), appka jen jméno zatím nese
@@ -526,13 +534,27 @@ class MarketEvaluator:
                 ))
 
             # Viz MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS — over góly a
-            # BTTS appka nenabídne, dokud appka o obou týmech nemá dost
-            # odehraných zápasů v sezóně. Výhra a under góly zůstávají bez
-            # omezení.
-            has_reliable_form = (
+            # BTTS appka nenabídne, dokud o týmu nemá SPOLEHLIVÝ zdroj formy:
+            # buď dost odehraných zápasů v AKTUÁLNÍ sezóně, NEBO (běžnější
+            # případ) formu z posledních zápasů napříč sezónami (viz
+            # home/away_recent_form_available). Bez týhle druhé podmínky by
+            # appka na začátku každé nové sezóny přestala nabízet over
+            # góly/BTTS prakticky VŠEM týmům ve VŠECH ligách najednou —
+            # games_played v aktuální sezóně je tou dobou nutně nízké úplně
+            # u každého, i u Bayernu (nahlásil uživatel 2026-08-01, ověřeno
+            # v kódu — get_recent_form/adapt_recent_form_goals bere posledních
+            # 10 DOKONČENÝCH zápasů bez ohledu na sezónu, takže tenhle zdroj
+            # formy appce zůstává i v prvním kole). Výhra a under góly appka
+            # tímhle vůbec neomezuje.
+            home_reliable = (
                 match.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS
-                and match.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS
+                or match.home_recent_form_available
             )
+            away_reliable = (
+                match.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS
+                or match.away_recent_form_available
+            )
+            has_reliable_form = home_reliable and away_reliable
 
             for threshold, odds in match.over_goals_odds.items():
                 prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)

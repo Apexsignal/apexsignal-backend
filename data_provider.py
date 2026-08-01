@@ -203,6 +203,8 @@ def normalize_to_match_input(
         expected_cards=expected_cards,
         home_games_played=home_stats.get("games_played", 0),
         away_games_played=away_stats.get("games_played", 0),
+        home_recent_form_available=home_recent_form is not None,
+        away_recent_form_available=away_recent_form is not None,
         referee=fixture.get("referee"),
         weather_wind_kmh=(weather or {}).get("wind_speed_kmh"),
         weather_precipitation_mm=(weather or {}).get("precipitation_mm"),
