@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
-    MarketEvaluator,
+    MarketEvaluator, SPORT_MARKETS,
 )
 import data_provider
 import ai_reviewer
@@ -2056,6 +2056,18 @@ def get_generate_progress(request_id: str):
     return {"known": True, "done": entry["done"], "total": entry["total"]}
 
 
+def _all_markets_for_sports(sports: list[Sport]) -> list[MarketType]:
+    """Sjednocení všech trhů, co appka pro dané sporty vůbec zná (viz
+    SPORT_MARKETS) — appka tohle použije jako poslední záchrannou síť
+    při generování, když ani širší časové okno nestačí (viz níž)."""
+    seen: list[MarketType] = []
+    for sport in sports:
+        for market in SPORT_MARKETS.get(sport, []):
+            if market not in seen:
+                seen.append(market)
+    return seen
+
+
 @app.post("/tickets/generate", response_model=TicketPairResponse)
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
     _require_generation_enabled(user_id)
@@ -2112,6 +2124,27 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
                     f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
                     f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
                 )
+            else:
+                # I širší okno nestačilo — poslední záchranná síť je zkusit
+                # VŠECHNY trhy pro daný sport, ne jen ty, co si uživatel
+                # vybral (typicky "Výhra + Over gólů + Oba dají gól" bez
+                # "Under gólů" — a zrovna Under góly bývá tržně nejsilnější
+                # kandidát). Appka na to nemusí stahovat nic navíc, širší
+                # zápasy už má obohacené z kroku výš.
+                all_markets = _all_markets_for_sports(req.sports)
+                if set(all_markets) != set(req.market_types):
+                    markets_result = ticket_generator.generate(
+                        all_wider_matches, req.risk_level, req.sports, all_markets, wider_days,
+                        pool_filter=_pool_filter_for_risk(req.risk_level),
+                    )
+                    if markets_result["safe"] is not None:
+                        result = markets_result
+                        horizon_note = (
+                            f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                            f"{'den' if req.time_frame_days == 1 else 'dny'}) a zvolených trzích nenašla žádnou "
+                            f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly) — "
+                            f"nabízí zápasy až za {wider_days} dní."
+                        )
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
@@ -2169,6 +2202,23 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
                     f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
                     f"důvěrou, tak nabízí nejbližší dostupnou možnost — zápasy až za {wider_days} dní."
                 )
+            else:
+                # Viz stejná poznámka v generate_tickets — poslední záchranná
+                # síť je zkusit všechny trhy pro daný sport, ne jen zvolené.
+                all_markets = _all_markets_for_sports(req.sports)
+                if set(all_markets) != set(req.market_types):
+                    markets_result = ticket_generator.regenerate(
+                        all_wider_matches, req.risk_level, req.sports, all_markets, wider_days, list(previous_ids),
+                        pool_filter=_pool_filter_for_risk(req.risk_level),
+                    )
+                    if markets_result["safe"] is not None:
+                        result = markets_result
+                        horizon_note = (
+                            f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                            f"{'den' if req.time_frame_days == 1 else 'dny'}) a zvolených trzích nenašla žádnou "
+                            f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly) — "
+                            f"nabízí zápasy až za {wider_days} dní."
+                        )
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
