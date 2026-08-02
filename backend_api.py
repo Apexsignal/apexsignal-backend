@@ -260,6 +260,12 @@ def register(req: RegisterRequest, request: Request):
     user_id = db.create_user(req.email, auth.hash_password(req.password))
     rate_limiter.record_success(req.email, client_ip)
     try:
+        db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma)")
+    except Exception as e:
+        # Appka radši nechá registraci projít bez dárku, než aby kvůli
+        # tomuhle shodila celé přihlášení novému uživateli.
+        print(f"[register] Nepodařilo se přidat zkušební tokeny: {e}")
+    try:
         email_service.send_welcome_email(req.email)
     except Exception as e:
         print(f"[register] Uvítací e-mail se nepodařilo odeslat: {e}")
@@ -316,6 +322,10 @@ def google_auth(req: GoogleAuthRequest):
         random_password = secrets.token_urlsafe(32)
         user_id = db.create_user(email, auth.hash_password(random_password))
         is_new_user = True
+        try:
+            db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma)")
+        except Exception as e:
+            print(f"[google_auth] Nepodařilo se přidat zkušební tokeny: {e}")
         try:
             email_service.send_welcome_email(email)
         except Exception as e:
@@ -901,6 +911,14 @@ ticket_generator = TicketGenerator()
 # =====================================================================
 TOKEN_KC_VALUE = 20  # 1 token = 20 Kč — appka to appce i frontendu drží na jednom místě
 TOKEN_COSTS = {"kratky": 10, "stredni": 15}  # 200 Kč / 300 Kč při TOKEN_KC_VALUE=20 — appka BOOST přestala nabízet úplně
+
+# Každý nový účet dostane přesně tolik tokenů, kolik appka strhne za JEDEN
+# krátký tiket (viz TOKEN_COSTS["kratky"]) — appka tak novému uživateli
+# nechá jedno generování vyzkoušet zdarma, než se rozhodne platit
+# (tokeny/kanál/Founder). Fixní číslo místo TOKEN_COSTS["kratky"] přímo by
+# appce mohlo tiše rozjet zkušební dárek, kdyby se cena krátkého tiketu
+# někdy změnila — appka to chce takhle svázané schválně.
+FREE_TRIAL_TOKENS = TOKEN_COSTS["kratky"]
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
