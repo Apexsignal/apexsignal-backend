@@ -164,6 +164,19 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     created_at TIMESTAMP DEFAULT now()
 );
 
+-- Stejný vzor jako password_reset_tokens — appka tímhle ověřuje, že
+-- e-mail zadaný při registraci reálně existuje a uživatel na něj má
+-- přístup, PŘED tím, než mu připíše zkušební tokeny zdarma. Bez tohohle
+-- šlo dokola zakládat nové účty s vymyšlenými e-maily jen kvůli
+-- opakovanému zkušebnímu tiketu.
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    token VARCHAR(64) PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP DEFAULT now()
+);
+
 -- Lidé, co appce napsali /start na Telegramu — appka jim pak denně
 -- posílá 1 kratky + 1 stredni tiket (a v pátek navíc boost), viz
 -- run_daily_tickets. chat_id appka zjistí automaticky z webhooku,
@@ -371,6 +384,15 @@ def ensure_schema() -> None:
     try:
         with get_cursor() as cur:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generations_count INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+
+    # Bez tohohle appka nedokáže rozlišit "e-mail reálně existuje a
+    # uživatel na něj klikl" od "kdokoliv zadal cokoliv při registraci" —
+    # klíčové proti opakovanému zakládání účtů jen kvůli zkušebním tokenům.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false")
     except Exception:
         pass
 
@@ -658,6 +680,39 @@ def consume_password_reset_token(token: str) -> Optional[int]:
             return None
         cur.execute("UPDATE password_reset_tokens SET used = true WHERE token = %s", (token,))
         return row["user_id"]
+
+
+def create_email_verification_token(token: str, user_id: int, expires_at) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token, user_id, expires_at),
+        )
+
+
+def consume_email_verification_token(token: str) -> Optional[int]:
+    """Stejná logika jako consume_password_reset_token — appka token
+    ověří a rovnou označí jako použitý v jedné transakci se zamčením
+    řádku, ať nejde stejný odkaz uplatnit dvakrát souběžně."""
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM email_verification_tokens WHERE token = %s FOR UPDATE", (token,))
+        row = cur.fetchone()
+        if row is None or row["used"] or row["expires_at"] < datetime.now():
+            return None
+        cur.execute("UPDATE email_verification_tokens SET used = true WHERE token = %s", (token,))
+        return row["user_id"]
+
+
+def set_email_verified(user_id: int) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE users SET email_verified = true WHERE id = %s", (user_id,))
+
+
+def is_email_verified(user_id: int) -> bool:
+    with get_cursor() as cur:
+        cur.execute("SELECT email_verified FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return bool(row and row["email_verified"])
 
 
 def has_ticket_since(user_id: int, ticket_type: str, since) -> bool:

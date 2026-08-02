@@ -208,6 +208,10 @@ class RegisterRequest(BaseModel):
         return v
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -259,18 +263,43 @@ def register(req: RegisterRequest, request: Request):
         raise HTTPException(status_code=409, detail="Tenhle e-mail už je zaregistrovaný")
     user_id = db.create_user(req.email, auth.hash_password(req.password))
     rate_limiter.record_success(req.email, client_ip)
+
+    # Zkušební tokeny appka teď dá až PO ověření e-mailu (viz
+    # /auth/verify-email) — jinak šlo dokola zakládat účty s vymyšlenými
+    # e-maily jen kvůli opakovanému zkušebnímu tiketu zdarma. Účet appka
+    # založí a přihlásí hned (appka nechce novému uživateli blokovat
+    # přihlášení), jen generování zůstane bez tokenů, dokud e-mail
+    # nepotvrdí.
     try:
-        db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma)")
+        verify_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
+        db.create_email_verification_token(verify_token, user_id, expires_at)
+        frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal.cz")
+        verify_link = f"{frontend_url}/app/?verify_email={verify_token}"
+        email_service.send_verification_email(req.email, verify_link)
     except Exception as e:
-        # Appka radši nechá registraci projít bez dárku, než aby kvůli
-        # tomuhle shodila celé přihlášení novému uživateli.
-        print(f"[register] Nepodařilo se přidat zkušební tokeny: {e}")
-    try:
-        email_service.send_welcome_email(req.email)
-    except Exception as e:
-        print(f"[register] Uvítací e-mail se nepodařilo odeslat: {e}")
+        print(f"[register] Ověřovací e-mail se nepodařilo odeslat: {e}")
+
     _notify_owner_new_registration(req.email, "e-mail")
     return AuthResponse(token=auth.create_token(user_id), user_id=user_id, email=req.email, is_new_user=True)
+
+
+@app.post("/auth/verify-email")
+def verify_email(req: VerifyEmailRequest):
+    user_id = db.consume_email_verification_token(req.token)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Odkaz na potvrzení e-mailu je neplatný nebo vypršel")
+    already_verified = db.is_email_verified(user_id)
+    db.set_email_verified(user_id)
+    if not already_verified:
+        # Zkušební tokeny appka připíše až tady, přesně jednou — token je
+        # jednorázový (consume_email_verification_token ho hned označí
+        # jako použitý), takže appka nemůže omylem připsat dárek dvakrát.
+        try:
+            db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma, e-mail ověřen)")
+        except Exception as e:
+            print(f"[verify_email] Nepodařilo se přidat zkušební tokeny: {e}")
+    return {"status": "E-mail potvrzen", "free_tokens_granted": not already_verified}
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -322,10 +351,17 @@ def google_auth(req: GoogleAuthRequest):
         random_password = secrets.token_urlsafe(32)
         user_id = db.create_user(email, auth.hash_password(random_password))
         is_new_user = True
-        try:
-            db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma)")
-        except Exception as e:
-            print(f"[google_auth] Nepodařilo se přidat zkušební tokeny: {e}")
+        # Google appce v idinfo posílá vlastní "email_verified" příznak —
+        # appka mu věří (appka o tomhle tokenu už výš ověřila podpis i
+        # cílového klienta), takže tu appka nepotřebuje appky vlastní
+        # ověřovací e-mail: Google účet je ověřený hned, appka rovnou
+        # připíše zkušební tokeny.
+        if idinfo.get("email_verified"):
+            db.set_email_verified(user_id)
+            try:
+                db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma, Google účet)")
+            except Exception as e:
+                print(f"[google_auth] Nepodařilo se přidat zkušební tokeny: {e}")
         try:
             email_service.send_welcome_email(email)
         except Exception as e:
