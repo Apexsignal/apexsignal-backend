@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
-    MarketEvaluator, SPORT_MARKETS,
+    MarketEvaluator, SPORT_MARKETS, MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS,
 )
 import data_provider
 import ai_reviewer
@@ -3678,11 +3678,27 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
             for c in pool:
                 candidates_by_market_65[c.market_type.value] = candidates_by_market_65.get(c.market_type.value, 0) + 1
 
+    # Dočasná diagnostika (viz nahlášený "appka nic nevygenerovala") —
+    # kolik zápasů má appka spolehlivou formu (games_played>=6 NEBO
+    # home/away_recent_form_available) a kolik jich bez ní zůstává
+    # zavřených pro over góly/BTTS.
+    reliable_form_count = 0
+    blocked_by_form_count = 0
+    for m in matches:
+        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
+        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
+        if home_reliable and away_reliable:
+            reliable_form_count += 1
+        else:
+            blocked_by_form_count += 1
+
     return {
         "time_frame_days": time_frame_days,
         "fixtures_fetched": len(matches),
         "candidates_by_threshold": candidates_by_threshold,
         "candidates_by_market_at_65pct": candidates_by_market_65,
+        "reliable_form_count": reliable_form_count,
+        "blocked_by_form_count": blocked_by_form_count,
     }
 
 
