@@ -1030,6 +1030,7 @@ def get_token_prices():
         "max_custom_tokens": MAX_CUSTOM_TOKENS,
         "channel_price_kc": CHANNEL_PRICE_KC,
         "channel_payment_link_url": os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip(),
+        "unlimited_plans_kc": UNLIMITED_GENERATION_PLANS,
     }
 
 
@@ -1072,26 +1073,58 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
     return {"checkout_url": session.url}
 
 
-UNLIMITED_GENERATION_PRICE_KC = 9900
 UNLIMITED_GENERATION_DAILY_CAP = 10
+
+# "Founder" tarif — stejné neomezené generování, ale s cenovou škálou podle
+# délky předplatného (delší závazek = nižší cena/měsíc). 1 měsíc je i
+# nadále dostupný jako běžná self-serve cena, 3/6/12 měsíců appka nabízí
+# hlavně lidem, co appku uzavřou po prodejním hovoru (viz zadání founder
+# tier). Klíč = počet měsíců v jednom fakturačním cyklu, hodnota = celková
+# cena v Kč za CELÉ období (ne za měsíc).
+UNLIMITED_GENERATION_PLANS: dict[int, int] = {
+    1: 9900,
+    3: 26700,
+    6: 47400,
+    12: 82800,
+}
+
+
+class UnlimitedCheckoutRequest(BaseModel):
+    months: int = 1
+
+    @field_validator("months")
+    @classmethod
+    def validate_months(cls, v: int) -> int:
+        if v not in UNLIMITED_GENERATION_PLANS:
+            raise ValueError(f"Neplatná délka předplatného, appka umí jen: {sorted(UNLIMITED_GENERATION_PLANS)}")
+        return v
 
 
 @app.post("/payments/create-unlimited-checkout-session")
-def create_unlimited_checkout_session(user_id: int = Depends(get_current_user_id)):
+def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: int = Depends(get_current_user_id)):
     """Na rozdíl od nákupu tokenů tady appka záměrně nevolá
     _require_generation_enabled — tenhle nákup je přesně to, co má
     generování uživateli odemknout, takže by ho nemělo dávat smysl
     podmiňovat tím, že generování je už odemčené.
 
     mode="subscription" (ne jednorázová platba) — Stripe strhává platbu
-    sám každý měsíc. Datum konce appka nenastavuje napevno na +30 dní,
-    ale prodlužuje ho webhook (checkout.session.completed /
-    invoice.payment_succeeded) podle skutečně zaplaceného období."""
+    sám podle `interval_count` (1/3/6/12 měsíců). Datum konce appka
+    nenastavuje napevno na +N dní, ale prodlužuje ho webhook
+    (checkout.session.completed / invoice.payment_succeeded) podle
+    skutečně zaplaceného období (`current_period_end`) — díky tomu appka
+    nemusí nijak zvlášť ošetřovat delší cykly, webhook funguje beze změny."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
 
+    months = req.months
+    total_price_kc = UNLIMITED_GENERATION_PLANS[months]
+    product_name = (
+        "Neomezené generování na měsíc — ApexSignal" if months == 1
+        else f"Founder — neomezené generování na {months} měsíců — ApexSignal"
+    )
+
     frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
-    metadata = {"user_id": str(user_id), "unlimited_generation": "1"}
+    metadata = {"user_id": str(user_id), "unlimited_generation": "1", "months": str(months)}
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",
@@ -1099,9 +1132,9 @@ def create_unlimited_checkout_session(user_id: int = Depends(get_current_user_id
             line_items=[{
                 "price_data": {
                     "currency": "czk",
-                    "product_data": {"name": "Neomezené generování na měsíc — ApexSignal"},
-                    "unit_amount": UNLIMITED_GENERATION_PRICE_KC * 100,
-                    "recurring": {"interval": "month"},
+                    "product_data": {"name": product_name},
+                    "unit_amount": total_price_kc * 100,
+                    "recurring": {"interval": "month", "interval_count": months},
                 },
                 "quantity": 1,
             }],
