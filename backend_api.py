@@ -4131,14 +4131,15 @@ def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
 ALL_DB_TABLES = [
     "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
     "token_transactions", "redeem_codes", "redeem_code_uses",
-    "stripe_events", "password_reset_tokens", "telegram_subscribers",
+    "stripe_events", "password_reset_tokens", "email_verification_tokens", "telegram_subscribers",
 ]
 # api_cache (nacachované odpovědi z the-odds-api/API-Football) a
-# password_reset_tokens (krátkodobé, časově omezené) appka do výchozí
-# zálohy nezahrnuje — nejsou to reálná uživatelská data a jde o jedinou
-# tabulku appky, co bývá dost velká na to, aby export shodil web service
-# na Renderově free 512MB RAM limitu (OOM restart).
-DEFAULT_BACKUP_TABLES = [t for t in ALL_DB_TABLES if t not in ("api_cache", "password_reset_tokens")]
+# password_reset_tokens/email_verification_tokens (krátkodobé, časově
+# omezené) appka do výchozí zálohy nezahrnuje — nejsou to reálná
+# uživatelská data a jde o jedinou tabulku appky, co bývá dost velká na
+# to, aby export shodil web service na Renderově free 512MB RAM limitu
+# (OOM restart).
+DEFAULT_BACKUP_TABLES = [t for t in ALL_DB_TABLES if t not in ("api_cache", "password_reset_tokens", "email_verification_tokens")]
 
 
 @app.get("/admin/db-stats")
