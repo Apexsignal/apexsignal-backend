@@ -235,7 +235,8 @@ def normalize_to_match_input(
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.3  # rozumný univerzální odhad přes evropské ligy
 SHRINKAGE_PSEUDO_GAMES = 5  # kolik "fiktivních" zápasů váží ligový průměr vůči datům týmu
-RECENCY_BLEND_WEIGHT = 0.6  # váha posledních zápasů vs. sezónního průměru, když je forma dostupná
+RECENCY_BLEND_WEIGHT = 0.6  # váha posledních zápasů vs. sezónního průměru — ustálený stav (dost odehraných zápasů)
+RECENCY_BLEND_WEIGHT_MAX = 0.85  # strop váhy formy napříč sezónami, i při 0 odehraných zápasech téhle sezóny
 
 # ---------------------------------------------------------------------
 # Počasí — Open-Meteo (zdarma, bez API klíče, bez platební karty,
@@ -570,7 +571,19 @@ def _estimate_expected_goals(
     ) / (games_played + SHRINKAGE_PSEUDO_GAMES)
 
     if recency_weighted_avg is not None:
-        shrunk_avg = RECENCY_BLEND_WEIGHT * recency_weighted_avg + (1 - RECENCY_BLEND_WEIGHT) * shrunk_avg
+        # Na začátku sezóny (málo odehraných zápasů) appka dřív pořád
+        # vážila formu napříč sezónami pevným poměrem 60/40 — tím zbytečně
+        # ředila spolehlivý zdroj (recency_weighted_avg, appka ho má u
+        # skoro všech týmů) tím nespolehlivým (pár zápasů týhle sezóny,
+        # co appka navíc už samo o sobě stahuje k ligovému průměru přes
+        # shrinkage výše). Váha formy napříč sezónami proto teď roste,
+        # čím míň má tahle sezóna odehraných zápasů — a s přibývajícími
+        # zápasy se přirozeně vrací k ustálenému poměru RECENCY_BLEND_WEIGHT.
+        recency_weight = max(
+            RECENCY_BLEND_WEIGHT,
+            RECENCY_BLEND_WEIGHT_MAX - games_played * (RECENCY_BLEND_WEIGHT_MAX - RECENCY_BLEND_WEIGHT) / SHRINKAGE_PSEUDO_GAMES,
+        )
+        shrunk_avg = recency_weight * recency_weighted_avg + (1 - recency_weight) * shrunk_avg
 
     defense_factor = 1.0
     if opponent_stats is not None:
