@@ -158,3 +158,16 @@ def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     </p>
     """
     return send_email(to_email, "Obnovení hesla — ApexSignal", _wrap_html(inner))
+
+
+def send_verification_email(to_email: str, verify_link: str) -> bool:
+    inner = f"""
+    <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Díky za registraci v appce ApexSignal! Potvrď prosím svůj e-mail — hned potom ti připíšeme první krátký tiket zdarma na vyzkoušení.</p>
+    <p style="margin:24px 0;">
+      <a href="{verify_link}" style="background:#19E0C4;color:#0B0E14;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">Potvrdit e-mail</a>
+    </p>
+    <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
+      Odkaz je platný 24 hodin. Pokud sis účet nezakládal ty, tenhle e-mail jen ignoruj.
+    </p>
+    """
+    return send_email(to_email, "Potvrď e-mail — ApexSignal", _wrap_html(inner))
