@@ -198,6 +198,7 @@ def get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials] = De
 class RegisterRequest(BaseModel):
     email: str
     password: str
+    ref: Optional[str] = None  # doporučovací kód z ?ref= — appka ho appce pošle jen při registraci
 
     @field_validator("email")
     @classmethod
@@ -264,6 +265,17 @@ def register(req: RegisterRequest, request: Request):
     user_id = db.create_user(req.email, auth.hash_password(req.password))
     rate_limiter.record_success(req.email, client_ip)
 
+    # Doporučovací systém — appka referred_by nastaví jen TADY, při
+    # registraci, a napořád (viz db.set_referred_by). Neplatný/neznámý kód
+    # appka jen tiše ignoruje, ať appka registraci kvůli tomu nezablokuje.
+    if req.ref:
+        try:
+            referrer_id = db.get_user_id_by_referral_code(req.ref)
+            if referrer_id:
+                db.set_referred_by(user_id, referrer_id)
+        except Exception as e:
+            print(f"[register] Nepodařilo se přiřadit doporučitele ({req.ref}): {e}")
+
     # Zkušební tokeny appka teď dá až PO ověření e-mailu (viz
     # /auth/verify-email) — jinak šlo dokola zakládat účty s vymyšlenými
     # e-maily jen kvůli opakovanému zkušebnímu tiketu zdarma. Účet appka
@@ -300,6 +312,13 @@ def verify_email(req: VerifyEmailRequest):
         except Exception as e:
             print(f"[verify_email] Nepodařilo se přidat zkušební tokeny: {e}")
     return {"status": "E-mail potvrzen", "free_tokens_granted": not already_verified}
+
+
+@app.get("/referral/my-code")
+def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
+    code = db.get_or_create_referral_code(user_id)
+    frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal.cz")
+    return {"code": code, "link": f"{frontend_url}/app/?ref={code}"}
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -957,6 +976,14 @@ TOKEN_COSTS = {"kratky": 10, "stredni": 15}  # 200 Kč / 300 Kč při TOKEN_KC_V
 FREE_TRIAL_TOKENS = TOKEN_COSTS["kratky"]
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
+
+# Doporučovací systém — spouštěč je POUŽITÍ tokenů na první střední tiket,
+# ne proběhlá platba za tokeny (appka tím odměňuje reálné zapojení).
+# Pojmenované konstanty, ať appka jde ladit bez zásahu do logiky.
+REFERRAL_REFERRER_TOKENS = 25
+REFERRAL_REFERRED_BONUS_TOKENS = 10
+REFERRAL_TRIGGER_TICKET_TYPE = "stredni"
+REFERRAL_MAX_REWARDS_PER_MONTH = 10
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -1033,6 +1060,48 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
         )
 
 
+def _process_referral_reward(referred_user_id: int) -> None:
+    """
+    Appka tohle volá hned po odečtení tokenů za PRVNÍ střední tiket
+    doporučeného účtu. Běží jako best-effort — chyba tady nesmí shodit
+    samotné generování tiketu, appka jen zaloguje a jde dál.
+
+    Pojistky (musí projít VŠECHNY):
+      1) účet vůbec někoho doporučil (referred_by_user_id),
+      2) appka ho ještě neodměnila (referral_rewards.referred_user_id UNIQUE),
+      3) tohle je jeho úplně první UNLOCK_STREDNI (ne třetí, ne desátý),
+      4) doporučitel nemá tento měsíc už vyčerpaný strop odměn,
+      5) doporučený a doporučitel neplatí stejnou kartou (otisk karty).
+    """
+    try:
+        referrer_id = db.get_referred_by(referred_user_id)
+        if not referrer_id:
+            return
+        if db.has_referral_reward(referred_user_id):
+            return
+        if db.count_token_transactions_with_reason(referred_user_id, "UNLOCK_STREDNI") != 1:
+            return
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        if db.count_referral_rewards_for_referrer_since(referrer_id, since) >= REFERRAL_MAX_REWARDS_PER_MONTH:
+            print(f"[referral] Doporučitel {referrer_id} dosáhl měsíčního stropu odměn — nepřipisuji")
+            return
+        referred_fingerprints = db.get_card_fingerprints(referred_user_id)
+        referrer_fingerprints = db.get_card_fingerprints(referrer_id)
+        shared = referred_fingerprints & referrer_fingerprints
+        if shared:
+            print(f"[referral] Doporučený {referred_user_id} sdílí kartu s doporučitelem {referrer_id} — odměna zamítnuta")
+            return
+
+        db.create_referral_reward(
+            referred_user_id, referrer_id, REFERRAL_REFERRED_BONUS_TOKENS, REFERRAL_REFERRER_TOKENS,
+            next(iter(referred_fingerprints), None),
+        )
+        db.adjust_tokens(referred_user_id, REFERRAL_REFERRED_BONUS_TOKENS, "REFERRAL_BONUS_REFERRED")
+        db.adjust_tokens(referrer_id, REFERRAL_REFERRER_TOKENS, "REFERRAL_BONUS_REFERRER")
+    except Exception as e:
+        print(f"[referral] Zpracování odměny selhalo (referred_user_id={referred_user_id}): {e}")
+
+
 def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
     # Neomezený tarif appka nestrhává v tokenech — appka si tenhle pokus
     # už započítala do denního stropu v _check_token_balance.
@@ -1041,6 +1110,8 @@ def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
     cost = TOKEN_COSTS.get(ticket_type, 0)
     if cost > 0:
         db.adjust_tokens(user_id, -cost, f"UNLOCK_{ticket_type.upper()}")
+        if ticket_type == REFERRAL_TRIGGER_TICKET_TYPE:
+            _process_referral_reward(user_id)
 
 
 class RedeemCodeRequest(BaseModel):
@@ -1457,6 +1528,19 @@ async def stripe_webhook(request: Request):
             tokens = int(metadata.get("tokens", 0))
             if user_id and tokens:
                 db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
+                # Appka si otisk platební karty (ne číslo) uloží kvůli
+                # doporučovacímu systému — appka tak pozná sdílenou kartu
+                # mezi doporučeným a doporučitelem, i na různé e-maily.
+                # Best-effort: chyba tady nesmí shodit připsání tokenů výš.
+                try:
+                    pi_id = obj.get("payment_intent")
+                    if pi_id:
+                        pi = stripe.PaymentIntent.retrieve(pi_id, expand=["payment_method"])
+                        pm = pi.get("payment_method")
+                        fingerprint = (pm.get("card") or {}).get("fingerprint") if isinstance(pm, dict) else None
+                        db.record_card_fingerprint(user_id, fingerprint)
+                except Exception as e:
+                    print(f"[stripe] Nepodařilo se zaznamenat otisk karty (doporučovací pojistka): {e}")
 
     elif event_type.startswith("customer.subscription."):
         sub_metadata = obj.get("metadata") or {}
@@ -4165,6 +4249,7 @@ ALL_DB_TABLES = [
     "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
     "token_transactions", "redeem_codes", "redeem_code_uses",
     "stripe_events", "password_reset_tokens", "email_verification_tokens", "telegram_subscribers",
+    "referral_rewards", "user_card_fingerprints",
 ]
 # api_cache (nacachované odpovědi z the-odds-api/API-Football) a
 # password_reset_tokens/email_verification_tokens (krátkodobé, časově

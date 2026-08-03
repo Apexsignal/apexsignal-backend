@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -399,6 +400,61 @@ def ensure_schema() -> None:
     try:
         with get_cursor() as cur:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_generations_date DATE")
+    except Exception:
+        pass
+
+    # Doporučovací systém — kód appka generuje líně (až při první potřebě,
+    # ne při registraci), referred_by appka nastaví JEDNOU při registraci
+    # a napořád (viz set_referred_by), aby ho pozdější ?ref= odkaz nemohl
+    # přepsat.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(16) UNIQUE")
+    except Exception:
+        pass
+
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id INTEGER REFERENCES users(id)")
+    except Exception:
+        pass
+
+    # UNIQUE na referred_user_id = appka nemůže odměnit stejný doporučený
+    # účet dvakrát, ani omylem (viz _process_referral_reward).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS referral_rewards (
+                    id SERIAL PRIMARY KEY,
+                    referred_user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    referred_tokens INTEGER NOT NULL,
+                    referrer_tokens INTEGER NOT NULL,
+                    card_fingerprint VARCHAR(64),
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+
+    # Appka si sem loguje otisk platební karty (ne číslo karty) u KAŽDÉHO
+    # nákupu tokenů — díky tomu appka umí u doporučovacího systému poznat,
+    # že doporučený a doporučitel platí stejnou kartou, i kdyby měli různé
+    # e-maily/účty (viz _process_referral_reward).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_card_fingerprints (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    fingerprint VARCHAR(64) NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    PRIMARY KEY (user_id, fingerprint)
+                )
+                """
+            )
     except Exception:
         pass
 
@@ -1029,6 +1085,133 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
             (user_id, amount, reason),
         )
         return new_balance
+
+
+def count_token_transactions_with_reason(user_id: int, reason: str) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM token_transactions WHERE user_id = %s AND reason = %s",
+            (user_id, reason),
+        )
+        return cur.fetchone()["c"]
+
+
+# =====================================================================
+# Doporučovací systém (viz backend_api.py: _process_referral_reward)
+# =====================================================================
+_REFERRAL_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # bez 0/O a 1/I, ať se to nepřehazuje při přepisu
+
+
+def get_or_create_referral_code(user_id: int) -> str:
+    """
+    Appka kód generuje líně (až při první potřebě), ne rovnou při
+    registraci — drtivá většina účtů si o něj nikdy nepožádá. Kolizi
+    appka řeší zkusit-znovu, ne appka to nikdy needituje ručně.
+    """
+    with get_cursor() as cur:
+        cur.execute("SELECT referral_code FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if row and row["referral_code"]:
+            return row["referral_code"]
+
+    for _ in range(10):
+        code = "".join(secrets.choice(_REFERRAL_CODE_ALPHABET) for _ in range(6))
+        try:
+            with get_cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET referral_code = %s WHERE id = %s AND referral_code IS NULL RETURNING referral_code",
+                    (code, user_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row["referral_code"]
+        except Exception:
+            continue  # kolize kódu (UNIQUE), appka zkusí jiný náhodný kód
+    raise RuntimeError("Appce se nepodařilo vygenerovat unikátní referral kód")
+
+
+def get_user_id_by_referral_code(code: str) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE referral_code = %s", (code.strip().upper(),))
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
+def set_referred_by(user_id: int, referrer_user_id: int) -> None:
+    """
+    Appka tohle volá jen PŘI REGISTRACI nového účtu — podmínka
+    `referred_by_user_id IS NULL` je tu jako pojistka, appka referred_by
+    nikdy nepřepisuje podruhé (i kdyby se stejná registrace omylem
+    zavolala dvakrát).
+    """
+    if referrer_user_id == user_id:
+        return
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE users SET referred_by_user_id = %s WHERE id = %s AND referred_by_user_id IS NULL",
+            (referrer_user_id, user_id),
+        )
+
+
+def get_referred_by(user_id: int) -> Optional[int]:
+    with get_cursor() as cur:
+        cur.execute("SELECT referred_by_user_id FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["referred_by_user_id"] if row else None
+
+
+def has_referral_reward(referred_user_id: int) -> bool:
+    with get_cursor() as cur:
+        cur.execute("SELECT 1 FROM referral_rewards WHERE referred_user_id = %s", (referred_user_id,))
+        return cur.fetchone() is not None
+
+
+def count_referral_rewards_for_referrer_since(referrer_user_id: int, since: datetime) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM referral_rewards WHERE referrer_user_id = %s AND created_at >= %s",
+            (referrer_user_id, since),
+        )
+        return cur.fetchone()["c"]
+
+
+def create_referral_reward(
+    referred_user_id: int, referrer_user_id: int, referred_tokens: int, referrer_tokens: int,
+    card_fingerprint: Optional[str],
+) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO referral_rewards
+                (referred_user_id, referrer_user_id, referred_tokens, referrer_tokens, card_fingerprint)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (referred_user_id) DO NOTHING
+            """,
+            (referred_user_id, referrer_user_id, referred_tokens, referrer_tokens, card_fingerprint),
+        )
+
+
+def record_card_fingerprint(user_id: int, fingerprint: Optional[str]) -> None:
+    """Appka appce jen loguje otisky karet, co appka kdy viděla u nákupu
+    tokenů — appka to nepoužívá k ničemu jinému než k detekci sdílené
+    karty mezi doporučeným a doporučitelem."""
+    if not fingerprint:
+        return
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_card_fingerprints (user_id, fingerprint)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id, fingerprint) DO NOTHING
+            """,
+            (user_id, fingerprint),
+        )
+
+
+def get_card_fingerprints(user_id: int) -> set[str]:
+    with get_cursor() as cur:
+        cur.execute("SELECT fingerprint FROM user_card_fingerprints WHERE user_id = %s", (user_id,))
+        return {r["fingerprint"] for r in cur.fetchall()}
 
 
 # =====================================================================
