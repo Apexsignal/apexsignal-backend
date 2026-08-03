@@ -72,3 +72,16 @@ jobs:
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/settle-all-pending \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      # Appka dřív neměla žádné upozornění na selhání denního cronu — jediný
+      # způsob, jak se to appka dozvěděla, bylo si ručně všimnout v Actions
+      # záložce. Když selže KTERÝKOLIV krok výše, appka pošle zprávu rovnou
+      # na vlastní Telegram (backend má už uložený TELEGRAM_CHAT_ID/TOKEN,
+      # workflow tak nepotřebuje žádný nový secret navíc).
+      - name: Upozornit na Telegram, pokud něco výše selhalo
+        if: failure()
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"⚠️ Denní cron (daily-tickets.yml) dnes selhal. Zkontroluj GitHub Actions: https://github.com/Apexsignal/apexsignal-backend/actions/runs/${{ github.run_id }}\"}"

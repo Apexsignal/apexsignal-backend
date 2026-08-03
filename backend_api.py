@@ -2399,6 +2399,39 @@ def admin_settle_all_pending(request: Request):
     return {"checked": checked, "updated": updated}
 
 
+class AdminAlertRequest(BaseModel):
+    message: str
+
+
+@app.post("/admin/alert")
+def admin_alert(req: AdminAlertRequest, request: Request):
+    """
+    Appka dřív neměla ŽÁDNÉ upozornění, když denní cron (nebo cokoliv
+    jiného spouštěné přes GitHub Actions) selže — jediný způsob, jak se
+    to appka dozvěděla, bylo si to ručně všimnout v Actions záložce na
+    GitHubu. Tenhle endpoint appka volá z workflow kroku s `if: failure()`
+    — pošle zprávu appčinu vlastnímu Telegramu (TELEGRAM_CHAT_ID), appka
+    tak dostane push notifikaci prakticky okamžitě. Appka schválně
+    nevolá GitHubí API odsud (žádný token na to appka nemá) — appka
+    posílá jen text, který jí pošle volající (workflow).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        return {"status": "skipped", "reason": "TELEGRAM_BOT_TOKEN nebo TELEGRAM_CHAT_ID není nastavené"}
+
+    resp = requests.post(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data={"chat_id": chat_id, "text": req.message},
+        timeout=15,
+    )
+    return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
