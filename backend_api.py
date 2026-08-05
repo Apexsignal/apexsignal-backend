@@ -4445,7 +4445,10 @@ def generate_yield_test_result(job_id: str, request: Request):
 
 
 @app.get("/admin/test-odds-markets")
-def test_odds_markets(request: Request, sport_key: str = "soccer_epl", markets: str = "h2h,totals,double_chance,totals_h1"):
+def test_odds_markets(
+    request: Request, sport_key: str = "soccer_epl", markets: str = "h2h,totals,double_chance,totals_h1",
+    event_id: Optional[str] = None,
+):
     """
     Jednorázová diagnostika (2026-08-05) — appka zjišťuje, jestli
     the-odds-api pro evropské bookmakery (region eu) vůbec vrací
@@ -4455,6 +4458,11 @@ def test_odds_markets(request: Request, sport_key: str = "soccer_epl", markets: 
     že US sporty ano) — appka to radši ověří živě na jedné lize (pár
     kreditů), než aby stavěla dvojtip/poločas na datech, co appka
     nedostane. NIC neukládá, jen appce ukáže syrovou odpověď.
+
+    event_id appka nepovinně přidá — pak volá endpoint NA KONKRÉTNÍ zápas
+    (/events/{id}/odds), kde dokumentace tvrdí, že appka dostane přístup
+    ke VŠEM dostupným trhům (na rozdíl od hromadného /odds, který appka
+    zkusila jako první a dostala INVALID_MARKET).
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
@@ -4466,13 +4474,20 @@ def test_odds_markets(request: Request, sport_key: str = "soccer_epl", markets: 
         raise HTTPException(status_code=500, detail=str(e))
 
     import requests as _requests
+    url = (
+        f"{odds_provider.BASE_URL}/sports/{sport_key}/events/{event_id}/odds"
+        if event_id else f"{odds_provider.BASE_URL}/sports/{sport_key}/odds"
+    )
     resp = _requests.get(
-        f"{odds_provider.BASE_URL}/sports/{sport_key}/odds",
+        url,
         params={"apiKey": odds_provider.api_key, "regions": "eu", "markets": markets, "oddsFormat": "decimal"},
         timeout=15,
     )
     if not resp.ok:
         return {"status": resp.status_code, "detail": resp.text[:500]}
+
+    if event_id:
+        return resp.json()
 
     events = resp.json()
     market_key_counts: dict[str, int] = {}
