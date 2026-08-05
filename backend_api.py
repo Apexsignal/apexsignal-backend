@@ -2560,7 +2560,8 @@ def admin_win_loss_report(request: Request):
             stake = row.get("actual_stake_amount")
             if stake is None:
                 return 0.0
-            odds = row.get("actual_odds") or row["total_odds"]
+            stake = float(stake)
+            odds = float(row.get("actual_odds") or row["total_odds"])
             return round(stake * (odds - 1), 2) if row["status"] == "won" else round(-stake, 2)
 
         type_acc: dict[str, dict] = {}
