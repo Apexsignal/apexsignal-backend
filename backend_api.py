@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field, field_validator
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
     MarketEvaluator, SPORT_MARKETS, MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS,
+    edge_capped_model_probability, kelly_stake_fraction,
 )
 import data_provider
 import ai_reviewer
@@ -4575,6 +4576,58 @@ def test_odds_markets(
         "remaining_requests": resp.headers.get("x-requests-remaining"),
         "used_requests": resp.headers.get("x-requests-used"),
         "sample_event": sample_event,
+    }
+
+
+@app.get("/admin/edge-diagnostic")
+def edge_diagnostic(request: Request, time_frame_days: int = 5, min_prob: float = 0.65):
+    """
+    Jednorázová diagnostika (2026-08-05) — appka opakovaně vidí "Tiket se
+    nepovedl" i se stovkami kandidátů, appka to chce reálně vidět na
+    číslech, ne jen předpokládat "appka je opatrná". Vrátí pro každého
+    OVĚŘENÉHO kandidáta (má tržní kurz) appčin model_probability, tržní
+    market_probability, kurz appky pro staking a výsledný edge (kladný/
+    záporný, s kolika procenty). Řazeno od nejlepšího edge, appka vidí
+    hned, jestli je appka jen "těsně pod nulou" (marže bookmakera) nebo
+    appka reálně nikdy nemá šanci.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    pool = []
+    for m in matches:
+        pool.extend([
+            c for c in MarketEvaluator.build_candidates(m, min_prob=min_prob)
+            if c.market_type in DAILY_TICKETS_MARKETS
+        ])
+
+    verified = [c for c in pool if c.market_probability is not None]
+    rows = []
+    for c in verified:
+        edge_prob = edge_capped_model_probability(c)
+        kelly = kelly_stake_fraction(edge_prob, c.odds)
+        rows.append({
+            "match": f"{c.home_team} vs {c.away_team}",
+            "market": c.market_type.value, "selection": c.selection,
+            "model_probability": round(c.model_probability, 4),
+            "market_probability": round(c.market_probability, 4),
+            "edge_capped_model_probability": round(edge_prob, 4),
+            "odds": c.odds,
+            "implied_by_odds": round(1.0 / c.odds, 4),
+            "kelly_stake_fraction": round(kelly, 4),
+            "positive_edge": kelly > 0,
+        })
+    rows.sort(key=lambda r: r["kelly_stake_fraction"], reverse=True)
+
+    return {
+        "time_frame_days": time_frame_days,
+        "total_pool": len(pool),
+        "verified_with_market_odds": len(verified),
+        "positive_edge_count": sum(1 for r in rows if r["positive_edge"]),
+        "top_20_by_edge": rows[:20],
+        "bottom_5_by_edge": rows[-5:] if len(rows) >= 5 else rows,
     }
 
 
