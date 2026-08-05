@@ -4001,6 +4001,30 @@ def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
         _GENERATION_LOCKS["personal_tracking_daily_tickets"].release()
 
 
+class AdminDeleteAccountRequest(BaseModel):
+    email: str
+
+
+@app.post("/admin/delete-account")
+def admin_delete_account(req: AdminDeleteAccountRequest, request: Request):
+    """
+    Appka tímhle maže testovací/vlastní účty rovnou přes ADMIN_TASK_KEY,
+    bez nutnosti se přihlásit a znát heslo (na rozdíl od self-service
+    DELETE /account) — pro reálné platící uživatele appka tohle nemá
+    používat, jen pro appčiny vlastní testovací účty. Cascade smaže i
+    tikety/tokeny/transakce stejně jako db.delete_user.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"Účet {req.email} neexistuje")
+    db.delete_user(user["id"])
+    return {"status": "deleted", "email": req.email, "user_id": user["id"]}
+
+
 @app.post("/admin/personal-tracking-daily-tickets")
 def run_personal_tracking_daily_tickets(request: Request):
     """
