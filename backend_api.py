@@ -4001,6 +4001,33 @@ def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
         _GENERATION_LOCKS["personal_tracking_daily_tickets"].release()
 
 
+class AdminResendTicketTelegramRequest(BaseModel):
+    ticket_id: int
+    user_id: int
+
+
+@app.post("/admin/resend-ticket-telegram")
+def admin_resend_ticket_telegram(req: AdminResendTicketTelegramRequest, request: Request):
+    """
+    Appka tohle přidala kvůli tiketu #386 z /admin/personal-tracking-daily-tickets
+    — appka ho uložila do DB, ale proces appku hned poté OOM killnul (viz
+    oprava výše), takže se Telegram zpráva vůbec neodeslala. Appka tímhle
+    umí doposlat KONKRÉTNÍ už uložený tiket, beze změny stavu/vsazené
+    částky — jen znovu pošle Telegram zprávu.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    rows = repo.get_saved_tickets(req.user_id)
+    row = next((r for r in rows if r["ticket_id"] == req.ticket_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Tiket {req.ticket_id} pro user_id={req.user_id} nenalezen")
+
+    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(row["ticket"], req.ticket_id))
+    return {"status": "sent", "ticket_id": req.ticket_id}
+
+
 class AdminDeleteAccountRequest(BaseModel):
     email: str
 
