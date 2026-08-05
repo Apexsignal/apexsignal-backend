@@ -2527,6 +2527,120 @@ def backfill_results(user_id: int = Depends(get_current_user_id)):
     return {"backfilled": updated}
 
 
+@app.get("/admin/calibration-report")
+def admin_calibration_report(request: Request):
+    """
+    Appka tímhle appce ověří, jestli je model KALIBROVANÝ — když appka
+    řekne "70% šance", vyhrává to reálně kolem 70 %, nebo výrazně míň?
+    To je jiná otázka než syrová úspěšnost (tu appka řeší ve
+    /admin/win-loss-report) — appka tady bucketuje výběry podle
+    appkou odhadnuté pravděpodobnosti (model_probability) a porovná
+    to se skutečnou frekvencí výhry v tom koši. Appka navíc appce
+    ukáže trend posledních 30 dní vs. staršího období, ať appka pozná,
+    jestli se něco reálně zhoršuje, nebo appka jen poprvé měří.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        # Kalibrace: appka bucketuje po 5 procentních bodech podle
+        # model_probability v okamžiku generování (appka to ukládá na
+        # výběr, ne dopočítává zpětně).
+        cur.execute(
+            """
+            SELECT model_probability, result
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost') AND model_probability IS NOT NULL
+            """
+        )
+        calib_rows = cur.fetchall()
+
+        # Trend: appka porovná tikety vytvořené za posledních 30 dní
+        # proti starším, podle DATA VYTVOŘENÍ (ne vyhodnocení) — appka
+        # tak vidí, jestli je to zhoršující se model, nebo appka jen
+        # měří poprvé.
+        cur.execute(
+            """
+            SELECT
+                (created_at > now() - interval '30 days') AS recent,
+                status
+              FROM tickets
+             WHERE status IN ('won', 'lost')
+            """
+        )
+        trend_rows = cur.fetchall()
+
+        # Appka zvlášť vypíchne "oba dají gól" a "over_cards" — nejslabší
+        # trhy podle win-loss-report — appka je rozpadne podle appkou
+        # odhadnuté a tržní pravděpodobnosti, ať appka pozná, jestli appka
+        # měla k dispozici tržní kurz (spolehlivější) nebo jela naslepo
+        # jen na vlastním modelu.
+        cur.execute(
+            """
+            SELECT market_type, result,
+                   (market_probability IS NOT NULL) AS had_market_odds
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost') AND market_type IN ('btts', 'over_cards')
+            """
+        )
+        weak_market_rows = cur.fetchall()
+
+    # --- kalibrace ---
+    buckets: dict[int, dict] = {}
+    for row in calib_rows:
+        p = row["model_probability"]
+        if p is None:
+            continue
+        bucket = int(round(float(p) * 20)) * 5  # appka zaokrouhlí na nejbližších 5 %
+        bucket = max(0, min(100, bucket))
+        acc = buckets.setdefault(bucket, {"won": 0, "lost": 0})
+        acc[row["result"]] += 1
+    calibration = []
+    for bucket in sorted(buckets):
+        acc = buckets[bucket]
+        total = acc["won"] + acc["lost"]
+        actual_pct = round(acc["won"] / total * 100, 1) if total else 0.0
+        calibration.append({
+            "appka_odhaduje_pct": bucket,
+            "reálně_vyhrálo_pct": actual_pct,
+            "rozdíl_pct": round(actual_pct - bucket, 1),
+            "počet_výběrů": total,
+        })
+
+    # --- trend ---
+    recent = {"won": 0, "lost": 0}
+    older = {"won": 0, "lost": 0}
+    for row in trend_rows:
+        target = recent if row["recent"] else older
+        target[row["status"]] += 1
+
+    def _rate(d: dict) -> float:
+        total = d["won"] + d["lost"]
+        return round(d["won"] / total * 100, 1) if total else 0.0
+
+    # --- slabé trhy ---
+    weak: dict[str, dict] = {}
+    for row in weak_market_rows:
+        m = row["market_type"]
+        key = "s_tržním_kurzem" if row["had_market_odds"] else "jen_vlastní_model"
+        acc = weak.setdefault(m, {}).setdefault(key, {"won": 0, "lost": 0})
+        acc[row["result"]] += 1
+    weak_out = {}
+    for m, groups in weak.items():
+        weak_out[m] = {k: {**v, "win_rate_pct": _rate(v)} for k, v in groups.items()}
+
+    return {
+        "kalibrace_podle_koše": calibration,
+        "poznamka_kalibrace": "Pokud 'reálně_vyhrálo_pct' soustavně zaostává za 'appka_odhaduje_pct', model je PŘEHNANĚ SEBEJISTÝ — přeceňuje své šance.",
+        "trend": {
+            "poslednich_30_dni": {**recent, "win_rate_pct": _rate(recent)},
+            "starsi": {**older, "win_rate_pct": _rate(older)},
+        },
+        "slabe_trhy_btts_a_over_cards": weak_out,
+    }
+
+
 @app.get("/admin/win-loss-report")
 def admin_win_loss_report(request: Request):
     """
