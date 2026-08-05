@@ -1130,6 +1130,28 @@ class TicketGenerator:
     ) -> Optional[Ticket]:
         min_odds, max_odds = odds_range
 
+        # Appka tu nejdřív (2026-08-05) vyřadí ověřené kandidáty se
+        # SAMOTNÝMI záporným edge, ještě PŘED hledáním kombinace podle
+        # kurzu — _search_combo totiž hledá čistě podle kurzu (seřazeno
+        # podle pravděpodobnosti), takže si běžně vybere velké favority
+        # na výhru (vysoká pravděpodobnost, ale kvůli MODEL_HIGH_CONFIDENCE_CAP
+        # záporný edge) DŘÍV, než kvalitní kandidáty s nižší pravděpodobností
+        # ale kladným edge (góly kolem 65-75 %). Odebírání "nejhorší nohy" AŽ
+        # PO nalezení kombinace (viz níže) na tohle nestačilo — appka na
+        # reálných datech (2026-08-05, /admin/edge-diagnostic) ověřila, že
+        # i po týhle opravě appka pořád nesestavila tiket ze stovek
+        # kandidátů, protože _search_combo si znovu a znovu vybíral skoro
+        # STEJNOU (špatnou) kombinaci. Předfiltr je jednoduchý a spolehlivý:
+        # appka do vyhledávání kombinace vůbec nepustí kandidáta, co SÁM
+        # o sobě kazí edge — neověřené kandidáty (bez tržního kurzu) appka
+        # nechává být, jejich příspěvek k edge je z podstaty neutrální
+        # (viz require_positive_edge=False výjimka níže).
+        if require_positive_edge:
+            pool = [
+                c for c in pool
+                if c.market_probability is None or edge_capped_model_probability(c) * c.odds > 1.0
+            ]
+
         # Vždy řaď sestupně podle pravděpodobnosti — chceme nejjistější výběry
         ordered_pool = sorted(pool, key=lambda c: c.probability, reverse=True)
 
