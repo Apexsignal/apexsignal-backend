@@ -1232,8 +1232,22 @@ class TicketGenerator:
                     recommended_stake_pct=recommended_stake_pct,
                 )
 
-            weakest = min(verified, key=lambda c: c.probability)
-            working_pool = [c for c in working_pool if c is not weakest]
+            # Appka tu dřív odebírala "nejslabšího" podle SUROVÉ pravděpodobnosti
+            # (min(verified, key=probability)) — to ale odebíralo špatnou nohu.
+            # Velcí favorité na výhru mají vysokou tržní pravděpodobnost (appka
+            # jim ale kvůli MODEL_HIGH_CONFIDENCE_CAP nevěří tolik jako trh),
+            # takže mají ZÁPORNÝ příspěvek k edge, ale VYSOKOU probability —
+            # appka je tak nikdy neoznačila za "nejslabší" a nechala je v
+            # kombinaci, zatímco odebírala kvalitní kandidáty (góly s kladným
+            # edge, ale nižší pravděpodobností kolem 65-75 %). Appka na
+            # reálných datech 2026-08-05 ověřila (/admin/edge-diagnostic) —
+            # appka měla přes 19 kandidátů s kladným edge, ale tiket se
+            # přesto nikdy nesestavil. Appka teď odebírá nohu s NEJHORŠÍM
+            # PŘÍSPĚVKEM K EDGE (edge_capped_model_probability × kurz, čím
+            # níž pod 1.0, tím hůř), ne nejnižší pravděpodobností — přesně tu,
+            # co kombinovaný edge kazí nejvíc.
+            worst_edge = min(verified, key=lambda c: edge_capped_model_probability(c) * c.odds)
+            working_pool = [c for c in working_pool if c is not worst_edge]
 
         return None
 
