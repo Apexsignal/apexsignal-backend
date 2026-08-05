@@ -3502,6 +3502,7 @@ _GENERATION_LOCKS = {
     "transparency_daily_tickets": threading.Lock(),
     "test3_daily_tickets": threading.Lock(),
     "dvoves_daily_tickets": threading.Lock(),
+    "personal_tracking_daily_tickets": threading.Lock(),
 }
 
 
@@ -3871,6 +3872,114 @@ def run_test3_daily_tickets(request: Request):
         return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
     finally:
         _GENERATION_LOCKS["test3_daily_tickets"].release()
+
+
+PERSONAL_TRACKING_STAKE = 1000.0
+
+
+@app.post("/admin/personal-tracking-daily-tickets")
+def run_personal_tracking_daily_tickets(request: Request):
+    """
+    Appka na účtu PERSONAL_TRACKING_USER_ID (appkou majitele vlastní
+    osobní sledovací účet, oddělený od placeného kanálu i od
+    appky vlastních test/transparency účtů) denně vygeneruje 2 kratky +
+    1 stredni, na každý appka vsadí pevných 1000 Kč a POŠLE MU JE i na
+    Telegram (TELEGRAM_CHAT_ID) — na rozdíl od test3/transparency appka
+    tohle posílá appce majiteli přímo, appka to nenechává jen tiše uložené.
+    Když se appce nepovede vygenerovat všechny 3, appka o tom appce
+    majiteli pošle zvlášť upozornění (viz /admin/alert), ne appka to jen
+    tiše zaloguje.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["personal_tracking_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/personal-tracking-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="PERSONAL_TRACKING_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 2, 2), ("stredni", 50, 2, 1)]
+
+        results = []
+        saved_count = 0
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            saved_count += min(already_today, target_count)
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[personal-tracking-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, PERSONAL_TRACKING_STAKE, ticket.total_odds)
+                telegram_status = "skipped"
+                if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                    try:
+                        ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                        telegram_status = "sent"
+                    except Exception as e:
+                        telegram_status = f"error: {e}"
+                results.append({
+                    "type": label, "status": "saved", "ticket_id": ticket_id,
+                    "stake": PERSONAL_TRACKING_STAKE, "telegram": telegram_status,
+                })
+                saved_count += 1
+
+        # Appka chtěla 2 kratky + 1 stredni = 3 celkem. Ať appka pozná
+        # "málo nebo žádné" hned, ne až se na to appka majitel sám zeptá.
+        if saved_count < 3:
+            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            if chat_id and bot_token:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        data={
+                            "chat_id": chat_id,
+                            "text": (
+                                f"⚠️ Osobní sledovací tikety dnes appka vygenerovala jen {saved_count}/3 "
+                                f"(2 krátké + 1 střední). Zkontroluj /admin/personal-tracking-daily-tickets."
+                            ),
+                        },
+                        timeout=15,
+                    )
+                except Exception as e:
+                    print(f"[personal-tracking-daily-tickets] Upozornění na málo tiketů se nepodařilo poslat: {e}")
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "saved_count": saved_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["personal_tracking_daily_tickets"].release()
 
 
 @app.post("/admin/transparency-backfill-results")

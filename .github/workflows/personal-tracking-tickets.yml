@@ -1,0 +1,38 @@
+# Osobní sledovací tikety appky majitele (PERSONAL_TRACKING_USER_ID) —
+# oddělený účet od placeného kanálu (DAILY_TICKETS_USER_ID), od appky
+# vlastních test/transparency účtů i od d.voves účtu. Denně appka
+# vygeneruje 2× krátký + 1× střední, na každý appka vsadí pevných
+# 1000 Kč, a rovnou appka pošle majiteli na Telegram (TELEGRAM_CHAT_ID) —
+# appka tohle nenechává jen tiše uložené jako u test3/dvoves.
+#
+# 8:00 UTC — appka to schválně nechává jako pevný UTC čas, ne appkou
+# přepočítané na letní/zimní pražský čas (na rozdíl od daily-tickets.yml).
+#
+# Vyžaduje stejný repozitářový secret ADMIN_TASK_KEY jako daily-tickets.yml.
+name: Osobní sledovací tikety (2x krátký + 1x střední, denně na Telegram)
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vygenerovat a poslat osobní sledovací tikety
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/personal-tracking-daily-tickets \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      # Appka nespoléhá jen na vlastní upozornění uvnitř endpointu (to
+      # appku informuje, když appka vygeneruje MÉNĚ než 3 tikety) — appka
+      # navíc chce vědět i o tvrdém selhání celého kroku (500, timeout,
+      # výpadek Renderu), kde by se vlastní upozornění vůbec nespustilo.
+      - name: Upozornit na Telegram, pokud krok výše úplně selhal
+        if: failure()
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"⚠️ Osobní sledovací tikety dnes úplně selhaly (ne appka jen negenerovala, appka na to ani nedoběhla). Zkontroluj: https://github.com/Apexsignal/apexsignal-backend/actions/runs/${{ github.run_id }}\"}"
