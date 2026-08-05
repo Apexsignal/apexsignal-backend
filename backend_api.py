@@ -4129,7 +4129,7 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
 
     candidates_by_threshold = {}
     candidates_by_market_65 = {}
-    for threshold in (0.70, 0.65):
+    for threshold in (0.75, 0.73, 0.70, 0.65):
         pool = []
         for m in matches:
             pool.extend([
