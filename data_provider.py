@@ -31,7 +31,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator
+from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator, HT_GOAL_SHARE
 
 
 # ---------------------------------------------------------------------
@@ -200,6 +200,8 @@ def normalize_to_match_input(
         kickoff_time=(fixture.get("kickoff_time") or "")[11:16],  # čas HH:MM z ISO timestampu
         home_expected_goals=home_xg,
         away_expected_goals=away_xg,
+        home_expected_goals_ht=round(home_xg * HT_GOAL_SHARE, 3) if home_xg else 0.0,
+        away_expected_goals_ht=round(away_xg * HT_GOAL_SHARE, 3) if away_xg else 0.0,
         expected_cards=expected_cards,
         home_games_played=home_stats.get("games_played", 0),
         away_games_played=away_stats.get("games_played", 0),
@@ -979,6 +981,51 @@ class OddsAPIProvider:
             events.extend(data)
         return events
 
+    def get_event_odds(self, sport_key: str, event_id: str, markets: str, regions: str = "eu") -> Optional[dict]:
+        """
+        Dotaz na KONKRÉTNÍ zápas (/events/{id}/odds) — na rozdíl od get_odds
+        (jedna liga = appka dostane VŠECHNY zápasy dané ligy) appka tohle
+        volá jednotlivě, protože jen tenhle endpoint appce vrátí
+        "nefeaturované" trhy jako double_chance/totals_h1 (hromadný /odds
+        appce na ně vrátí INVALID_MARKET, appka to ověřila živě). Dražší
+        na kredity (appka to proto volá jen pro malou shortlist, viz
+        _enrich_shortlist_with_extra_markets v backend_api.py), tak appka
+        kešuje stejně dlouho jako get_odds (týden).
+        """
+        cache_key = f"odds_event:{event_id}:{markets}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+        except Exception:
+            db_cached = None
+        if db_cached is not None:
+            self._cache.set(cache_key, db_cached)
+            return db_cached
+
+        try:
+            resp = requests.get(
+                f"{self.BASE_URL}/sports/{sport_key}/events/{event_id}/odds",
+                params={"apiKey": self.api_key, "regions": regions, "markets": markets, "oddsFormat": "decimal"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"[odds-api] event {event_id}: {e}")
+            return None
+
+        data = resp.json()
+        self._cache.set(cache_key, data)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, data, ttl_seconds=self.DB_CACHE_TTL_SECONDS)
+        except Exception as e:
+            print(f"[odds-api] Uložení do DB cache selhalo: {e}")
+        return data
+
 
 # the-odds-api a API-Football appce dávají jméno stejného týmu často jinak
 # napsané (diakritika, klubové zkratky, "Utd" vs "United"...) — přesná shoda
@@ -1155,6 +1202,79 @@ def adapt_odds_api_event(event: dict) -> dict:
         result["under_probability"] = sum(p for _, _, _, p in prices_and_probs) / len(prices_and_probs)
 
     return result
+
+
+def adapt_odds_api_extra_markets(event: dict) -> dict:
+    """
+    Dvojtip (double_chance) a poločasové góly (totals_h1) — na rozdíl od
+    adapt_odds_api_event výše appka tohle NEDOSTÁVÁ z hromadného /odds
+    dotazu (ten appce na tyhle trhy vrací INVALID_MARKET), appka je tahá
+    zvlášť přes dotaz na konkrétní zápas (/events/{id}/odds), a jen pro
+    malou shortlist zápasů (viz _enrich_shortlist_with_extra_markets v
+    backend_api.py — cena za zápas je vyšší, appka to nedělá plošně).
+
+    Dvojtip appka NEDE-VIGUJE (na rozdíl od h2h/totals výše) — 1X/X2/12
+    se navzájem překrývají (každý výsledek počítá do dvou z nich), takže
+    devig_market (počítá s třemi VZÁJEMNĚ SE VYLUČUJÍCÍMI výsledky) by
+    dal špatné číslo. Appka místo toho bere holé 1/kurz (medián napříč
+    bookmakery) — obsahuje marži bookmakera, tedy mírně PODHODNOCuje
+    skutečnou pravděpodobnost, což je konzervativní (bezpečná) strana
+    chyby, ne riziková.
+    """
+    result = {
+        "double_chance_odds": {},
+        "market_implied_probabilities": {},
+        "ht_over_threshold": None, "ht_over_odds": None, "ht_over_probability": None,
+        "ht_under_odds": None, "ht_under_probability": None,
+    }
+    bookmakers = event.get("bookmakers", [])
+    if not bookmakers:
+        return result
+
+    dc_prices: dict[str, list[float]] = {"1X": [], "X2": [], "12": []}
+    dc_name_map = {
+        f"{event.get('home_team')} or Draw": "1X",
+        f"{event.get('away_team')} or Draw": "X2",
+        f"{event.get('home_team')} or {event.get('away_team')}": "12",
+    }
+    ht_totals_by_threshold: dict[float, list[tuple[float, float, float, float]]] = {}
+
+    for bm in bookmakers:
+        markets = bm.get("markets", [])
+
+        dc = next((m for m in markets if m["key"] == "double_chance"), None)
+        if dc:
+            for o in dc["outcomes"]:
+                key = dc_name_map.get(o["name"])
+                if key:
+                    dc_prices[key].append(o["price"])
+
+        ht_totals = next((m for m in markets if m["key"] == "totals_h1"), None)
+        if ht_totals:
+            over_o = next((o for o in ht_totals["outcomes"] if o["name"] == "Over"), None)
+            under_o = next((o for o in ht_totals["outcomes"] if o["name"] == "Under"), None)
+            if over_o and under_o:
+                p_over, p_under = devig_two_way(over_o["price"], under_o["price"])
+                ht_totals_by_threshold.setdefault(over_o["point"], []).append(
+                    (over_o["price"], p_over, under_o["price"], p_under)
+                )
+
+    for key, prices in dc_prices.items():
+        if prices:
+            odds = _median(prices)
+            result["double_chance_odds"][key] = odds
+            result["market_implied_probabilities"][f"double_chance:{key}"] = 1.0 / odds
+
+    if ht_totals_by_threshold:
+        threshold = max(ht_totals_by_threshold, key=lambda t: len(ht_totals_by_threshold[t]))
+        prices_and_probs = ht_totals_by_threshold[threshold]
+        result["ht_over_threshold"] = threshold
+        result["ht_over_odds"] = _median([p for p, _, _, _ in prices_and_probs])
+        result["ht_over_probability"] = sum(p for _, p, _, _ in prices_and_probs) / len(prices_and_probs)
+        result["ht_under_odds"] = _median([p for _, _, p, _ in prices_and_probs])
+        result["ht_under_probability"] = sum(p for _, _, _, p in prices_and_probs) / len(prices_and_probs)
+        result["market_implied_probabilities"][f"ht_over_goals:over_{threshold}"] = result["ht_over_probability"]
+        result["market_implied_probabilities"][f"ht_over_goals:under_{threshold}"] = result["ht_under_probability"]
 
     return result
 
@@ -1805,13 +1925,20 @@ def adapt_fixture_result(fixture: dict) -> dict:
     a góly musí existovat, jinak appka tiket nechá 'pending'.
     """
     if not fixture:
-        return {"is_finished": False, "home_goals": None, "away_goals": None}
+        return {"is_finished": False, "home_goals": None, "away_goals": None, "ht_home_goals": None, "ht_away_goals": None}
     status_short = fixture.get("fixture", {}).get("status", {}).get("short", "")
     goals = fixture.get("goals", {})
+    # Poločasové skóre appka potřebuje kvůli settlementu ht_over_goals/
+    # ht_under_goals (viz evaluate_selection_outcome) — API-Football ho
+    # vrací zadarmo v tom samém /fixtures response jako celkové skóre,
+    # appka na to nepotřebuje žádné další volání navíc.
+    halftime = fixture.get("score", {}).get("halftime", {})
     return {
         "is_finished": status_short in ("FT", "AET", "PEN"),
         "home_goals": goals.get("home"),
         "away_goals": goals.get("away"),
+        "ht_home_goals": halftime.get("home"),
+        "ht_away_goals": halftime.get("away"),
     }
 
 

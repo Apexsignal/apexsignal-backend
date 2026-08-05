@@ -76,6 +76,15 @@ MODEL_HIGH_CONFIDENCE_CAP = 0.75  # tvrdý strop na SUROVÝ model_probability (a
                               # pravděpodobnost — tu appka nechává beze změny, reálný
                               # trh appka nepřepisuje.
 
+HT_GOAL_SHARE = 0.45  # jaký podíl z CELKOVÉHO očekávaného počtu gólů appka
+                              # čeká už v prvním poločase — 0.45 je konzervativní
+                              # střed běžně citovaného rozmezí (fotbalová
+                              # statistika dlouhodobě ukazuje o něco víc gólů
+                              # ve 2. poločase, cca 44-46 % v 1.). Appka to
+                              # aplikuje na STEJNÉ home/away xG jako u
+                              # celozápasového modelu (viz normalize_to_match_input
+                              # v data_provider.py), žádný nový vstupní zdroj.
+
 MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedůvěřuje
                               # dost na to, aby nabídla over góly/BTTS (viz build_candidates)
                               # — s tak málo odehranými zápasy jede xG hlavně z
@@ -94,17 +103,19 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedů
 
 def evaluate_selection_outcome(
     selection: "SelectionCandidate", home_goals: int, away_goals: int, total_cards: Optional[int] = None,
+    ht_home_goals: Optional[int] = None, ht_away_goals: Optional[int] = None,
 ) -> Optional[bool]:
     """
     Vyhodnotí, jestli se tahle konkrétní selekce podle finálního výsledku
     potvrdila (True/False). Appka umí rozhodnout trhy odvozené ze skóre
-    (MATCH_WINNER, OVER_GOALS, UNDER_GOALS, BTTS) rovnou, a OVER_CARDS
-    tehdy, když jí appka dodá total_cards (appka ho dotahuje zvlášť,
-    jen když appka trh potřebuje — viz _settle_one_leg v backend_api.py,
-    ať appka nevolá API-Football statistiky zbytečně u trhů, co je
-    nepotřebují). Tenisové/basketbalové trhy appka pořád nevyhodnotí a
-    vrátí None; tiket pak zůstane 'pending', dokud ho někdo nevyhodnotí
-    jinak.
+    (MATCH_WINNER, OVER_GOALS, UNDER_GOALS, BTTS, DOUBLE_CHANCE) rovnou,
+    OVER_CARDS tehdy, když jí appka dodá total_cards, a HT_OVER_GOALS/
+    HT_UNDER_GOALS tehdy, když jí appka dodá poločasové skóre (appka ho
+    dotahuje jen, když appka trh potřebuje — viz _settle_one_leg v
+    backend_api.py, ať appka nevolá API-Football statistiky zbytečně u
+    trhů, co je nepotřebují). Tenisové/basketbalové trhy appka pořád
+    nevyhodnotí a vrátí None; tiket pak zůstane 'pending', dokud ho
+    někdo nevyhodnotí jinak.
     """
     if selection.market_type == MarketType.MATCH_WINNER:
         if selection.selection == "home":
@@ -113,6 +124,15 @@ def evaluate_selection_outcome(
             return away_goals > home_goals
         if selection.selection == "draw":
             return home_goals == away_goals
+        return None
+
+    if selection.market_type == MarketType.DOUBLE_CHANCE:
+        if selection.selection == "1X":
+            return home_goals >= away_goals
+        if selection.selection == "X2":
+            return away_goals >= home_goals
+        if selection.selection == "12":
+            return home_goals != away_goals
         return None
 
     if selection.market_type == MarketType.OVER_GOALS:
@@ -128,6 +148,24 @@ def evaluate_selection_outcome(
         except ValueError:
             return None
         return (home_goals + away_goals) < threshold
+
+    if selection.market_type == MarketType.HT_OVER_GOALS:
+        if ht_home_goals is None or ht_away_goals is None:
+            return None
+        try:
+            threshold = float(selection.selection.replace("over_", ""))
+        except ValueError:
+            return None
+        return (ht_home_goals + ht_away_goals) > threshold
+
+    if selection.market_type == MarketType.HT_UNDER_GOALS:
+        if ht_home_goals is None or ht_away_goals is None:
+            return None
+        try:
+            threshold = float(selection.selection.replace("under_", ""))
+        except ValueError:
+            return None
+        return (ht_home_goals + ht_away_goals) < threshold
 
     if selection.market_type == MarketType.BTTS:
         return home_goals >= 1 and away_goals >= 1
@@ -182,6 +220,9 @@ class MarketType(str, Enum):
                                               # evaluate_selection_outcome, market_types filtr)
     BTTS = "btts"                            # fotbal — oba týmy dají gól (Both Teams To Score)
     OVER_CARDS = "over_cards"
+    DOUBLE_CHANCE = "double_chance"          # fotbal — dvojtip (1X/X2/12), viz double_chance_probabilities
+    HT_OVER_GOALS = "ht_over_goals"          # fotbal — góly v 1. poločase, stejný vzor jako OVER_GOALS/UNDER_GOALS
+    HT_UNDER_GOALS = "ht_under_goals"
     OVER_GAMES = "over_games"               # tenis — celkový počet gamů v zápase
     OVER_ACES = "over_aces"                 # tenis — celkový počet es
     OVER_PENALTY_MINUTES = "over_penalty_minutes"  # hokej — trestné minuty
@@ -192,7 +233,10 @@ class MarketType(str, Enum):
 # Které trhy dávají u kterého sportu smysl — používá to i frontend (mapování
 # nabízených chipů), aby se u tenisu nenabízel "Over gólů" apod.
 SPORT_MARKETS: dict[Sport, list[MarketType]] = {
-    Sport.FOOTBALL: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS],
+    Sport.FOOTBALL: [
+        MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS,
+        MarketType.DOUBLE_CHANCE, MarketType.HT_OVER_GOALS, MarketType.HT_UNDER_GOALS,
+    ],
     Sport.TENNIS: [MarketType.MATCH_WINNER, MarketType.OVER_GAMES, MarketType.OVER_ACES],
     Sport.HOCKEY: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.OVER_PENALTY_MINUTES],
     Sport.BASKETBALL: [MarketType.MATCH_WINNER, MarketType.OVER_POINTS, MarketType.OVER_THREES],
@@ -208,6 +252,9 @@ MARKET_LABELS: dict[str, str] = {
     MarketType.UNDER_GOALS.value: "Počet gólů",
     MarketType.BTTS.value: "Oba týmy skórují",
     MarketType.OVER_CARDS.value: "Počet karet",
+    MarketType.DOUBLE_CHANCE.value: "Dvojtip",
+    MarketType.HT_OVER_GOALS.value: "Góly v poločase",
+    MarketType.HT_UNDER_GOALS.value: "Góly v poločase",
     MarketType.OVER_GAMES.value: "Počet gamů",
     MarketType.OVER_ACES.value: "Počet es",
     MarketType.OVER_PENALTY_MINUTES.value: "Trestné minuty",
@@ -217,6 +264,7 @@ MARKET_LABELS: dict[str, str] = {
 
 SELECTION_LABELS: dict[str, str] = {
     "home": "Domácí", "away": "Hosté", "draw": "Remíza", "yes": "Ano", "no": "Ne",
+    "1X": "1X (domácí nebo remíza)", "X2": "X2 (hosté nebo remíza)", "12": "12 (bez remízy)",
 }
 
 
@@ -415,10 +463,25 @@ class MatchInput:
     expected_total_points: float = 0.0          # basketbal — celkový počet bodů
     expected_total_threes: float = 0.0          # basketbal — celkový počet trojek
 
+    # Očekávané góly jen za 1. poločas — appka je dopočítá z celozápasového
+    # xG × HT_GOAL_SHARE (viz normalize_to_match_input), žádný nový vstupní
+    # zdroj. Používá se jen pro ht_over_goals/ht_under_goals.
+    home_expected_goals_ht: float = 0.0
+    away_expected_goals_ht: float = 0.0
+
     favorite_win_market_odds: float = 1.0
     over_goals_odds: dict[float, float] = field(default_factory=dict)            # {2.5: 1.85, ...}
     under_goals_odds: dict[float, float] = field(default_factory=dict)           # {2.5: 1.95, ...} — jen skutečné tržní kurzy, nikdy dopočítané z modelu
     btts_yes_odds: Optional[float] = None      # kurz na "oba týmy dají gól: ano"
+    # Dvojtip a poločasové góly appka NEDOSTÁVÁ z hromadného odds-api
+    # dotazu (ten appce vrací INVALID_MARKET) — appka je tahá zvlášť, jen
+    # pro malou "shortlist" nejslibnějších zápasů, přes dotaz na
+    # KONKRÉTNÍ zápas (viz _enrich_shortlist_with_extra_markets v
+    # backend_api.py). Proto appka u těchhle dvou polí čeká, že budou
+    # prázdná u VĚTŠINY zápasů — to je očekávané, ne chyba.
+    double_chance_odds: dict[str, float] = field(default_factory=dict)           # {"1X": 1.25, "X2": 4.1, "12": 1.1}
+    ht_over_goals_odds: dict[float, float] = field(default_factory=dict)         # {1.5: 1.93, ...}
+    ht_under_goals_odds: dict[float, float] = field(default_factory=dict)        # {1.5: 1.85, ...} — jen skutečné tržní kurzy
     over_cards_odds: dict[float, float] = field(default_factory=dict)            # {3.5: 1.90, ...}
     over_penalty_minutes_odds: dict[float, float] = field(default_factory=dict)  # {8.5: 1.90, ...}
     over_games_odds: dict[float, float] = field(default_factory=dict)            # {21.5: 1.85, ...}
@@ -528,6 +591,24 @@ class MarketEvaluator:
     def over_cards_probability(expected_cards: float, threshold: float) -> float:
         return prob_over(expected_cards, threshold)
 
+    @staticmethod
+    def double_chance_probabilities(home_xg: float, away_xg: float) -> dict[str, float]:
+        """1X/X2/12 appka odvodí ze STEJNÉ mřížky jako výhru/remízu/prohru —
+        žádný nový model, jen jiný způsob součtu tří už spočítaných čísel."""
+        winner = MarketEvaluator.match_winner_probabilities(home_xg, away_xg)
+        return {
+            "1X": winner["home"] + winner["draw"],
+            "X2": winner["away"] + winner["draw"],
+            "12": winner["home"] + winner["away"],
+        }
+
+    @staticmethod
+    def ht_over_goals_probability(home_xg_ht: float, away_xg_ht: float, threshold: float) -> float:
+        """Stejný Poisson/Dixon-Coles postup jako over_goals_probability,
+        jen na poločasové (nižší) xG — viz HT_GOAL_SHARE."""
+        grid = score_grid_probabilities(home_xg_ht, away_xg_ht)
+        return sum(p for i, row in enumerate(grid) for j, p in enumerate(row) if i + j > threshold)
+
     @classmethod
     def build_candidates(cls, match: MatchInput, min_prob: float = MIN_SELECTION_PROBABILITY) -> list[SelectionCandidate]:
         """
@@ -596,6 +677,31 @@ class MarketEvaluator:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
                 candidates.append(cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds))
 
+            # Dvojtip a poločasové góly (2026-08-05) — appka je dostává jen
+            # pro malou shortlist zápasů (viz _enrich_shortlist_with_extra_markets
+            # v backend_api.py), takže double_chance_odds/ht_*_odds bude u
+            # VĚTŠINY zápasů prázdné — appka to bere jako normální stav, ne
+            # chybu, a kandidáta prostě nenabídne.
+            if match.sport == Sport.FOOTBALL and match.double_chance_odds:
+                dc_probs = cls.double_chance_probabilities(match.home_expected_goals, match.away_expected_goals)
+                for selection, odds in match.double_chance_odds.items():
+                    candidates.append(cls._candidate(match, MarketType.DOUBLE_CHANCE, selection, dc_probs[selection], odds))
+
+            if match.sport == Sport.FOOTBALL and has_reliable_form:
+                for threshold, odds in match.ht_over_goals_odds.items():
+                    prob = cls.ht_over_goals_probability(match.home_expected_goals_ht, match.away_expected_goals_ht, threshold)
+                    candidates.append(cls._candidate(match, MarketType.HT_OVER_GOALS, f"over_{threshold}", prob, odds))
+
+                # Stejný vzor jako u UNDER_GOALS výš — appka bere jen SKUTEČNÝ
+                # tržní kurz na under, nic si nedopočítává.
+                for threshold, under_odds in match.ht_under_goals_odds.items():
+                    if under_odds >= MIN_SELECTION_ODDS:
+                        over_prob = cls.ht_over_goals_probability(match.home_expected_goals_ht, match.away_expected_goals_ht, threshold)
+                        candidates.append(cls._candidate(
+                            match, MarketType.HT_UNDER_GOALS, f"under_{threshold}", 1.0 - over_prob, under_odds,
+                            market_key_type=MarketType.HT_OVER_GOALS,
+                        ))
+
             # Karty appka přestala nabízet (rozhodnuto 2026-08-01) — žádný
             # reálný tržní kurz appka na ně nikdy neměla (the-odds-api
             # nevrací "under" stranu, takže appka neuměla de-vigovat), jely
@@ -640,6 +746,14 @@ class MarketEvaluator:
         def passes_odds_filter(c: SelectionCandidate) -> bool:
             if c.market_type == MarketType.MATCH_WINNER:
                 return 1.20 <= c.odds <= MAX_SELECTION_ODDS
+            if c.market_type == MarketType.DOUBLE_CHANCE:
+                # Dvojtip appka nechává na nižší strop (1.05) než ostatní
+                # trhy — smysl dvojtipu je právě nabídnout BEZPEČNOU nohu za
+                # nízký kurz (appka ji kombinuje s jinou nohou, ať appka
+                # trefí cílový rozsah kurzu tiketu), kdežto MIN_SELECTION_ODDS
+                # (1.3) je nastavené kvůli over góly/kartám, kde nízký kurz
+                # obvykle znamená appka nabízí "jistotu" bez skutečné hodnoty.
+                return 1.05 <= c.odds <= MAX_SELECTION_ODDS
             return MIN_SELECTION_ODDS <= c.odds <= MAX_SELECTION_ODDS
 
         # DŮLEŽITÉ: appka dřív práh (70/65/60 %) kontrolovala jen na
@@ -716,6 +830,20 @@ class MarketEvaluator:
             base = (
                 f"Při xG {match.home_expected_goals} (domácí) a {match.away_expected_goals} (hosté) "
                 f"appka počítá {model_pct} % šanci, že skórují oba týmy."
+            )
+        elif market_type == MarketType.DOUBLE_CHANCE:
+            dc_desc = {
+                "1X": f"{match.home_team} nevyhraje", "X2": f"{match.away_team} nevyhraje", "12": "nebude remíza",
+            }.get(selection, selection)
+            base = f"Dvojtip {selection} ({dc_desc}) appka podle modelu odhaduje na {model_pct} %."
+        elif market_type in (MarketType.HT_OVER_GOALS, MarketType.HT_UNDER_GOALS):
+            prefix = "over_" if market_type == MarketType.HT_OVER_GOALS else "under_"
+            threshold = selection.replace(prefix, "")
+            word = "víc" if market_type == MarketType.HT_OVER_GOALS else "míň"
+            total_xg_ht = round(match.home_expected_goals_ht + match.away_expected_goals_ht, 2)
+            base = (
+                f"Součet očekávaných gólů obou týmů jen za 1. poločas (xG {total_xg_ht}) "
+                f"dává {model_pct} % šanci na {word} než {threshold} gólu/ů do poločasu."
             )
         elif market_type == MarketType.OVER_CARDS:
             threshold = selection.replace("over_", "")

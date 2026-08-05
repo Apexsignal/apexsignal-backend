@@ -2036,11 +2036,13 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     }[sport]
 
     matched_count = 0
+    matched_pairs: list[tuple[MatchInput, dict]] = []
     for match in matches:
         event = data_provider.find_matching_odds_event(events, match.home_team, match.away_team, match.kickoff_date)
         if not event:
             continue
         matched_count += 1
+        matched_pairs.append((match, event))
         adapted = data_provider.adapt_odds_api_event(event)
         if adapted["favorite_win_market_odds"]:
             match.favorite_win_market_odds = adapted["favorite_win_market_odds"]
@@ -2071,6 +2073,55 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
                 match.under_goals_odds[threshold] = adapted["under_odds"]
 
     print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched_count}/{len(matches)} zápasů napárováno")
+
+    if sport == Sport.FOOTBALL and matched_pairs:
+        _enrich_shortlist_with_extra_markets(matched_pairs)
+
+
+MAX_EXTRA_MARKET_SHORTLIST = 15  # appka dvojtip/poločas tahá přes dotaz NA
+# KAŽDÝ zápas zvlášť (viz _enrich_shortlist_with_extra_markets) — dražší
+# na kredity the-odds-api (appka má jen 500/měsíc zdarma) než hromadný
+# dotaz na celou ligu. 15 zápasů × 2 trhy = 30 kreditů na jedno
+# generování — appka to drží nízko, ne pro celý pool.
+
+
+def _enrich_shortlist_with_extra_markets(matched_pairs: list[tuple[MatchInput, "dict"]]) -> None:
+    """
+    Dvojtip (double_chance) a poločasové góly (totals_h1) appka NEDOSTANE
+    z hromadného /odds dotazu výš (appka to živě ověřila — vrací
+    INVALID_MARKET) — appka je musí tahat zvlášť přes dotaz na KONKRÉTNÍ
+    zápas (/events/{id}/odds, viz OddsAPIProvider.get_event_odds), a ten
+    appka volá jen pro malou shortlist (viz MAX_EXTRA_MARKET_SHORTLIST),
+    ne pro celý pool zápasů. matched_pairs appka dostane z
+    _enrich_with_market_odds — jen zápasy, co appka už napárovala na
+    the-odds-api event (bez event_id appka nemá na co se ptát).
+    """
+    try:
+        odds_provider = data_provider.OddsAPIProvider()
+    except RuntimeError:
+        return
+
+    shortlist = sorted(matched_pairs, key=lambda p: (p[0].kickoff_date, p[0].kickoff_time))[:MAX_EXTRA_MARKET_SHORTLIST]
+    matched_count = 0
+    for match, event in shortlist:
+        event_id, sport_key = event.get("id"), event.get("sport_key")
+        if not event_id or not sport_key:
+            continue
+        raw = odds_provider.get_event_odds(sport_key, event_id, markets="double_chance,totals_h1")
+        if not raw:
+            continue
+        adapted = data_provider.adapt_odds_api_extra_markets(raw)
+        if adapted["double_chance_odds"]:
+            match.double_chance_odds.update(adapted["double_chance_odds"])
+        if adapted["ht_over_threshold"] is not None:
+            match.ht_over_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_over_odds"]
+            if adapted.get("ht_under_odds") is not None:
+                match.ht_under_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_under_odds"]
+        if adapted["market_implied_probabilities"]:
+            match.market_implied_probabilities.update(adapted["market_implied_probabilities"])
+            matched_count += 1
+
+    print(f"[enrich-odds-extra] {matched_count}/{len(shortlist)} shortlist zápasů má dvojtip/poločas")
 
 
 def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_id: Optional[str] = None) -> list[MatchInput]:
@@ -3113,7 +3164,10 @@ def _settle_one_leg(provider, i: int, selection, selection_id: Optional[int]) ->
         except Exception as e:
             print(f"  [{i}] karty API ERROR: {str(e)}")
 
-    outcome = evaluate_selection_outcome(selection, result["home_goals"], result["away_goals"], total_cards)
+    outcome = evaluate_selection_outcome(
+        selection, result["home_goals"], result["away_goals"], total_cards,
+        ht_home_goals=result.get("ht_home_goals"), ht_away_goals=result.get("ht_away_goals"),
+    )
     print(f"      → Match finished, outcome={outcome}")
     if selection_id is not None:
         result_str = "won" if outcome is True else "lost" if outcome is False else "pending"
@@ -3409,7 +3463,10 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
                 unverifiable += 1  # appka zápas nedohledala nebo API selhalo — nelze ověřit
                 continue
 
-            actual_outcome = evaluate_selection_outcome(sel_obj, real["home_goals"], real["away_goals"])
+            actual_outcome = evaluate_selection_outcome(
+                sel_obj, real["home_goals"], real["away_goals"],
+                ht_home_goals=real.get("ht_home_goals"), ht_away_goals=real.get("ht_away_goals"),
+            )
             if actual_outcome is None:
                 unverifiable += 1  # trh appka neumí vyhodnotit čistě ze skóre (karty apod.)
                 continue
