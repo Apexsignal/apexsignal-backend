@@ -15,6 +15,7 @@ Spuštění (dev):
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3917,8 +3918,18 @@ def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
 
             for _ in range(to_generate):
                 try:
+                    # max_widen_days=0 — appka to nechala stejně přísné jako
+                    # /admin/daily-tickets (viz tam), NE výchozí +3 dny. Appka
+                    # tenhle cron naživo shodila kvůli OOM (Render starter
+                    # plán, limit 512 MB) — širší okno = mnohonásobně víc
+                    # kandidátních zápasů v paměti najednou, a appka to tu
+                    # navíc dělá 3x po sobě v jednom requestu (2 kratky +
+                    # 1 stredni). Bez max_widen_days=0 appka riskuje, že
+                    # denní cron zítra v 8:00 znovu shodí celý web pro
+                    # platící odběratele, ne jen tenhle testovací účet.
                     ticket = _generate_one_ticket_for_cron(
                         target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                        max_widen_days=0,
                     )
                 except Exception as e:
                     print(f"[personal-tracking-daily-tickets] {label}: generování selhalo: {e}")
@@ -3942,6 +3953,11 @@ def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
                     "stake": PERSONAL_TRACKING_STAKE, "telegram": telegram_status,
                 })
                 saved_count += 1
+                # Appka mezi jednotlivými tikety uvolní paměť po velkém
+                # kandidátním poolu (viz OOM výše) — s max_widen_days=0 by to
+                # nemuselo být nutné, appka to tam ale radši nechává jako
+                # levnou další pojistku.
+                gc.collect()
 
         # Appka chtěla 2 kratky + 1 stredni = 3 celkem. Ať appka pozná
         # "málo nebo žádné" hned, ne až se na to appka majitel sám zeptá.
