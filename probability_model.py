@@ -844,14 +844,17 @@ class TicketGenerator:
         # Podle risk_level vyber jaký tiket postavit
         if risk_level <= 30:
             ticket_key = "kratky"
-            min_prob = 0.73  # zvednuto z 0.70 (2026-08-05) — appka na kalibračních
+            min_prob = 0.71  # zvednuto z 0.70 (2026-08-05) — appka na kalibračních
             # datech zjistila, že koš 70 % vychází reálně na 67,5 %, kdežto 75 % na
-            # 83,3 % (přes 200 vzorků) — appka radši cílí blíž ke koši, co appku
-            # reálně vyhrává, 65% dno appka NEMĚNÍ (uživatelovo explicitní
-            # rozhodnutí, viz FALLBACK_THRESHOLDS níž).
+            # 83,3 % (přes 200 vzorků), takže appka chtěla cílit výš — ale appka si
+            # to ověřila přes /admin/candidate-pool-preview a 72-75 % appce na
+            # aktuálním trhu zápasů nedávalo ANI JEDNOHO kandidáta (appka by vždycky
+            # skončila na 65% dně, tedy žádná reálná změna). 71 % appka zvolila jako
+            # nejpřísnější práh, co appce ještě reálně něco najde. 65% dno appka
+            # NEMĚNÍ (uživatelovo explicitní rozhodnutí, viz FALLBACK_THRESHOLDS níž).
         elif risk_level <= 60:
             ticket_key = "stredni"
-            min_prob = 0.73  # viz stejná poznámka u kratky výš
+            min_prob = 0.71  # viz stejná poznámka u kratky výš
         else:
             ticket_key = "boost"
             min_prob = 0.55
