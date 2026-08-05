@@ -4579,6 +4579,63 @@ def test_odds_markets(
     }
 
 
+@app.get("/admin/test-sportmonks")
+def test_sportmonks(
+    request: Request, day: Optional[str] = None, home_team: Optional[str] = None,
+    away_team: Optional[str] = None,
+):
+    """
+    Jednorázová diagnostika (2026-08-05) — první živé ověření SportMonks
+    tokenu, jakmile ho uživatel založí a pošle (appka SPORTMONKS_KEY jako
+    nový zdroj kurzů zkouší doplnit tam, kde API-Football ani the-odds-api
+    reálnou tržní cenu nemají — viz komentář v data_provider.py u
+    SportMonksProvider). NEUKLÁDÁ nic, jen appce ukáže syrovou odpověď,
+    ať se dá ověřit skutečný JSON tvar (market_description/label/value
+    konstanty v adapt_sportmonks_odds jsou zatím jen odhad z veřejné
+    dokumentace, ne z reálného callu).
+
+    Bez home_team/away_team appka vrátí jen syrový seznam zápasů daného
+    dne (day, default dnes) — pro rychlou kontrolu, že appka vůbec vidí
+    očekávanou ligu (Fortuna liga, Peru Liga 1). S oběma appka navíc
+    zkusí fuzzy spárování a rovnou spočítá adapt_sportmonks_odds.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        sm_provider = data_provider.SportMonksProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    from datetime import date as _date
+    target_day = _date.fromisoformat(day) if day else _date.today()
+
+    if home_team and away_team:
+        match = sm_provider.find_matching_fixture(target_day, home_team, away_team)
+        if match is None:
+            return {"status": "no_match", "day": target_day.isoformat(), "home_team": home_team, "away_team": away_team}
+        return {"status": "matched", "raw_fixture": match, "adapted_odds": data_provider.adapt_sportmonks_odds(match)}
+
+    fixtures = sm_provider.get_fixtures_by_date(target_day)
+    return {
+        "day": target_day.isoformat(),
+        "fixtures_total": len(fixtures),
+        "sample_fixtures": [
+            {
+                "id": fx.get("id"),
+                "league_id": fx.get("league_id"),
+                "participants": [
+                    {"name": p.get("name"), "location": p.get("meta", {}).get("location")}
+                    for p in fx.get("participants", [])
+                ],
+                "has_odds": bool(fx.get("odds")),
+            }
+            for fx in fixtures[:20]
+        ],
+    }
+
+
 @app.get("/admin/edge-diagnostic")
 def edge_diagnostic(request: Request, time_frame_days: int = 5, min_prob: float = 0.65):
     """

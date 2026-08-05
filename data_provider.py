@@ -1280,6 +1280,187 @@ def adapt_odds_api_extra_markets(event: dict) -> dict:
 
 
 # =======================================================================
+# SPORTMONKS — třetí zdroj kurzů, doplňkový k API-Football + the-odds-api.
+# Cíl: pokrýt zápasy, kde ani jeden z nich nemá reálnou tržní cenu
+# (česká Fortuna liga, Peru Liga 1, mimosezónní evropské kvalifikace —
+# viz komentář u SPORT_KEYS výše). Bez SportMonks appka pro tyhle zápasy
+# dřív musela cenu VYMÝŠLET z vlastního modelu (favorite_odds fallback v
+# normalize_to_match_input), což appka živě potvrdila jako reálný problém
+# (rozdíl 2-50 % proti skutečným Tipsport cenám u zápasu Vlašim/PAOK/Alianza).
+#
+# POZOR — endpoint cesty a JSON tvar odds objektů NEJSOU živě ověřené.
+# SportMonks dokumentace (docs.sportmonks.com/v3) appce při přípravě téhle
+# třídy vracela jen částečný obsah (404/zkrácené stránky), takže appka
+# cesty a názvy trhů níže sestavila z jejich veřejně známého v3 schématu
+# (base URL, auth přes api_token/Authorization appka OVĚŘILA), ne z
+# kompletní specifikace. PRVNÍ věc po získání tokenu: zavolat get_fixtures_by_date
+# na pár dní dopředu a projít si skutečnou strukturu odpovědi (marketů i
+# odds), než se tahle třída zapojí do generování — market_id/label názvy
+# (FULLTIME_RESULT_MARKET_ID atd.) níže se podle toho pravděpodobně budou
+# muset upravit.
+# Dokumentace: https://docs.sportmonks.com/v3
+# =======================================================================
+SPORTMONKS_BASE_URL = "https://api.sportmonks.com/api/v3"
+
+# Odhad podle veřejně zdokumentovaného v3 schématu (market "name"/"label"
+# stringy) — appka je zatím NEPOUŽÍVÁ nikde jinde v pipeline, jen v týhle
+# třídě, ať je snadné je na jednom místě opravit po prvním živém testu.
+SPORTMONKS_MARKET_FULLTIME_RESULT = "Fulltime Result"   # výsledky: "Home", "Draw", "Away"
+SPORTMONKS_MARKET_OVER_UNDER = "Goals Over/Under"        # výsledky: "Over 2.5", "Under 2.5"... (label obsahuje total)
+SPORTMONKS_MARKET_DOUBLE_CHANCE = "Double Chance"        # výsledky: "Home/Draw", "Draw/Away", "Home/Away"
+
+
+class SportMonksProvider:
+    def __init__(self, api_key: Optional[str] = None, cache_ttl_seconds: int = 300):
+        self.api_key = api_key or os.environ.get("SPORTMONKS_KEY", "")
+        if not self.api_key:
+            raise RuntimeError("Chybí SPORTMONKS_KEY (proměnná prostředí).")
+        self._cache = InMemoryCache(ttl_seconds=cache_ttl_seconds)
+
+    def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        query = {"api_token": self.api_key, **(params or {})}
+        resp = requests.get(f"{SPORTMONKS_BASE_URL}{path}", params=query, timeout=8)
+        resp.raise_for_status()
+        payload = resp.json()
+        if "message" in payload and "data" not in payload:
+            # SportMonks chybové odpovědi appka zatím jen viděla popsané
+            # v dokumentaci (ne živě) — tvar "message" bez "data" appka
+            # bere jako chybu, dokud test s reálným tokenem neukáže jinak.
+            raise RuntimeError(f"SportMonks vrátilo chybu: {payload.get('message')}")
+        return payload
+
+    def get_fixtures_by_date(self, day: date, include: str = "odds;participants") -> list[dict]:
+        """
+        Zápasy pro jeden konkrétní den, včetně kurzů a týmů (participants).
+        Appka je kešuje 30 min (stejně jako API-Football upcoming) — kurzy
+        se v průběhu dne mění, appka nechce zbytečně stará čísla.
+        """
+        cache_key = f"sm_fixtures:{day.isoformat()}:{include}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+
+        payload = self._get(f"/football/fixtures/date/{day.isoformat()}", {"include": include})
+        fixtures = payload.get("data", [])
+        self._cache.set(cache_key, fixtures)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, fixtures, ttl_seconds=30 * 60)
+        except Exception:
+            pass
+        return fixtures
+
+    def find_matching_fixture(self, day: date, home_team: str, away_team: str) -> Optional[dict]:
+        """
+        Stejná fuzzy-matching logika jako find_matching_odds_event
+        (the-odds-api) — SportMonks a API-Football taky nedávají jména
+        týmů stejně napsaná. Appka porovnává jen zápasy ze stejného dne.
+        """
+        fixtures = self.get_fixtures_by_date(day)
+        norm_home, norm_away = _normalize_team_name(home_team), _normalize_team_name(away_team)
+        if not norm_home or not norm_away:
+            return None
+
+        scored: list[tuple[float, dict]] = []
+        for fx in fixtures:
+            participants = fx.get("participants", [])
+            fx_home = next((p.get("name", "") for p in participants if p.get("meta", {}).get("location") == "home"), "")
+            fx_away = next((p.get("name", "") for p in participants if p.get("meta", {}).get("location") == "away"), "")
+            home_score = _name_similarity(norm_home, _normalize_team_name(fx_home))
+            away_score = _name_similarity(norm_away, _normalize_team_name(fx_away))
+            if home_score >= _NAME_MATCH_THRESHOLD and away_score >= _NAME_MATCH_THRESHOLD:
+                scored.append((min(home_score, away_score), fx))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if len(scored) > 1 and (scored[0][0] - scored[1][0]) < _NAME_MATCH_MARGIN:
+            return None
+        return scored[0][1]
+
+
+def adapt_sportmonks_odds(fixture: dict) -> dict:
+    """
+    Z jednoho SportMonks fixture (s include=odds) spočítá stejný tvar
+    dat jako adapt_odds_api_event (the-odds-api) — favorite_win_market_odds,
+    over/under kurzy, market_implied_probabilities — appka je pak
+    kombinuje stejnou logikou, ať appka nemusí duplikovat kód nahoru
+    v _enrich_with_market_odds.
+
+    NEOVĚŘENO ŽIVĚ — market/label názvy (SPORTMONKS_MARKET_* konstanty
+    výše) jsou z veřejné dokumentace, ne z reálné odpovědi. Appka to
+    napravuje hned po prvním testu s reálným tokenem.
+    """
+    result = {
+        "favorite_win_market_odds": None,
+        "market_implied_probabilities": {},
+        "over_threshold": None, "over_odds": None, "over_probability": None,
+        "under_odds": None, "under_probability": None,
+        "bookmaker_count": 0,
+    }
+    odds_entries = fixture.get("odds", [])
+    if not odds_entries:
+        return result
+
+    bookmaker_ids = {o.get("bookmaker_id") for o in odds_entries if o.get("bookmaker_id")}
+    result["bookmaker_count"] = len(bookmaker_ids)
+
+    home_prices = [o["value"] for o in odds_entries if o.get("market_description") == SPORTMONKS_MARKET_FULLTIME_RESULT and o.get("label") == "Home"]
+    away_prices = [o["value"] for o in odds_entries if o.get("market_description") == SPORTMONKS_MARKET_FULLTIME_RESULT and o.get("label") == "Away"]
+    draw_prices = [o["value"] for o in odds_entries if o.get("market_description") == SPORTMONKS_MARKET_FULLTIME_RESULT and o.get("label") == "Draw"]
+
+    if home_prices and away_prices and draw_prices:
+        outcomes = [("home", float(_median(home_prices))), ("away", float(_median(away_prices))), ("draw", float(_median(draw_prices)))]
+        probs = devig_market(outcomes)
+        if "home" in probs:
+            result["market_implied_probabilities"]["match_winner:home"] = probs["home"]
+            result["favorite_win_market_odds"] = float(_median(home_prices))
+        if "away" in probs:
+            result["market_implied_probabilities"]["match_winner:away"] = probs["away"]
+
+    totals_by_threshold: dict[float, list[tuple[float, float]]] = {}
+    for o in odds_entries:
+        if o.get("market_description") != SPORTMONKS_MARKET_OVER_UNDER:
+            continue
+        label = o.get("label", "")
+        total = o.get("total")
+        if total is None or not label:
+            continue
+        totals_by_threshold.setdefault(float(total), {"over": [], "under": []})
+        if label.lower() == "over":
+            totals_by_threshold[float(total)]["over"].append(float(o["value"]))
+        elif label.lower() == "under":
+            totals_by_threshold[float(total)]["under"].append(float(o["value"]))
+
+    for threshold, sides in totals_by_threshold.items():
+        if sides["over"] and sides["under"]:
+            over_price, under_price = _median(sides["over"]), _median(sides["under"])
+            p_over, p_under = devig_two_way(over_price, under_price)
+            totals_by_threshold[threshold] = (over_price, p_over, under_price, p_under)
+        else:
+            totals_by_threshold[threshold] = None
+    valid_thresholds = {t: v for t, v in totals_by_threshold.items() if v is not None}
+    if valid_thresholds:
+        threshold = max(valid_thresholds, key=lambda t: 1)  # appka nemá počet pozorování jako u the-odds-api — bere první platnou
+        over_price, p_over, under_price, p_under = valid_thresholds[threshold]
+        result["over_threshold"] = threshold
+        result["over_odds"] = over_price
+        result["over_probability"] = p_over
+        result["under_odds"] = under_price
+        result["under_probability"] = p_under
+
+    return result
+
+
+# =======================================================================
 # API-FOOTBALL — přímo přes api-sports.io (NE RapidAPI). Stejný klíč
 # (APISPORTS_KEY) jako u Basketball/Hockey výše — jedna registrace na
 # dashboard.api-sports.io zdarma odemkne i fotbal.
