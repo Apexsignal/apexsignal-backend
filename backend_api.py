@@ -2544,29 +2544,39 @@ def admin_win_loss_report(request: Request):
         cur.execute("SELECT status, COUNT(*) AS c FROM tickets GROUP BY status")
         by_status = {r["status"]: r["c"] for r in cur.fetchall()}
 
+        # Appka zisk/ztrátu nedrží jako sloupec — appka ho dopočítává za
+        # běhu ze sázky/kurzu/výsledku (viz Repo._compute_actual_profit_loss),
+        # appka to tady dělá stejně, v Pythonu, ne v SQL.
         cur.execute(
             """
-            SELECT ticket_type, status, COUNT(*) AS c,
-                   COALESCE(SUM(actual_stake_amount), 0) AS staked,
-                   COALESCE(SUM(actual_profit_loss), 0) AS pnl
+            SELECT ticket_type, status, total_odds, actual_stake_amount, actual_odds
               FROM tickets
              WHERE status IN ('won', 'lost')
-             GROUP BY ticket_type, status
             """
         )
-        by_type_rows = cur.fetchall()
+        settled_rows = cur.fetchall()
 
-        cur.execute(
-            """
-            SELECT COUNT(*) AS c,
-                   COALESCE(SUM(actual_stake_amount), 0) AS staked,
-                   COALESCE(SUM(actual_profit_loss), 0) AS pnl,
-                   COALESCE(AVG(total_odds), 0) AS avg_odds
-              FROM tickets
-             WHERE status IN ('won', 'lost')
-            """
-        )
-        overall = cur.fetchone()
+        def _pnl_row(row: dict) -> float:
+            stake = row.get("actual_stake_amount")
+            if stake is None:
+                return 0.0
+            odds = row.get("actual_odds") or row["total_odds"]
+            return round(stake * (odds - 1), 2) if row["status"] == "won" else round(-stake, 2)
+
+        type_acc: dict[str, dict] = {}
+        for row in settled_rows:
+            t = row["ticket_type"]
+            acc = type_acc.setdefault(t, {"won": 0, "lost": 0, "staked": 0.0, "pnl": 0.0})
+            acc[row["status"]] += 1
+            acc["staked"] += float(row.get("actual_stake_amount") or 0)
+            acc["pnl"] += _pnl_row(row)
+
+        overall = {
+            "c": len(settled_rows),
+            "staked": sum(float(r.get("actual_stake_amount") or 0) for r in settled_rows),
+            "pnl": sum(_pnl_row(r) for r in settled_rows),
+            "avg_odds": (sum(float(r["total_odds"]) for r in settled_rows) / len(settled_rows)) if settled_rows else 0,
+        }
 
         cur.execute(
             """
@@ -2594,14 +2604,8 @@ def admin_win_loss_report(request: Request):
         total = won + lost
         return round(won / total * 100, 1) if total else 0.0
 
-    by_type: dict[str, dict] = {}
-    for row in by_type_rows:
-        t = row["ticket_type"]
-        by_type.setdefault(t, {"won": 0, "lost": 0, "staked": 0.0, "pnl": 0.0})
-        by_type[t][row["status"]] = row["c"]
-        by_type[t]["staked"] += float(row["staked"])
-        by_type[t]["pnl"] += float(row["pnl"])
-    for t, v in by_type.items():
+    by_type = type_acc
+    for v in by_type.values():
         v["win_rate_pct"] = _pct(v.get("won", 0), v.get("lost", 0))
         v["roi_pct"] = round(v["pnl"] / v["staked"] * 100, 1) if v["staked"] else 0.0
 
