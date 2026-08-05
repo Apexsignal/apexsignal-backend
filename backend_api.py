@@ -2101,7 +2101,16 @@ def _enrich_shortlist_with_extra_markets(matched_pairs: list[tuple[MatchInput, "
     except RuntimeError:
         return
 
-    shortlist = sorted(matched_pairs, key=lambda p: (p[0].kickoff_date, p[0].kickoff_time))[:MAX_EXTRA_MARKET_SHORTLIST]
+    # Appka shortlist řadí podle SOUČTU očekávaných gólů (home_xg + away_xg),
+    # ne podle výkopu — appka dřív brala prostě nejbližší zápasy podle času,
+    # což s omezeným rozpočtem (jen 15 zápasů) klidně "prošvihlo" ofenzivní
+    # zápas za 3 dny ve prospěch nudné 0:0 nudy za hodinu. Appka teď utratí
+    # kredity tam, kde appčin vlastní model už tuší nejvíc gólů — přesně
+    # tam, kde appka nejvíc čeká, že se poločasové góly/dvojtip vyplatí
+    # (nahlásil uživatel 2026-08-05).
+    shortlist = sorted(
+        matched_pairs, key=lambda p: p[0].home_expected_goals + p[0].away_expected_goals, reverse=True,
+    )[:MAX_EXTRA_MARKET_SHORTLIST]
     matched_count = 0
     for match, event in shortlist:
         event_id, sport_key = event.get("id"), event.get("sport_key")
