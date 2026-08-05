@@ -2527,6 +2527,117 @@ def backfill_results(user_id: int = Depends(get_current_user_id)):
     return {"backfilled": updated}
 
 
+@app.get("/admin/win-loss-report")
+def admin_win_loss_report(request: Request):
+    """
+    Appka tímhle appce spočítá kompletní statistiku úspěšnosti napříč
+    VŠEMI účty appky (appčiny vlastní i klientské) — kolik tiketů/výběrů
+    appka vyhrála/prohrála, rozpad podle typu tiketu a podle typu trhu.
+    Appka počítá jen vyhodnocené (won/lost), pending appka do procent
+    nezapočítává (nemá smysl, výsledek appka ještě nezná).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT status, COUNT(*) AS c FROM tickets GROUP BY status")
+        by_status = {r["status"]: r["c"] for r in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT ticket_type, status, COUNT(*) AS c,
+                   COALESCE(SUM(actual_stake_amount), 0) AS staked,
+                   COALESCE(SUM(actual_profit_loss), 0) AS pnl
+              FROM tickets
+             WHERE status IN ('won', 'lost')
+             GROUP BY ticket_type, status
+            """
+        )
+        by_type_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c,
+                   COALESCE(SUM(actual_stake_amount), 0) AS staked,
+                   COALESCE(SUM(actual_profit_loss), 0) AS pnl,
+                   COALESCE(AVG(total_odds), 0) AS avg_odds
+              FROM tickets
+             WHERE status IN ('won', 'lost')
+            """
+        )
+        overall = cur.fetchone()
+
+        cur.execute(
+            """
+            SELECT ts.market_type, ts.result, COUNT(*) AS c
+              FROM ticket_selections ts
+              JOIN tickets t ON t.id = ts.ticket_id
+             WHERE ts.result IN ('won', 'lost')
+             GROUP BY ts.market_type, ts.result
+            """
+        )
+        by_market_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost')
+            """
+        )
+        total_selections = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) AS c FROM ticket_selections WHERE result = 'won'")
+        won_selections = cur.fetchone()["c"]
+
+    def _pct(won: int, lost: int) -> float:
+        total = won + lost
+        return round(won / total * 100, 1) if total else 0.0
+
+    by_type: dict[str, dict] = {}
+    for row in by_type_rows:
+        t = row["ticket_type"]
+        by_type.setdefault(t, {"won": 0, "lost": 0, "staked": 0.0, "pnl": 0.0})
+        by_type[t][row["status"]] = row["c"]
+        by_type[t]["staked"] += float(row["staked"])
+        by_type[t]["pnl"] += float(row["pnl"])
+    for t, v in by_type.items():
+        v["win_rate_pct"] = _pct(v.get("won", 0), v.get("lost", 0))
+        v["roi_pct"] = round(v["pnl"] / v["staked"] * 100, 1) if v["staked"] else 0.0
+
+    by_market: dict[str, dict] = {}
+    for row in by_market_rows:
+        m = row["market_type"] or "neznámý"
+        by_market.setdefault(m, {"won": 0, "lost": 0})
+        by_market[m][row["result"]] = row["c"]
+    for m, v in by_market.items():
+        v["win_rate_pct"] = _pct(v.get("won", 0), v.get("lost", 0))
+
+    won_t, lost_t = by_status.get("won", 0), by_status.get("lost", 0)
+    staked = float(overall["staked"] or 0)
+    pnl = float(overall["pnl"] or 0)
+
+    return {
+        "tickets_by_status": by_status,
+        "tickets_overall": {
+            "won": won_t,
+            "lost": lost_t,
+            "win_rate_pct": _pct(won_t, lost_t),
+            "total_staked_kc": staked,
+            "total_profit_loss_kc": round(pnl, 0),
+            "roi_pct": round(pnl / staked * 100, 1) if staked else 0.0,
+            "avg_odds": round(float(overall["avg_odds"] or 0), 2),
+        },
+        "tickets_by_type": by_type,
+        "selections_overall": {
+            "won": won_selections,
+            "lost": total_selections - won_selections,
+            "win_rate_pct": _pct(won_selections, total_selections - won_selections),
+        },
+        "selections_by_market": by_market,
+    }
+
+
 @app.post("/admin/settle-all-pending")
 def admin_settle_all_pending(request: Request):
     """
