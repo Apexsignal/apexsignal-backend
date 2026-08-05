@@ -3877,32 +3877,19 @@ def run_test3_daily_tickets(request: Request):
 PERSONAL_TRACKING_STAKE = 1000.0
 
 
-@app.post("/admin/personal-tracking-daily-tickets")
-def run_personal_tracking_daily_tickets(request: Request):
+def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
     """
-    Appka na účtu PERSONAL_TRACKING_USER_ID (appkou majitele vlastní
-    osobní sledovací účet, oddělený od placeného kanálu i od
-    appky vlastních test/transparency účtů) denně vygeneruje 2 kratky +
-    1 stredni, na každý appka vsadí pevných 1000 Kč a POŠLE MU JE i na
-    Telegram (TELEGRAM_CHAT_ID) — na rozdíl od test3/transparency appka
-    tohle posílá appce majiteli přímo, appka to nenechává jen tiše uložené.
-    Když se appce nepovede vygenerovat všechny 3, appka o tom appce
-    majiteli pošle zvlášť upozornění (viz /admin/alert), ne appka to jen
-    tiše zaloguje.
+    Appka tohle spouští na SAMOSTATNÉM vlákně (viz /admin/personal-tracking-daily-tickets
+    níže) — stejný důvod jako u _start_generation_job pro /tickets/generate:
+    appka tenhle běh (settlement + 3x sekvenční generování + Telegram) naživo
+    naměřila na 10+ minut, a když appka tohle dřív dělala PŘÍMO uvnitř
+    request handleru, appka tím na tu dobu držela otevřené HTTP spojení —
+    naživo appka takhle jednou shodila celý web (appka nedokázala jistě
+    dohledat, jestli to způsobil vyčerpaný threadpool, GIL, nebo náhodný
+    výpadek DB spojení uprostřed, ale ať je příčina jakákoli, appka radši
+    request handler drží na milisekundy, ne na minuty).
     """
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    if not _GENERATION_LOCKS["personal_tracking_daily_tickets"].acquire(blocking=False):
-        return {"status": "already_running", "detail": "Jiné volání /admin/personal-tracking-daily-tickets už běží, tohle appka přeskočila."}
-
     try:
-        target_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
-        if not target_user_id_raw:
-            raise HTTPException(status_code=500, detail="PERSONAL_TRACKING_USER_ID není nastavené")
-        target_user_id = int(target_user_id_raw)
-
         provider = data_provider.get_provider(Sport.FOOTBALL)
         pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
         settled_count = 0
@@ -3977,9 +3964,57 @@ def run_personal_tracking_daily_tickets(request: Request):
                 except Exception as e:
                     print(f"[personal-tracking-daily-tickets] Upozornění na málo tiketů se nepodařilo poslat: {e}")
 
-        return {"date": today_prague.isoformat(), "settled": settled_count, "saved_count": saved_count, "results": results}
+        print(f"[personal-tracking-daily-tickets] Hotovo: date={today_prague.isoformat()} settled={settled_count} saved_count={saved_count} results={results}")
+    except Exception as e:
+        print(f"[personal-tracking-daily-tickets] Běh na pozadí selhal: {e}")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if chat_id and bot_token:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": f"⚠️ Osobní sledovací tikety dnes úplně selhaly na chybu: {e}",
+                    },
+                    timeout=15,
+                )
+            except Exception:
+                pass
     finally:
         _GENERATION_LOCKS["personal_tracking_daily_tickets"].release()
+
+
+@app.post("/admin/personal-tracking-daily-tickets")
+def run_personal_tracking_daily_tickets(request: Request):
+    """
+    Appka na účtu PERSONAL_TRACKING_USER_ID (appkou majitele vlastní
+    osobní sledovací účet, oddělený od placeného kanálu i od appky
+    vlastních test/transparency účtů) denně vygeneruje 2 kratky + 1 stredni,
+    na každý appka vsadí pevných 1000 Kč a POŠLE MU JE i na Telegram
+    (TELEGRAM_CHAT_ID) — na rozdíl od test3/transparency appka tohle posílá
+    appce majiteli přímo. Když se appce nepovede vygenerovat všechny 3,
+    appka o tom appce majiteli pošle zvlášť upozornění na Telegram.
+
+    Samotná práce běží na SAMOSTATNÉM vlákně (_run_personal_tracking_daily_tickets_job)
+    — endpoint se vrací HNED, ne až po 10+ minutách, viz komentář u té
+    funkce. Výsledek appka nikam nevrací HTTP odpovědí (cron na ni stejně
+    nekouká), appka ho pošle přímo na Telegram.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="PERSONAL_TRACKING_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    if not _GENERATION_LOCKS["personal_tracking_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/personal-tracking-daily-tickets už běží, tohle appka přeskočila."}
+
+    threading.Thread(target=_run_personal_tracking_daily_tickets_job, args=(target_user_id,), daemon=True).start()
+    return {"status": "started", "detail": "Generování běží na pozadí, výsledek appka pošle na Telegram."}
 
 
 @app.post("/admin/transparency-backfill-results")
