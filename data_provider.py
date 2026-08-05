@@ -1243,6 +1243,20 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
           # ve skutečnosti Čína, viz níže), takže reálná švýcarská liga
           # appce celou dobu propadala sítem, zatímco čínská si ID 169
           # "půjčila" a filtrem procházela
+    # Rakousko — appka tu dřív neměla VŮBEC nic, přestože appka ověřila
+    # (2026-08-05), že rakouská Bundesliga se na Tipsportu reálně sází a
+    # appka na ni tam má dokonce živé přenosy. ID appka ověřila přímo přes
+    # /leagues (appka je tu nehádá, viz historie chyb u Švýcarska/Číny výš).
+    218,  # Bundesliga
+    219,  # 2. Liga
+    # Bulharsko
+    172,  # First League
+    # Slovinsko
+    373,  # 1. SNL
+    # Irsko
+    357,  # Premier Division
+    # Island
+    164,  # Úrvalsdeild
     # Švédsko
     113,  # Allsvenskan
     114,  # Superettan
@@ -1296,6 +1310,12 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     239,  # Primera A (Colombia)
     265,  # Primera División (Chile) — dřív appka měla omylem 242, což je
           # Ekvádor (Liga Pro), ne Chile
+    242,  # Liga Pro (Ekvádor) — appka tu dřív měla jen omylem jako popisek
+          # u Chile výš, appka ho teď přidává jako správnou, samostatnou ligu
+    281,  # Primera División (Peru)
+    250,  # División Profesional - Apertura (Paraguay)
+    252,  # División Profesional - Clausura (Paraguay)
+    344,  # Primera División (Bolívie)
     # USA/Kanada
     253,  # MLS
     255,  # USL Championship — dřív appka měla omylem 254, což je ženská NWSL
@@ -1309,6 +1329,8 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     188,  # A-League
     # Saúdská Arábie
     307,  # Pro League
+    # Egypt
+    233,  # Premier League
     # Čína VYNECHÁNA ÚMYSLNĚ — appka sem dřív omylem vložila ID 169 se
     # stejnou poznámkou o nejistotě jako u Švýcarska výš. 169 je ve
     # skutečnosti SPRÁVNÉ ID čínské Super League (potvrzeno přímo přes
@@ -1339,6 +1361,9 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     30,   # World Cup Qualifiers Asia
     7,    # Asian Cup
     13,   # CONMEBOL Libertadores
+    11,   # CONMEBOL Sudamericana — appka tu dřív měla jen Libertadores,
+          # Sudamericana appce úplně chyběla, i když je to reálná,
+          # sázkově zajímavá klubová soutěž vedle ní
     9,    # CONMEBOL Copa America
 }
 
