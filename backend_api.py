@@ -4323,6 +4323,109 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
     return [p for p in (_best("kratky"), _best("stredni")) if p is not None]
 
 
+_YIELD_TEST_RESULTS: dict[str, dict] = {}
+_YIELD_TEST_LOCK = threading.Lock()
+
+
+def _run_generate_yield_test_job(job_id: str) -> None:
+    try:
+        results = []
+        for label, risk_level in (("kratky", 20), ("stredni", 50)):
+            for time_frame_days in (1, 2, 3):
+                matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+                matches = _filter_future_matches(matches, buffer_minutes=5)
+                matches = _filter_within_days(matches, time_frame_days)
+
+                result = ticket_generator.generate(
+                    matches, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, time_frame_days,
+                    pool_filter=_pool_filter_for_risk(risk_level),
+                )
+                outcome = "narrow_window"
+                if result["safe"] is None:
+                    wider_days = time_frame_days + 3
+                    all_wider_matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, wider_days)
+                    all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+                    wider_result = ticket_generator.generate(
+                        all_wider_matches, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, wider_days,
+                        pool_filter=_pool_filter_for_risk(risk_level),
+                    )
+                    if wider_result["safe"] is not None:
+                        result = wider_result
+                        outcome = f"widened_to_{wider_days}d"
+                    else:
+                        all_markets = _all_markets_for_sports(DAILY_TICKETS_SPORTS)
+                        markets_result = ticket_generator.generate(
+                            all_wider_matches, risk_level, DAILY_TICKETS_SPORTS, all_markets, wider_days,
+                            pool_filter=_pool_filter_for_risk(risk_level),
+                        )
+                        if markets_result["safe"] is not None:
+                            result = markets_result
+                            outcome = f"widened_to_{wider_days}d_all_markets"
+                        else:
+                            outcome = "failed"
+
+                ticket = result["safe"]
+                results.append({
+                    "type": label,
+                    "requested_time_frame_days": time_frame_days,
+                    "outcome": outcome,
+                    "found": ticket is not None,
+                    "total_odds": ticket.total_odds if ticket else None,
+                    "combined_probability": ticket.combined_probability if ticket else None,
+                    "first_kickoff": min((s.kickoff_date for s in ticket.selections), default=None) if ticket else None,
+                    "last_kickoff": max((s.kickoff_date for s in ticket.selections), default=None) if ticket else None,
+                })
+                # Appka mezi jednotlivými kombinacemi uvolní paměť po širokém
+                # kandidátním poolu — stejná pojistka jako u OOM opravy výše,
+                # tenhle endpoint dělá až 6 širokých generování za sebou.
+                gc.collect()
+
+        with _YIELD_TEST_LOCK:
+            _YIELD_TEST_RESULTS[job_id] = {"status": "done", "results": results}
+    except Exception as e:
+        print(f"[generate-yield-test] selhalo: {e}")
+        with _YIELD_TEST_LOCK:
+            _YIELD_TEST_RESULTS[job_id] = {"status": "error", "detail": str(e)}
+
+
+@app.post("/admin/generate-yield-test")
+def generate_yield_test(request: Request):
+    """
+    Appka tímhle simuluje reálné zákaznické generování (/tickets/generate)
+    — VČETNĚ rozšiřování okna (+3 dny) a fallbacku na ostatní trhy, viz
+    _run_generate_job — pro pár typických voleb time_frame_days, u
+    kratky (20) i stredni (50). Na rozdíl od skutečného volání appka nic
+    NEUKLÁDÁ, NESTRHÁVÁ tokeny ani NEPOSÍLÁ Telegram, jen reportuje, jestli
+    by appka reálně něco vrátila a na kolik dní musela couvnout. Appka to
+    přidala, aby šlo ověřit typický "úlovek" bez dopadu na tokeny/historii
+    testovacích účtů — viz otázka "budou zákazníci s neomezeným tarifem
+    spokojení, když appka najde jen 1 tiket za pár dní?".
+
+    Běží na pozadí (stejný důvod jako u OOM opravy výše — až 6 širokých
+    generování za sebou by appka jinak držela na jednom HTTP requestu
+    klidně 10+ minut) — appka vrací job_id, výsledek appka pollne přes
+    GET /admin/generate-yield-test-result?job_id=...
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    job_id = secrets.token_urlsafe(8)
+    with _YIELD_TEST_LOCK:
+        _YIELD_TEST_RESULTS[job_id] = {"status": "processing"}
+    threading.Thread(target=_run_generate_yield_test_job, args=(job_id,), daemon=True).start()
+    return {"status": "started", "job_id": job_id}
+
+
+@app.get("/admin/generate-yield-test-result")
+def generate_yield_test_result(job_id: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    with _YIELD_TEST_LOCK:
+        return _YIELD_TEST_RESULTS.get(job_id, {"status": "unknown"})
+
+
 @app.get("/admin/candidate-pool-preview")
 def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
