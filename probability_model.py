@@ -60,6 +60,22 @@ MAX_MODEL_MARKET_GAP = 0.08  # appka model_probability pro edge/vklad neumožní
                               # trhu, tím spíš je model špatně, ne že appka "našla
                               # hodnotu". Viz edge_capped_model_probability.
 
+MODEL_HIGH_CONFIDENCE_CAP = 0.75  # tvrdý strop na SUROVÝ model_probability (appka ho
+                              # aplikuje ještě PŘED porovnáním s trhem, viz _candidate),
+                              # rozhodnuto 2026-08-05 na appčiných vlastních vyhodnocených
+                              # datech (appka porovnala 'appka odhaduje' vs. 'reálně
+                              # vyhrálo' po koších): v koších 70–75 % appka byla dobře
+                              # kalibrovaná (70→67,5 %, 75→83,3 %, dohromady přes 200
+                              # vzorků), ale nad 75 % appka soustavně přestřelovala —
+                              # 80→63,4 %, 85→70,6 %, 90→72,2 %, 95→52,6 % (appka
+                              # nikdy spolehlivě netrefila to, co tvrdila). Model nad
+                              # 75 % appce evidentně neumí rozlišit "jistější" od
+                              # "míň jistého" — appka mu proto nedovolí tvrdit víc, než
+                              # kolik appka reálně umí doložit. Aplikuje se JEN na
+                              # model_probability (heuristický odhad), NE na tržní
+                              # pravděpodobnost — tu appka nechává beze změny, reálný
+                              # trh appka nepřepisuje.
+
 MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedůvěřuje
                               # dost na to, aby nabídla over góly/BTTS (viz build_candidates)
                               # — s tak málo odehranými zápasy jede xG hlavně z
@@ -778,7 +794,7 @@ class MarketEvaluator:
         # výjimky by lookup pod "under_goals:under_X" nikdy nic nenašel a
         # appka by tak nedopatřením přeskočila kontrolu kladného edge u
         # KAŽDÉHO under výběru (viz require_positive_edge v _build_ticket).
-        model_probability = probability
+        model_probability = min(probability, MODEL_HIGH_CONFIDENCE_CAP)
         market_key = f"{(market_key_type or market_type).value}:{selection}"
         market_probability = match.market_implied_probabilities.get(market_key)
         final_probability = market_probability if market_probability is not None else model_probability
