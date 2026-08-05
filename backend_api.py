@@ -63,7 +63,15 @@ import stripe
 # souběžných požadavků. Po přechodu na Mega (12 req/s, viz
 # _api_football_rate_limiter v data_provider.py) appka zvedla i tohle,
 # ať appka tu vyšší propustnost reálně využije.
-FIXTURE_ENRICHMENT_WORKERS = 40
+#
+# Appka tohle SNÍŽILA z 40 na 20 (2026-08-05) — appka na Renderu jede na
+# starter plánu (512 MB RAM, appka na něj naráží OOM při širokém okně
+# kandidátů), a 40 souběžných OS vláken najednou (vlastní stack + GIL
+# režie u každého) je zbytečně moc, když stejně jen ~12 z nich může
+# reálně volat API-Football najednou (viz rate limiter). Appka radši
+# vyšší plán zatím neplatí, tak aspoň sníží špičkovou paměť tímhle —
+# mírně pomalejší generování při širokém okně, ne rychlejší pád.
+FIXTURE_ENRICHMENT_WORKERS = 20
 
 # Sdílený stav pro SKUTEČNÝ postup obohacování zápasů (kolikátý z kolika
 # appka právě zpracovala) — appka ho drží v paměti procesu, ne v DB,
@@ -2248,6 +2256,11 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
             pool_filter=_pool_filter_for_risk(req.risk_level),
         )
+        # Appka appce na Renderu jede na starter plánu (512 MB RAM, appka
+        # na něj naráží OOM při širokém okně kandidátů) — uvolní paměť po
+        # obohaceném poolu zápasů hned po každém pokusu o generování, ne
+        # až na konci celé funkce (viz stejná pojistka u OOM opravy výše).
+        gc.collect()
 
         # Appka dřív tohle rozšíření dělala TICHOU — uživatel si vybral "1 den"
         # a dostal zpátky tiket se zápasy klidně 4 dny dopředu, aniž by o tom
@@ -2264,6 +2277,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
                 pool_filter=_pool_filter_for_risk(req.risk_level),
             )
+            gc.collect()
             if wider_result["safe"] is not None:
                 result = wider_result
                 horizon_note = (
@@ -2284,6 +2298,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
                         all_wider_matches, req.risk_level, req.sports, all_markets, wider_days,
                         pool_filter=_pool_filter_for_risk(req.risk_level),
                     )
+                    gc.collect()
                     if markets_result["safe"] is not None:
                         result = markets_result
                         horizon_note = (
@@ -2325,6 +2340,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
             pool_filter=_pool_filter_for_risk(req.risk_level),
         )
+        gc.collect()  # viz stejná pojistka v _run_generate_job (OOM na starter plánu)
 
         # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
         # zkusí, ale vždycky to řekne přes horizon_note.
@@ -2337,6 +2353,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
                 pool_filter=_pool_filter_for_risk(req.risk_level),
             )
+            gc.collect()
             if wider_result["safe"] is not None:
                 result = wider_result
                 horizon_note = (
@@ -2353,6 +2370,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
                         all_wider_matches, req.risk_level, req.sports, all_markets, wider_days, list(previous_ids),
                         pool_filter=_pool_filter_for_risk(req.risk_level),
                     )
+                    gc.collect()
                     if markets_result["safe"] is not None:
                         result = markets_result
                         horizon_note = (
