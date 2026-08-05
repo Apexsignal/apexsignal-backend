@@ -105,6 +105,35 @@ def _progress_clear(request_id: Optional[str]) -> None:
         _GENERATION_PROGRESS.pop(request_id, None)
 
 
+# Appka generování spouští na SAMOSTATNÉM vlákně a výsledek si appka
+# odloží sem, ať appka nemusí držet otevřené jedno dlouhé HTTP spojení po
+# celou dobu (1-3 minuty) — na telefonu appka mezitím klidně vypne/uspí a
+# mobilní prohlížeč takové spojení na pozadí zabije (appka pak dostane
+# "Load failed", i když server práci normálně dokončil). Appka si teď
+# jen vyzvedne request_id skoro okamžitě a výsledek si vyzvedne až je
+# hotový, přes krátké dotazy, co krátké výpadky přežijí.
+_GENERATION_RESULTS: dict[str, dict] = {}
+_GENERATION_RESULTS_LOCK = threading.Lock()
+_GENERATION_RESULTS_TTL_SECONDS = 600
+
+
+def _results_store(request_id: Optional[str], payload: dict) -> None:
+    if not request_id:
+        return
+    now = time.monotonic()
+    with _GENERATION_RESULTS_LOCK:
+        _GENERATION_RESULTS[request_id] = {"payload": payload, "ts": now}
+        stale = [k for k, v in _GENERATION_RESULTS.items() if now - v["ts"] > _GENERATION_RESULTS_TTL_SECONDS]
+        for k in stale:
+            _GENERATION_RESULTS.pop(k, None)
+
+
+def _results_get(request_id: str) -> Optional[dict]:
+    with _GENERATION_RESULTS_LOCK:
+        entry = _GENERATION_RESULTS.get(request_id)
+        return entry["payload"] if entry else None
+
+
 # Logger setup
 logger = logging.getLogger("apexsignal")
 logging.basicConfig(level=logging.INFO)
@@ -2188,10 +2217,7 @@ def _all_markets_for_sports(sports: list[Sport]) -> list[MarketType]:
     return seen
 
 
-@app.post("/tickets/generate", response_model=TicketPairResponse)
-def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
-    _require_generation_enabled(user_id)
-    _check_token_balance(user_id, req.risk_level)
+def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
     # Uložené zápasy + zápasy z JAKÉHOKOLIV předchozího generování v týhle
     # (ještě neuložené) sérii — jinak by druhé volání (jiný risk_level =
     # jiný typ tiketu) klidně nabídlo STEJNÝ zápas jako to první, protože
@@ -2276,16 +2302,11 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
             safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
             aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
         )
-    finally:
-        # I na chybu appka záznam o postupu uklidí — appka na něj po
-        # skončení requestu (úspěšném i ne) nemá frontend co ptát.
-        _progress_clear(req.request_id)
+    except Exception:
+        raise
 
 
-@app.post("/tickets/regenerate", response_model=TicketPairResponse)
-def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
-    _require_generation_enabled(user_id)
-    _check_token_balance(user_id, req.risk_level)
+def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     combined_exclude = set(previous_ids) | set(exclude_ids)
@@ -2350,8 +2371,67 @@ def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_cu
             safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
             aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
         )
-    finally:
-        _progress_clear(req.request_id)
+    except Exception:
+        raise
+
+
+def _start_generation_job(user_id: int, req: TicketGenerateRequest, run_fn) -> str:
+    """
+    Spustí generování na SAMOSTATNÉM vlákně a hned se vrátí s request_id —
+    appka na výsledek dál nečeká v rámci jednoho HTTP požadavku (viz
+    komentář u _GENERATION_RESULTS). Appka na vlákno záměrně nedává
+    žádný timeout — pokud appka nedoběhne do TTL (10 min), appka na to
+    frontend upozorní jako na vypršelý požadavek, ne appka to tiše zabije.
+    """
+    request_id = req.request_id or secrets.token_urlsafe(8)
+    req.request_id = request_id
+    _results_store(request_id, {"status": "processing"})
+
+    def worker():
+        try:
+            result = run_fn(user_id, req)
+            _results_store(request_id, {"status": "done", "result": result})
+        except HTTPException as e:
+            _results_store(request_id, {"status": "error", "detail": e.detail})
+        except Exception as e:
+            print(f"[generate-job] {request_id} selhalo: {e}")
+            _results_store(request_id, {"status": "error", "detail": "Generování se nepovedlo, zkus to znovu."})
+        finally:
+            _progress_clear(request_id)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return request_id
+
+
+@app.get("/tickets/generate-result")
+def get_generate_result(request_id: str):
+    """
+    Appka na tohle pollne, dokud /tickets/generate(-start) neskončí — na
+    rozdíl od jednoho dlouhého požadavku tenhle krátký dotaz přežije i
+    to, že appka na telefonu mezitím na chvíli vypadne/se uspí. Záměrně
+    bez přihlášení, stejně jako /tickets/generate-progress — request_id
+    appka vygeneruje sama, uhodnutí cizího neprozradí nic citlivého.
+    """
+    payload = _results_get(request_id)
+    if payload is None:
+        return {"status": "unknown"}
+    return payload
+
+
+@app.post("/tickets/generate")
+def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _require_generation_enabled(user_id)
+    _check_token_balance(user_id, req.risk_level)
+    request_id = _start_generation_job(user_id, req, _run_generate_job)
+    return {"request_id": request_id, "status": "processing"}
+
+
+@app.post("/tickets/regenerate")
+def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
+    _require_generation_enabled(user_id)
+    _check_token_balance(user_id, req.risk_level)
+    request_id = _start_generation_job(user_id, req, _run_regenerate_job)
+    return {"request_id": request_id, "status": "processing"}
 
 
 class SaveSelectionRequest(BaseModel):
