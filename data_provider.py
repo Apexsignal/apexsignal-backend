@@ -1461,6 +1461,319 @@ def adapt_sportmonks_odds(fixture: dict) -> dict:
 
 
 # =======================================================================
+# ODDSPAPI — třetí zdroj kurzů, AKTIVNÍ (na rozdíl od SportMonks výše,
+# co zůstává jen připravený, nezapojený kód). Appka ho živě ověřila
+# 2026-08-05 na přesně těch ligách, co API-Football ani the-odds-api
+# nepokrývají (česká Fortuna liga = TIPSPORT_LEAGUE_IDS 345, Peru Liga 1 =
+# 281) — 1X2, dvojtip i poločasové góly appka reálně dostala, přes 100
+# bookmakerů na zápas (mj. Pinnacle, bet365). Karta/platba appka
+# nepotřebovala, free tier (250 requestů/měsíc, bez expirace) appka
+# ověřila zdarma.
+#
+# Market/outcome ID NÍŽE appka získala živě přes GET /markets (ne z
+# dokumentace — ta appce při přípravě SportMonks výše nešla stáhnout
+# kompletní, tady appka radši rovnou sáhla po reálném API). Jeden
+# /odds dotaz na fixtureId appce vrátí VŠECHNY trhy a VŠECHNY bookmakery
+# najednou (na rozdíl od the-odds-api, kde appka potřebuje dva různé
+# requesty — hromadný pro 1X2/totals a per-event pro dvojtip/poločas).
+#
+# ROZPOČET: appka má jen 250 requestů/měsíc zdarma, /odds odpověď je
+# navíc velká (~8 MB na zápas) — appka ho proto volá JEN pro zápasy, co
+# ani API-Football ani the-odds-api nenapárovaly na žádný reálný kurz
+# (viz _enrich_with_oddspapi v backend_api.py), a jen do malého stropu
+# na jedno generování, stejně jako u MAX_EXTRA_MARKET_SHORTLIST.
+# Dokumentace: https://oddspapi.io/docs
+# =======================================================================
+class OddsPapiProvider:
+    BASE_URL = "https://api.oddspapi.io/v4"
+    SPORT_ID_FOOTBALL = 10
+
+    # marketId -> (over_outcome_id, under_outcome_id). Appka ověřila živě:
+    # marketId appky u těchhle trhů VŽDY odpovídá prvnímu outcomeId, druhý
+    # outcome (Under) je o 1 vyšší — appka to nechává jako explicitní
+    # dict (ne odvozené +1 v kódu), ať je to čitelné a appka to nemusí
+    # znovu dohledávat, kdyby se to u jiného trhu nepotvrdilo.
+    FT_RESULT_MARKET_ID = 101
+    FT_RESULT_OUTCOME_IDS = {"home": 101, "draw": 102, "away": 103}
+    DOUBLE_CHANCE_MARKET_ID = 101902
+    DOUBLE_CHANCE_OUTCOME_MAP = {101902: "1X", 101903: "12", 101904: "X2"}
+    FT_TOTALS_THRESHOLDS: dict[float, tuple[int, int]] = {
+        0.5: (106, 107), 1.5: (108, 109), 2.5: (1010, 1011), 3.5: (1012, 1013), 4.5: (1014, 1015),
+    }
+    HT_TOTALS_THRESHOLDS: dict[float, tuple[int, int]] = {
+        0.5: (10256, 10257), 1.5: (10258, 10259), 2.5: (10260, 10261), 3.5: (10262, 10263),
+    }
+
+    def __init__(self, api_key: Optional[str] = None, cache_ttl_seconds: int = 300):
+        self.api_key = api_key or os.environ.get("ODDSPAPI_KEY", "")
+        if not self.api_key:
+            raise RuntimeError("Chybí ODDSPAPI_KEY (proměnná prostředí).")
+        self._cache = InMemoryCache(ttl_seconds=cache_ttl_seconds)
+
+    def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        query = {"apiKey": self.api_key, **(params or {})}
+        resp = requests.get(f"{self.BASE_URL}{path}", params=query, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict) and "error" in payload:
+            raise RuntimeError(f"OddsPapi vrátilo chybu: {payload['error']}")
+        return payload
+
+    def get_tournaments(self, sport_id: int = SPORT_ID_FOOTBALL) -> list[dict]:
+        """
+        Seznam soutěží appka mění jen výjimečně (nový ročník, přejmenování)
+        — dlouhá TTL (appka ho kešuje týden, stejně jako kurzy u ostatních
+        providerů), ať appka zbytečně neplýtvá měsíční kvótou 250 requestů.
+        """
+        cache_key = f"op_tournaments:{sport_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        tournaments = self._get("/tournaments", {"sportId": sport_id})
+        self._cache.set(cache_key, tournaments)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, tournaments, ttl_seconds=7 * 24 * 3600)
+        except Exception:
+            pass
+        return tournaments
+
+    def find_tournament_candidates(self, country_name: str, league_name: str) -> list[tuple[float, dict]]:
+        """
+        Appka to zkusila přes fuzzy shodu (categoryName/tournamentName), ale
+        appka živě ověřila, že to NENÍ spolehlivé — API-Football appce dává
+        "Chance Liga"/"Czech Republic", OddsPapi appce dává "1. Liga"/
+        "Czechia" (podobnost 0.57-0.59, hluboko pod _NAME_MATCH_THRESHOLD
+        0.84 appka používá pro jména týmů). Appka proto v produkci
+        (_enrich_with_oddspapi v backend_api.py) používá ODDSPAPI_TOURNAMENT_IDS
+        (explicitní mapování podle league_id, stejný princip jako
+        TIPSPORT_LEAGUE_IDS/SPORT_KEYS výše) — tahle metoda zůstává jen
+        jako pomocný diagnostický nástroj pro RUČNÍ dohledání dalších ID
+        (appka radši vrátí víc kandidátů s nízkým prahem, než aby appka
+        automaticky spoléhala na nejistou shodu bez lidské kontroly).
+        """
+        tournaments = self.get_tournaments()
+        norm_country = _normalize_team_name(country_name)
+        norm_league = _normalize_team_name(league_name)
+        scored: list[tuple[float, dict]] = []
+        for t in tournaments:
+            league_score = _name_similarity(norm_league, _normalize_team_name(t.get("tournamentName", "")))
+            country_score = _name_similarity(norm_country, _normalize_team_name(t.get("categoryName", "")))
+            scored.append((league_score * 0.7 + country_score * 0.3, t))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[:5]  # appka vrací TOP 5 kandidátů k ruční kontrole, ne jedno "jisté" ID
+
+
+    def get_fixtures(self, tournament_id: int) -> list[dict]:
+        cache_key = f"op_fixtures:{tournament_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        fixtures = self._get("/fixtures", {"tournamentId": tournament_id})
+        self._cache.set(cache_key, fixtures)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, fixtures, ttl_seconds=30 * 60)
+        except Exception:
+            pass
+        return fixtures
+
+    def find_matching_fixture(self, tournament_id: int, home_team: str, away_team: str, kickoff_date: Optional[str] = None) -> Optional[dict]:
+        fixtures = self.get_fixtures(tournament_id)
+        norm_home, norm_away = _normalize_team_name(home_team), _normalize_team_name(away_team)
+        if not norm_home or not norm_away:
+            return None
+
+        scored: list[tuple[float, dict]] = []
+        for fx in fixtures:
+            if not fx.get("hasOdds"):
+                continue
+            if kickoff_date:
+                start = fx.get("startTime", "")
+                if start and start[:10] != kickoff_date:
+                    continue
+            home_score = _name_similarity(norm_home, _normalize_team_name(fx.get("participant1Name", "")))
+            away_score = _name_similarity(norm_away, _normalize_team_name(fx.get("participant2Name", "")))
+            if home_score >= _NAME_MATCH_THRESHOLD and away_score >= _NAME_MATCH_THRESHOLD:
+                scored.append((min(home_score, away_score), fx))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if len(scored) > 1 and (scored[0][0] - scored[1][0]) < _NAME_MATCH_MARGIN:
+            return None
+        return scored[0][1]
+
+    def get_odds(self, fixture_id: str) -> Optional[dict]:
+        """
+        Appka tenhle request kešuje týden (stejně jako the-odds-api) —
+        odpověď je velká (~8 MB) a appka má jen 250/měsíc, takže appka
+        nechce stejný zápas stahovat znovu při každém dalším generování
+        ten samý den.
+        """
+        cache_key = f"op_odds:{fixture_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        data = self._get("/odds", {"fixtureId": fixture_id})
+        self._cache.set(cache_key, data)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, data, ttl_seconds=7 * 24 * 3600)
+        except Exception as e:
+            print(f"[oddspapi] Uložení do DB cache selhalo: {e}")
+        return data
+
+
+# API-Football league_id -> OddsPapi tournamentId — explicitní mapování,
+# appka ho živě ověřila jen pro tyhle dvě soutěže (2026-08-05). Stejná
+# mezera appka zjistila u the-odds-api (viz komentář u SPORT_KEYS výše —
+# Rumunsko, Česko, Turecko, Chorvatsko, Srbsko, Maďarsko, Slovensko,
+# Kypr, Izrael, Uruguay, Kolumbie, Peru, Japonsko, Austrálie, Saúdská
+# Arábie, mezinárodní kvalifikace appce v the-odds-api chybí). Doplň
+# další ID, jak appka ověří další chybějící ligy — tournamentId najdeš
+# přes OddsPapiProvider.find_tournament_candidates(country, league) nebo
+# GET /admin/test-oddspapi.
+ODDSPAPI_TOURNAMENT_IDS: dict[int, int] = {
+    345: 172,  # Chance Liga (ČR) -> OddsPapi "1. Liga" (Czechia)
+    281: 406,  # Primera División (Peru) -> OddsPapi "Liga 1" (Peru)
+}
+
+
+def adapt_oddspapi_odds(odds_response: dict) -> dict:
+    """
+    Z JEDNÉ OddsPapi odpovědi (/odds?fixtureId=...) spočítá stejný tvar
+    dat jako adapt_odds_api_event + adapt_odds_api_extra_markets
+    dohromady (1X2, dvojtip, poločasové góly) — na rozdíl od the-odds-api
+    appka tu nepotřebuje dva různé requesty, jeden appce dá VŠECHNY trhy
+    pro daný zápas najednou (appka to živě ověřila, viz komentář u
+    OddsPapiProvider výše).
+    """
+    result = {
+        "favorite_win_market_odds": None,
+        "market_implied_probabilities": {},
+        "over_threshold": None, "over_odds": None, "over_probability": None,
+        "under_odds": None, "under_probability": None,
+        "double_chance_odds": {},
+        "ht_over_threshold": None, "ht_over_odds": None, "ht_over_probability": None,
+        "ht_under_odds": None, "ht_under_probability": None,
+        "bookmaker_count": 0,
+    }
+    bookmaker_odds = odds_response.get("bookmakerOdds", {}) if odds_response else {}
+    if not bookmaker_odds:
+        return result
+    result["bookmaker_count"] = len(bookmaker_odds)
+
+    def _price(bm_markets: dict, market_id: int, outcome_id: int) -> Optional[float]:
+        outcome = bm_markets.get(str(market_id), {}).get("outcomes", {}).get(str(outcome_id), {})
+        price = outcome.get("players", {}).get("0", {}).get("price")
+        return float(price) if price else None
+
+    home_probs, home_prices, away_probs = [], [], []
+    dc_prices: dict[str, list[float]] = {"1X": [], "12": [], "X2": []}
+    ft_totals_by_threshold: dict[float, list[tuple[float, float, float, float]]] = {}
+    ht_totals_by_threshold: dict[float, list[tuple[float, float, float, float]]] = {}
+
+    for bm in bookmaker_odds.values():
+        markets = bm.get("markets", {})
+
+        home_p = _price(markets, OddsPapiProvider.FT_RESULT_MARKET_ID, OddsPapiProvider.FT_RESULT_OUTCOME_IDS["home"])
+        draw_p = _price(markets, OddsPapiProvider.FT_RESULT_MARKET_ID, OddsPapiProvider.FT_RESULT_OUTCOME_IDS["draw"])
+        away_p = _price(markets, OddsPapiProvider.FT_RESULT_MARKET_ID, OddsPapiProvider.FT_RESULT_OUTCOME_IDS["away"])
+        if home_p and draw_p and away_p:
+            probs = devig_market([("home", home_p), ("draw", draw_p), ("away", away_p)])
+            if "home" in probs:
+                home_probs.append(probs["home"])
+                home_prices.append(home_p)
+            if "away" in probs:
+                away_probs.append(probs["away"])
+
+        for outcome_id, key in OddsPapiProvider.DOUBLE_CHANCE_OUTCOME_MAP.items():
+            price = _price(markets, OddsPapiProvider.DOUBLE_CHANCE_MARKET_ID, outcome_id)
+            if price:
+                dc_prices[key].append(price)
+
+        # Appka živě ověřila (2026-08-05): marketId u Over/Under trhů appce
+        # odpovídá VŽDY jen tomu Over outcomu (over_id) — market s tímhle
+        # ID appce vrací OBĚ strany (Over i Under) jako dva outcomes uvnitř
+        # sebe, ne dva samostatné markety. under_id appka proto použije
+        # jen jako outcomeId, ne jako druhý market_id (appka to napoprvé
+        # spletla, appka to opravila po testu na reálné odpovědi — bez
+        # tyhle opravy appce vždycky vyšlo 0 nalezených prahů).
+        for threshold, (over_id, under_id) in OddsPapiProvider.FT_TOTALS_THRESHOLDS.items():
+            over_p = _price(markets, over_id, over_id)
+            under_p = _price(markets, over_id, under_id)
+            if over_p and under_p:
+                p_over, p_under = devig_two_way(over_p, under_p)
+                ft_totals_by_threshold.setdefault(threshold, []).append((over_p, p_over, under_p, p_under))
+
+        for threshold, (over_id, under_id) in OddsPapiProvider.HT_TOTALS_THRESHOLDS.items():
+            over_p = _price(markets, over_id, over_id)
+            under_p = _price(markets, over_id, under_id)
+            if over_p and under_p:
+                p_over, p_under = devig_two_way(over_p, under_p)
+                ht_totals_by_threshold.setdefault(threshold, []).append((over_p, p_over, under_p, p_under))
+
+    if home_probs:
+        result["market_implied_probabilities"]["match_winner:home"] = sum(home_probs) / len(home_probs)
+        result["favorite_win_market_odds"] = _median(home_prices)
+    if away_probs:
+        result["market_implied_probabilities"]["match_winner:away"] = sum(away_probs) / len(away_probs)
+
+    for key, prices in dc_prices.items():
+        if prices:
+            odds = _median(prices)
+            result["double_chance_odds"][key] = odds
+            result["market_implied_probabilities"][f"double_chance:{key}"] = 1.0 / odds
+
+    if ft_totals_by_threshold:
+        threshold = max(ft_totals_by_threshold, key=lambda t: len(ft_totals_by_threshold[t]))
+        pp = ft_totals_by_threshold[threshold]
+        result["over_threshold"] = threshold
+        result["over_odds"] = _median([p for p, _, _, _ in pp])
+        result["over_probability"] = sum(p for _, p, _, _ in pp) / len(pp)
+        result["under_odds"] = _median([p for _, _, p, _ in pp])
+        result["under_probability"] = sum(p for _, _, _, p in pp) / len(pp)
+
+    if ht_totals_by_threshold:
+        threshold = max(ht_totals_by_threshold, key=lambda t: len(ht_totals_by_threshold[t]))
+        pp = ht_totals_by_threshold[threshold]
+        result["ht_over_threshold"] = threshold
+        result["ht_over_odds"] = _median([p for p, _, _, _ in pp])
+        result["ht_over_probability"] = sum(p for _, p, _, _ in pp) / len(pp)
+        result["ht_under_odds"] = _median([p for _, _, p, _ in pp])
+        result["ht_under_probability"] = sum(p for _, _, _, p in pp) / len(pp)
+        result["market_implied_probabilities"][f"ht_over_goals:over_{threshold}"] = result["ht_over_probability"]
+        result["market_implied_probabilities"][f"ht_over_goals:under_{threshold}"] = result["ht_under_probability"]
+
+    return result
+
+
+# =======================================================================
 # API-FOOTBALL — přímo přes api-sports.io (NE RapidAPI). Stejný klíč
 # (APISPORTS_KEY) jako u Basketball/Hockey výše — jedna registrace na
 # dashboard.api-sports.io zdarma odemkne i fotbal.

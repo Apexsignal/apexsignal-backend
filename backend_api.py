@@ -2078,6 +2078,8 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     if sport == Sport.FOOTBALL and matched_pairs:
         _enrich_shortlist_with_extra_markets(matched_pairs)
 
+    _enrich_with_oddspapi(matches, sport)
+
 
 MAX_EXTRA_MARKET_SHORTLIST = 15  # appka dvojtip/poločas tahá přes dotaz NA
 # KAŽDÝ zápas zvlášť (viz _enrich_shortlist_with_extra_markets) — dražší
@@ -2132,6 +2134,80 @@ def _enrich_shortlist_with_extra_markets(matched_pairs: list[tuple[MatchInput, "
             matched_count += 1
 
     print(f"[enrich-odds-extra] {matched_count}/{len(shortlist)} shortlist zápasů má dvojtip/poločas")
+
+
+ODDSPAPI_MAX_SHORTLIST = 10  # appka má na OddsPapi jen 250 requestů/měsíc
+# ZDARMA a jeden /odds dotaz je navíc velký (~8 MB na zápas) — mnohem
+# menší strop než MAX_EXTRA_MARKET_SHORTLIST u the-odds-api.
+
+
+def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
+    """
+    Poslední záchrana za API-Football + the-odds-api (_enrich_with_market_odds
+    výše) — appka OddsPapi volá JEN pro zápasy, co ani jeden z předchozích
+    dvou zdrojů nenapároval na ŽÁDNÝ reálný tržní kurz (chybí
+    data_availability["market_odds"]). Bez tohohle appka pro tyhle zápasy
+    (typicky česká liga, Peru, mimosezónní evropské kvalifikace) MUSELA
+    cenu vymýšlet z vlastního modelu (favorite_odds fallback v
+    data_provider.normalize_to_match_input) — živě potvrzený problém
+    důvěryhodnosti (uživatel nahlásil rozdíly 2-50 % proti reálným
+    Tipsport cenám u zápasu Vlašim/PAOK/Alianza, 2026-08-05).
+
+    Appka utrácí omezenou měsíční kvótu (ODDSPAPI_MAX_SHORTLIST) tam, kde
+    model čeká nejvíc gólů — stejné řazení jako u
+    _enrich_shortlist_with_extra_markets.
+    """
+    if sport != Sport.FOOTBALL:
+        return
+    try:
+        odds_provider = data_provider.OddsPapiProvider()
+    except RuntimeError:
+        return
+
+    uncovered = [m for m in matches if not m.data_availability.get("market_odds")]
+    if not uncovered:
+        return
+    shortlist = sorted(
+        uncovered, key=lambda m: m.home_expected_goals + m.away_expected_goals, reverse=True,
+    )[:ODDSPAPI_MAX_SHORTLIST]
+
+    matched_count = 0
+    for match in shortlist:
+        tournament_id = data_provider.ODDSPAPI_TOURNAMENT_IDS.get(match.league_id)
+        if tournament_id is None:
+            continue
+        fixture = odds_provider.find_matching_fixture(tournament_id, match.home_team, match.away_team, match.kickoff_date)
+        if fixture is None:
+            continue
+        raw = odds_provider.get_odds(fixture["fixtureId"])
+        if not raw:
+            continue
+        adapted = data_provider.adapt_oddspapi_odds(raw)
+
+        if adapted["favorite_win_market_odds"]:
+            match.favorite_win_market_odds = adapted["favorite_win_market_odds"]
+        if adapted["market_implied_probabilities"]:
+            match.market_implied_probabilities.update(adapted["market_implied_probabilities"])
+            match.market_odds_bookmaker_count = adapted.get("bookmaker_count")
+            match.data_availability["market_odds"] = True
+            matched_count += 1
+
+        if adapted["over_threshold"] is not None:
+            threshold = adapted["over_threshold"]
+            match.market_implied_probabilities[f"{MarketType.OVER_GOALS.value}:over_{threshold}"] = adapted["over_probability"]
+            match.over_goals_odds[threshold] = adapted["over_odds"]
+            if adapted.get("under_odds") is not None:
+                match.market_implied_probabilities[f"{MarketType.OVER_GOALS.value}:under_{threshold}"] = adapted["under_probability"]
+                match.under_goals_odds[threshold] = adapted["under_odds"]
+
+        if adapted["double_chance_odds"]:
+            match.double_chance_odds.update(adapted["double_chance_odds"])
+        if adapted["ht_over_threshold"] is not None:
+            match.ht_over_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_over_odds"]
+            if adapted.get("ht_under_odds") is not None:
+                match.ht_under_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_under_odds"]
+
+    print(f"[enrich-odds-oddspapi] {matched_count}/{len(shortlist)} zápasů bez kurzu dostalo OddsPapi kurz")
 
 
 def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_id: Optional[str] = None) -> list[MatchInput]:
@@ -4634,6 +4710,55 @@ def test_sportmonks(
             for fx in fixtures[:20]
         ],
     }
+
+
+@app.get("/admin/test-oddspapi")
+def test_oddspapi(
+    request: Request, league_id: Optional[int] = None, home_team: Optional[str] = None,
+    away_team: Optional[str] = None, kickoff_date: Optional[str] = None,
+    country: Optional[str] = None, league_name: Optional[str] = None,
+):
+    """
+    Diagnostika pro živě AKTIVNÍ třetí zdroj kurzů (2026-08-05, na rozdíl
+    od SportMonks výše appka OddsPapi ověřila naostro a zapojila do
+    _enrich_with_oddspapi). Admin-key gated, NIC neukládá.
+
+    Použití:
+    - league_id + home_team + away_team (+ volitelně kickoff_date) —
+      appka projde přesně tu cestu, co používá při generování: najde
+      tournamentId v ODDSPAPI_TOURNAMENT_IDS, spáruje zápas, spočítá
+      adapt_oddspapi_odds. Bez mapování appka vrátí status "no_mapping".
+    - country + league_name (bez league_id) — appka spustí
+      find_tournament_candidates (fuzzy hledání), užitečné při dohledávání
+      DALŠÍHO tournamentId pro rozšíření ODDSPAPI_TOURNAMENT_IDS.
+    - Bez ničeho appka jen ověří, že klíč funguje (GET /account).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        op_provider = data_provider.OddsPapiProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if league_id and home_team and away_team:
+        tournament_id = data_provider.ODDSPAPI_TOURNAMENT_IDS.get(league_id)
+        if tournament_id is None:
+            return {"status": "no_mapping", "league_id": league_id, "known_mappings": data_provider.ODDSPAPI_TOURNAMENT_IDS}
+        fixture = op_provider.find_matching_fixture(tournament_id, home_team, away_team, kickoff_date)
+        if fixture is None:
+            return {"status": "no_match", "tournament_id": tournament_id, "home_team": home_team, "away_team": away_team}
+        raw = op_provider.get_odds(fixture["fixtureId"])
+        return {"status": "matched", "fixture": fixture, "adapted_odds": data_provider.adapt_oddspapi_odds(raw)}
+
+    if country and league_name:
+        candidates = op_provider.find_tournament_candidates(country, league_name)
+        return {"candidates": [{"score": round(s, 3), "tournament": t} for s, t in candidates]}
+
+    import requests as _requests
+    resp = _requests.get(f"{op_provider.BASE_URL}/account", params={"apiKey": op_provider.api_key}, timeout=10)
+    return {"status": resp.status_code, "account": resp.json() if resp.ok else resp.text[:500]}
 
 
 @app.get("/admin/edge-diagnostic")
