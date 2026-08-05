@@ -107,13 +107,6 @@ def _progress_increment(request_id: Optional[str]) -> None:
             entry["ts"] = time.monotonic()
 
 
-def _progress_clear(request_id: Optional[str]) -> None:
-    if not request_id:
-        return
-    with _GENERATION_PROGRESS_LOCK:
-        _GENERATION_PROGRESS.pop(request_id, None)
-
-
 # Appka generování spouští na SAMOSTATNÉM vlákně a výsledek si appka
 # odloží sem, ať appka nemusí držet otevřené jedno dlouhé HTTP spojení po
 # celou dobu (1-3 minuty) — na telefonu appka mezitím klidně vypne/uspí a
@@ -2415,8 +2408,15 @@ def _start_generation_job(user_id: int, req: TicketGenerateRequest, run_fn) -> s
         except Exception as e:
             print(f"[generate-job] {request_id} selhalo: {e}")
             _results_store(request_id, {"status": "error", "detail": "Generování se nepovedlo, zkus to znovu."})
-        finally:
-            _progress_clear(request_id)
+        # Appka tu záměrně NEMAŽE _GENERATION_PROGRESS hned po doběhnutí
+        # (dřív tu bylo _progress_clear(request_id)) — když je generování
+        # rychlé (zápasy/statistiky ještě teplé v mezipaměti z předchozího
+        # generování), appka dřív stihla smazat záznam DŘÍV, než frontend
+        # poslal svůj další dotaz (pollGenerationProgress, každých 900 ms) —
+        # frontend pak dostal "known:false" navěky a neukázal procenta,
+        # jen dekorativní konzoli (nahlášeno uživatelem). Appka nechává
+        # záznam ležet a spoléhá na TTL úklid v _progress_set_total (10 min),
+        # ať frontend i po dokončení aspoň JEDNOU uvidí finální 100 %.
 
     threading.Thread(target=worker, daemon=True).start()
     return request_id
