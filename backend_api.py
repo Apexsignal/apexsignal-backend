@@ -4444,6 +4444,59 @@ def generate_yield_test_result(job_id: str, request: Request):
         return _YIELD_TEST_RESULTS.get(job_id, {"status": "unknown"})
 
 
+@app.get("/admin/test-odds-markets")
+def test_odds_markets(request: Request, sport_key: str = "soccer_epl", markets: str = "h2h,totals,double_chance,totals_h1"):
+    """
+    Jednorázová diagnostika (2026-08-05) — appka zjišťuje, jestli
+    the-odds-api pro evropské bookmakery (region eu) vůbec vrací
+    double_chance a totals_h1 (poločasové góly) trhy, než appka postaví
+    celou funkci kolem nich. Dokumentace the-odds-api appce jasně
+    neřekla, jestli tyhle "rozšířené" trhy pokrývají i EU bookmakery (jen
+    že US sporty ano) — appka to radši ověří živě na jedné lize (pár
+    kreditů), než aby stavěla dvojtip/poločas na datech, co appka
+    nedostane. NIC neukládá, jen appce ukáže syrovou odpověď.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        odds_provider = data_provider.OddsAPIProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    import requests as _requests
+    resp = _requests.get(
+        f"{odds_provider.BASE_URL}/sports/{sport_key}/odds",
+        params={"apiKey": odds_provider.api_key, "regions": "eu", "markets": markets, "oddsFormat": "decimal"},
+        timeout=15,
+    )
+    if not resp.ok:
+        return {"status": resp.status_code, "detail": resp.text[:500]}
+
+    events = resp.json()
+    market_key_counts: dict[str, int] = {}
+    sample_event = None
+    for event in events:
+        found_markets = set()
+        for bm in event.get("bookmakers", []):
+            for m in bm.get("markets", []):
+                found_markets.add(m["key"])
+        for mk in found_markets:
+            market_key_counts[mk] = market_key_counts.get(mk, 0) + 1
+        if sample_event is None and found_markets:
+            sample_event = event
+
+    return {
+        "sport_key": sport_key,
+        "events_total": len(events),
+        "market_key_counts": market_key_counts,
+        "remaining_requests": resp.headers.get("x-requests-remaining"),
+        "used_requests": resp.headers.get("x-requests-used"),
+        "sample_event": sample_event,
+    }
+
+
 @app.get("/admin/candidate-pool-preview")
 def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
