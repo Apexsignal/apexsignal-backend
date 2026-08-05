@@ -1352,6 +1352,8 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     # to, co appka PŮVODNĚ chtěla.
     1,    # World Cup
     4,    # Euro
+    960,  # Euro - kvalifikace — appka měla kvalifikaci na MS, ale na Euro
+          # kvalifikaci appka neměla vůbec nic
     5,    # UEFA Nations League
     10,   # Friendlies (mezinárodní přátelská)
     32,   # World Cup Qualifiers Europe
@@ -1365,6 +1367,11 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
           # Sudamericana appce úplně chyběla, i když je to reálná,
           # sázkově zajímavá klubová soutěž vedle ní
     9,    # CONMEBOL Copa America
+    22,   # CONCACAF Gold Cup
+    772,  # Leagues Cup (CONCACAF/MLS)
+    15,   # FIFA Club World Cup — appka tu dřív neměla, appka to ověřila
+          # křížově přes the-odds-api (appka odsud bere tržní kurzy) —
+          # patří tam mezi soutěže s reálným sázkovým pokrytím
 }
 
 
