@@ -1,0 +1,26 @@
+# Rezervační systém masáží (massage-booking-system/) běží jako SAMOSTATNÁ
+# Render služba, oddělená od hlavního ApexSignal backendu — sdílí jen tenhle
+# repozitář (viz massage-booking-system/README.md). Appka nepotvrzené
+# (pending) rezervace po vypršení TTL musí uvolnit, jinak by termín zůstal
+# navždy "obsazený" jen tím, že si ho někdo vybral a nepotvrdil SMS.
+#
+# Vyžaduje (Settings → Secrets and variables → Actions):
+#   - repository VARIABLE  MASSAGE_BOOKING_BASE_URL  — např.
+#     https://massage-booking-system.onrender.com (BEZ lomítka na konci)
+#   - repository SECRET    MASSAGE_ADMIN_TASK_KEY    — stejná hodnota, jakou
+#     má nová Render služba v proměnné ADMIN_TASK_KEY
+name: Expirace nepotvrzených rezervací masáží
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  expire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Uvolnit nepotvrzené rezervace po vypršení TTL
+        run: |
+          curl -sf -X POST "${{ vars.MASSAGE_BOOKING_BASE_URL }}/admin/expire-pending" \
+            -H "X-Admin-Key: ${{ secrets.MASSAGE_ADMIN_TASK_KEY }}"

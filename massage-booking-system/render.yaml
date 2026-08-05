@@ -1,0 +1,48 @@
+# render.yaml — Blueprint pro NOVOU, samostatnou Render službu tohohle
+# rezervačního systému. NENÍ propojený s hlavním render.yaml v kořeni
+# repozitáře (ten patří ApexSignal backendu a appka se ho nedotýká) —
+# tenhle soubor je čistě pro tenhle subprojekt.
+#
+# Render defaultně hledá render.yaml v KOŘENI repozitáře, takže tenhle
+# soubor se automaticky "New + → Blueprint" nenajde. Buď:
+#   a) při zakládání Blueprintu v Render dashboardu použij pokročilé
+#      nastavení a ručně zadej cestu k tomuto souboru
+#      (massage-booking-system/render.yaml), NEBO
+#   b) (jednodušší a doporučené) založ službu i databázi ručně přes
+#      "New +" → Web Service / PostgreSQL — viz README.md v tomhle
+#      adresáři, krok za krokem.
+#
+# V obou případech nastav u webové služby "Root Directory" na
+# massage-booking-system, jinak Render nenajde requirements.txt/app/.
+
+databases:
+  - name: massage-booking-db
+    plan: free
+    databaseName: massage_booking
+    user: massage_booking
+
+services:
+  - type: web
+    name: massage-booking-system
+    runtime: python
+    rootDir: massage-booking-system
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: DATABASE_URL
+        fromDatabase:
+          name: massage-booking-db
+          property: connectionString
+      - key: ADMIN_TASK_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: SMS_SENDER_BACKEND
+        value: smsbrana
+      - key: SMSBRANA_LOGIN
+        sync: false
+      - key: SMSBRANA_PASSWORD
+        sync: false
