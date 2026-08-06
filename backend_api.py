@@ -85,7 +85,22 @@ FIXTURE_ENRICHMENT_WORKERS = 20
 # spadne zpátky na starý heuristický odhad (viz data_provider.
 # get_dixon_coles_strengths) — appka tímhle přepínačem NIKDY negeneruje
 # míň tiketů, jen případně přesnější xG tam, kde má dost dat.
-DIXON_COLES_ENABLED = os.environ.get("DIXON_COLES_ENABLED", "false").strip().lower() == "true"
+#
+# Appka to čte z DB (app_settings, přes db.get_setting), NE z pevné env
+# proměnné — appka chtěla umět tlačítkem v appce (POST /admin/set-dixon-coles)
+# přepnout OKAMŽITĚ, bez ručního zásahu na Renderu a bez redeploye. Env
+# proměnná DIXON_COLES_ENABLED appce zůstává jako výchozí hodnota, POKUD
+# appka v DB ještě žádnou nemá uloženou (první spuštění po tomhle commitu).
+DIXON_COLES_SETTING_KEY = "dixon_coles_enabled"
+
+
+def _is_dixon_coles_enabled() -> bool:
+    env_default = "true" if os.environ.get("DIXON_COLES_ENABLED", "false").strip().lower() == "true" else "false"
+    try:
+        value = db.get_setting(DIXON_COLES_SETTING_KEY, default=env_default)
+    except Exception:
+        value = env_default
+    return (value or "false").strip().lower() == "true"
 
 # Sdílený stav pro SKUTEČNÝ postup obohacování zápasů (kolikátý z kolika
 # appka právě zpracovala) — appka ho drží v paměti procesu, ne v DB,
@@ -1851,7 +1866,7 @@ def admin_create_channel_payment_link(request: Request):
 # =====================================================================
 # Pomocné funkce — stahují zápasy pro každý sport a skládají MatchInput
 # =====================================================================
-def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lock) -> Optional[MatchInput]:
+def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lock, dixon_coles_enabled: bool = False) -> Optional[MatchInput]:
     """Appka tady udělá VŠECHNA obohacující volání pro JEDEN zápas — viz
     _build_football_matches, co tohle pustí pro víc zápasů SOUBĚŽNĚ
     (vlákna), ne jedno po druhém."""
@@ -1942,7 +1957,7 @@ def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lo
     # (dixon_coles_xg zůstane None) — appka NIKDY negeneruje o nic míň
     # tiketů kvůli tomuhle přepínači, jen appka může použít přesnější xG.
     dixon_coles_xg = None
-    if DIXON_COLES_ENABLED and league_id and fixture.get("season"):
+    if dixon_coles_enabled and league_id and fixture.get("season"):
         try:
             strengths = data_provider.get_dixon_coles_strengths(provider, int(league_id), int(fixture["season"]))
             if strengths:
@@ -1980,11 +1995,15 @@ def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Opti
     standings_lock = threading.Lock()
     matches: list[MatchInput] = []
 
+    # Appka zjistí přepínač JEDNOU na celý běh (ne pro každý zápas zvlášť)
+    # — jeden DB dotaz místo desítek souběžných ve vláknech níž.
+    dixon_coles_enabled = _is_dixon_coles_enabled()
+
     _progress_set_total(request_id, len(raw_fixtures))
 
     with ThreadPoolExecutor(max_workers=FIXTURE_ENRICHMENT_WORKERS) as executor:
         future_to_idx = {
-            executor.submit(_enrich_one_fixture, provider, raw, standings_cache, standings_lock): idx
+            executor.submit(_enrich_one_fixture, provider, raw, standings_cache, standings_lock, dixon_coles_enabled): idx
             for idx, raw in enumerate(raw_fixtures, start=1)
         }
         for future in as_completed(future_to_idx):

@@ -189,6 +189,17 @@ CREATE TABLE IF NOT EXISTS telegram_subscribers (
     joined_at TIMESTAMP DEFAULT now()
 );
 
+-- Trvalé přepínače/nastavení appky (na rozdíl od api_cache výše, tady
+-- appka NEMÁ TTL — hodnota platí, dokud ji appka výslovně nepřepíše).
+-- První použití: DIXON_COLES_ENABLED (viz backend_api.py) — appka to
+-- chtěla umět zapnout/vypnout tlačítkem v appce bez ručního zásahu na
+-- Renderu a bez redeploye.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT now()
+);
+
 -- Předplatné placeného Telegram kanálu a jeho párovací kódy appka
 -- zakládá až v migračním bloku níž (ensure_schema) — potřebují appce
 -- zjistit, jestli na produkci ještě běží STARÁ struktura (vázaná na
@@ -517,6 +528,26 @@ def cache_set(key: str, payload: list, ttl_seconds: int = 4 * 3600) -> None:
                ON CONFLICT (cache_key) DO UPDATE
                SET payload = EXCLUDED.payload, expires_at = EXCLUDED.expires_at""",
             (key, json.dumps(payload), ttl_seconds),
+        )
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Trvalý přepínač appky (viz app_settings výše) — na rozdíl od
+    cache_get/cache_set tady appka nemá TTL, hodnota platí, dokud ji
+    appka výslovně nepřepíše přes set_setting."""
+    with get_cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO app_settings (key, value, updated_at)
+               VALUES (%s, %s, now())
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()""",
+            (key, value),
         )
 
 
