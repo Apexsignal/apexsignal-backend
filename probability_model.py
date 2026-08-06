@@ -470,6 +470,15 @@ class MatchInput:
     away_expected_goals_ht: float = 0.0
 
     favorite_win_market_odds: float = 1.0
+    # True jen když favorite_win_market_odds pochází ze SKUTEČNÉHO tržního
+    # kurzu (API-Football/the-odds-api/OddsPapi) — appka dřív bez reálného
+    # kurzu cenu VYMÝŠLELA z vlastního modelu (viz normalize_to_match_input),
+    # což appka živě potvrdila jako reálný problém důvěryhodnosti (2026-08-06,
+    # rozdíly 2-50 % proti skutečným Tipsport cenám u zápasu Vlašim/PAOK/
+    # Alianza). build_candidates teď MATCH_WINNER kandidáta nabídne jen
+    # když je tenhle flag True — stejný princip appka už dřív měla u
+    # UNDER_GOALS/HT_UNDER_GOALS (jen skutečný kurz, nic dopočítaného).
+    favorite_odds_verified: bool = False
     over_goals_odds: dict[float, float] = field(default_factory=dict)            # {2.5: 1.85, ...}
     under_goals_odds: dict[float, float] = field(default_factory=dict)           # {2.5: 1.95, ...} — jen skutečné tržní kurzy, nikdy dopočítané z modelu
     btts_yes_odds: Optional[float] = None      # kurz na "oba týmy dají gól: ano"
@@ -624,7 +633,7 @@ class MarketEvaluator:
                 match.home_expected_goals, match.away_expected_goals
             )
             favorite_side = max(winner_probs, key=winner_probs.get)
-            if favorite_side != "draw":
+            if favorite_side != "draw" and match.favorite_odds_verified:
                 candidates.append(cls._candidate(
                     match, MarketType.MATCH_WINNER, favorite_side,
                     winner_probs[favorite_side], match.favorite_win_market_odds,

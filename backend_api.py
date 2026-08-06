@@ -2047,6 +2047,7 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
         adapted = data_provider.adapt_odds_api_event(event)
         if adapted["favorite_win_market_odds"]:
             match.favorite_win_market_odds = adapted["favorite_win_market_odds"]
+            match.favorite_odds_verified = True
         match.market_implied_probabilities.update(adapted["market_implied_probabilities"])
         if adapted.get("btts_yes_odds"):
             match.btts_yes_odds = adapted["btts_yes_odds"]
@@ -2186,6 +2187,7 @@ def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
 
         if adapted["favorite_win_market_odds"]:
             match.favorite_win_market_odds = adapted["favorite_win_market_odds"]
+            match.favorite_odds_verified = True
         if adapted["market_implied_probabilities"]:
             match.market_implied_probabilities.update(adapted["market_implied_probabilities"])
             match.market_odds_bookmaker_count = adapted.get("bookmaker_count")

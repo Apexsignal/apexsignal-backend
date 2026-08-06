@@ -174,19 +174,18 @@ def normalize_to_match_input(
     )
     expected_cards = _estimate_expected_cards(home_stats, away_stats)
 
-    # FALLBACK KURZY: Pokud API-Football nevrátil kurzy, estimuj z model pravděpodobnosti
+    # Appka DŘÍV bez reálného kurzu cenu VYMÝŠLELA z vlastního modelu
+    # (1/pravděpodobnost) — živě potvrzený problém důvěryhodnosti
+    # (2026-08-06, uživatel dohledal rozdíly 2-50 % proti reálným
+    # Tipsport cenám u zápasu Vlašim/PAOK/Alianza). Appka teď bez
+    # skutečného tržního kurzu MATCH_WINNER kandidáta vůbec nenabídne
+    # (favorite_odds_verified=False, viz build_candidates) — placeholder
+    # 2.0 appka nechává jen ať MatchInput má syntakticky platnou hodnotu
+    # (dataclass pole není Optional), na výběr kandidátů nemá žádný vliv.
     favorite_odds = odds_raw.get("match_winner", {}).get("favorite", None)
-    if favorite_odds is None or favorite_odds < 1.01:
-        # API-Football nevrátil kurzy - estimuj z Poissonova modelu (pokud máme data)
-        if home_xg is not None and away_xg is not None and home_xg > 0 and away_xg > 0:
-            try:
-                winner_probs = MarketEvaluator.match_winner_probabilities(home_xg, away_xg)
-                favorite_prob = max(winner_probs.values())  # Nejvyšší pravděpodobnost
-                favorite_odds = round(1.0 / max(favorite_prob, 0.01), 2)  # Převeď na kurz
-            except Exception:
-                favorite_odds = 2.0  # Fallback pokud Poisson selhá
-        else:
-            favorite_odds = 2.0  # Fallback pokud xG data chybí
+    favorite_odds_verified = favorite_odds is not None and favorite_odds >= 1.01
+    if not favorite_odds_verified:
+        favorite_odds = 2.0
 
     return MatchInput(
         match_id=fixture["id"],
@@ -217,6 +216,7 @@ def normalize_to_match_input(
         home_dead_rubber=home_dead_rubber,
         away_dead_rubber=away_dead_rubber,
         favorite_win_market_odds=favorite_odds,
+        favorite_odds_verified=favorite_odds_verified,
         over_goals_odds=odds_raw.get("over_goals", {}),     # {2.5: 1.85, 3.5: 2.60, ...}
         under_goals_odds=odds_raw.get("under_goals", {}),   # {2.5: 1.95, ...} — skutečné tržní kurzy
         btts_yes_odds=odds_raw.get("btts_yes"),
