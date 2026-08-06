@@ -2449,21 +2449,27 @@ class APIFootballProvider(SportsDataProvider):
         a data_provider.get_dixon_coles_strengths), ne k běžnému
         generování, takže appka nepotřebuje appku volat často (24h DB
         cache, stejně jako standings výše).
+
+        POZOR — appka záměrně NEDRŽÍ syrovou odpověď v in-memory cache
+        (na rozdíl od ostatních metod v týhle třídě). Appka živě potvrdila
+        OOM pád appky (2026-08-06, appka běží na 512 MB) krátce po zapnutí
+        Dixon-Coles — širokým oknem appka snadno projde 20-30 různých lig,
+        a syrová sezónní odpověď (stovky zápasů se všemi detaily appky u
+        API-Football) appce v paměti procesu zabírala zbytečně místo navíc
+        k tomu, co appka na 512 MB už dřív sotva uřídila. get_dixon_coles_strengths
+        (jediný appkou volající kód) si stejně kešuje jen malý VÝSLEDEK
+        fitu (pár čísel na tým), ne syrová data — appka je tu proto po
+        použití nechává zahodit, DB cache (24h) appce stačí pro příští den.
         """
         cache_key = f"league_results:{league_id}:{season}"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
         try:
             import db as _db
             db_cached = _db.cache_get(cache_key)
             if db_cached is not None:
-                self._cache.set(cache_key, db_cached)
                 return db_cached
         except Exception:
             pass
         fixtures = self._get("/fixtures", {"league": league_id, "season": season, "status": "FT"})
-        self._cache.set(cache_key, fixtures)
         try:
             import db as _db
             _db.cache_set(cache_key, fixtures, ttl_seconds=24 * 3600)
@@ -2523,6 +2529,15 @@ def adapt_league_results_for_dixon_coles(fixtures: list[dict]) -> list[tuple[int
     return results
 
 
+# Appka omezuje, kolik lig appka smí fitovat SOUČASNĚ — bez tohohle by
+# širokým oknem (FIXTURE_ENRICHMENT_WORKERS=20 vláken) appka klidně mohla
+# narazit na 15-20 RŮZNÝCH lig poprvé ve stejnou chvíli a stahovat/fitovat
+# je všechny paralelně, což na appčiných 512 MB (živě potvrzený OOM pád,
+# 2026-08-06) dřív nebo později znovu spadne. 3 souběžné appce stačí —
+# fit jedné ligy appce trvá jednotky vteřin, zbytek vláken si počká.
+_DIXON_COLES_FIT_SEMAPHORE = threading.Semaphore(3)
+
+
 def get_dixon_coles_strengths(provider: "APIFootballProvider", league_id: int, season: int) -> Optional[dict]:
     """
     DB-kešovaný (24h) wrapper okolo fit_dixon_coles_strengths — appka
@@ -2555,13 +2570,27 @@ def get_dixon_coles_strengths(provider: "APIFootballProvider", league_id: int, s
     except Exception:
         pass
 
-    try:
-        fixtures = provider.get_league_results(league_id, season)
-        results = adapt_league_results_for_dixon_coles(fixtures)
-        strengths = fit_dixon_coles_strengths(results)
-    except Exception as e:
-        print(f"[dixon-coles] Fit pro ligu {league_id}/{season} selhal: {e}")
-        return None
+    with _DIXON_COLES_FIT_SEMAPHORE:
+        # Appka mezitím (dokud appka čekala na semafor) mohla dostat
+        # výsledek od JINÉHO vlákna, co fitovalo tu samou ligu zrovna
+        # teď — appka to zkusí ještě jednou, ať appka fit nezbytečně
+        # nepočítá dvakrát.
+        cached = provider._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            fixtures = provider.get_league_results(league_id, season)
+            results = adapt_league_results_for_dixon_coles(fixtures)
+            strengths = fit_dixon_coles_strengths(results)
+            # Appka tyhle dvě (syrová sezónní data + rozbalené tuply) appce
+            # po fitu už nejsou k ničemu — appka je zahodí hned, ne až na konci
+            # funkce/GC cyklu, ať appka nedrží dvě kopie potenciálně velkých
+            # dat v paměti déle, než musí (appka to udělala kvůli živě
+            # potvrzenému OOM pádu, viz komentář u get_league_results výše).
+            del fixtures, results
+        except Exception as e:
+            print(f"[dixon-coles] Fit pro ligu {league_id}/{season} selhal: {e}")
+            return None
 
     if strengths is None:
         return None
@@ -2572,6 +2601,12 @@ def get_dixon_coles_strengths(provider: "APIFootballProvider", league_id: int, s
         _db.cache_set(cache_key, strengths, ttl_seconds=24 * 3600)
     except Exception:
         pass
+    # Appka uklidí hned po ČERSTVĚ spočítaném fitu (ne při zásahu do cache
+    # výš, ten už de facto proběhl) — appka to volá jednou na ligu, ne na
+    # zápas, takže appka si to na 512 MB může dovolit i uprostřed širokého
+    # generování (appka to udělala kvůli živě potvrzenému OOM pádu výš).
+    import gc
+    gc.collect()
     return strengths
 
 
