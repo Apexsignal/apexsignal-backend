@@ -3227,6 +3227,28 @@ def _list_saved_tickets_for_user(user_id: int) -> list[TicketResponse]:
     return result_list
 
 
+@app.get("/admin/user-tickets")
+def admin_user_tickets(request: Request, email: str):
+    """
+    Diagnostika (2026-08-06) — appka jinak nemá žádný způsob, jak se
+    admin-key přístupem podívat na uložené tikety KONKRÉTNÍHO uživatele
+    (/tickets/saved appka gatuje jen přihlašovacím tokenem toho
+    uživatele samotného, nic admin-key). Appka to potřebovala kvůli
+    zpětnému rozboru "jak appka tenhle konkrétní tiket sestavila" na
+    žádost uživatele. Read-only, nic neukládá.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Účet s tímhle e-mailem appka nenašla")
+
+    tickets = _list_saved_tickets_for_user(user["id"])
+    return {"user_id": user["id"], "email": email, "tickets": tickets}
+
+
 @app.get("/tickets/saved", response_model=list[TicketResponse])
 def list_saved_tickets(user_id: int = Depends(get_current_user_id)):
     """user_id appka bere VÝHRADNĚ z přihlašovacího tokenu — nikdy ne z
