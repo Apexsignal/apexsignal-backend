@@ -102,6 +102,31 @@ def _is_dixon_coles_enabled() -> bool:
         value = env_default
     return (value or "false").strip().lower() == "true"
 
+
+# E-maily účtů appky, co appka pouští k appce-interním přepínačům (zatím
+# jen Dixon-Coles model), BEZ nutnosti X-Admin-Key (ten appka nesmí dát
+# do frontendu, viz /settings/dixon-coles níže — X-Admin-Key otevírá i
+# nebezpečné admin endpointy jako mazání účtů). Appka to bere z ENV
+# proměnné (čárkou oddělený seznam), ať appka rozšíření na DALŠÍ účty
+# zvládne jen změnou proměnné na Renderu, bez zásahu do kódu — appka
+# defaultně nechává aspoň majitelův účet, ať appka funguje i BEZ ruční
+# konfigurace na Renderu.
+ADMIN_APP_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_APP_EMAILS", "d.voves@seznam.cz").split(",")
+    if e.strip()
+}
+
+
+def _is_admin_app_user(user_id: int) -> bool:
+    try:
+        user = db.get_user_by_id(user_id)
+    except Exception:
+        return False
+    email = (user or {}).get("email", "").strip().lower()
+    return bool(email) and email in ADMIN_APP_EMAILS
+
+
 # Sdílený stav pro SKUTEČNÝ postup obohacování zápasů (kolikátý z kolika
 # appka právě zpracovala) — appka ho drží v paměti procesu, ne v DB,
 # protože ho potřebuje jen po dobu jednoho generování (pár desítek
@@ -4889,6 +4914,32 @@ def test_dixon_coles(
         }
 
     return result
+
+
+class DixonColesSettingRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/dixon-coles")
+def get_dixon_coles_setting(user_id: int = Depends(get_current_user_id)):
+    """
+    Appka-interní přepínač (NE admin-key) — appka tenhle endpoint volá
+    přímo z appky (viz frontend tlačítko u generování), přihlášení stačí
+    obyčejným uživatelským tokenem. can_edit appka appce ukáže true jen
+    pro účty z ADMIN_APP_EMAILS (viz výš) — appka tlačítko normálním
+    uživatelům vůbec nezobrazí (frontend se podle can_edit rozhoduje),
+    ale i kdyby appka na frontendu udělala chybu, POST níže si to appka
+    ověří znovu na serveru.
+    """
+    return {"enabled": _is_dixon_coles_enabled(), "can_edit": _is_admin_app_user(user_id)}
+
+
+@app.post("/settings/dixon-coles")
+def set_dixon_coles_setting(payload: DixonColesSettingRequest, user_id: int = Depends(get_current_user_id)):
+    if not _is_admin_app_user(user_id):
+        raise HTTPException(status_code=403, detail="Tenhle přepínač může měnit jen admin účet appky")
+    db.set_setting(DIXON_COLES_SETTING_KEY, "true" if payload.enabled else "false")
+    return {"enabled": payload.enabled}
 
 
 @app.get("/admin/edge-diagnostic")
