@@ -74,6 +74,19 @@ import stripe
 # mírně pomalejší generování při širokém okně, ne rychlejší pád.
 FIXTURE_ENRICHMENT_WORKERS = 20
 
+# Dixon-Coles zafitovaná útočná/obranná síla CELÉ ligy (2026-08-06) — appka
+# to zkusila jako přesnější náhradu heuristického odhadu z posledních
+# zápasů dvou týmů (_estimate_expected_goals v data_provider.py). VYPNUTO
+# defaultně — appka tenhle přepínač staví jako bezpečnou volbu, kterou
+# uživatel může kdykoliv vrátit zpátky, kdyby nový model generoval míň
+# tiketů nebo horší výsledky (appka to sama NEROZHODUJE, jen nabízí, viz
+# GET /admin/test-dixon-coles pro ruční ověření PŘED zapnutím naostro).
+# Appka pro ligu/tým, kde nemá dost odehraných zápasů, automaticky
+# spadne zpátky na starý heuristický odhad (viz data_provider.
+# get_dixon_coles_strengths) — appka tímhle přepínačem NIKDY negeneruje
+# míň tiketů, jen případně přesnější xG tam, kde má dost dat.
+DIXON_COLES_ENABLED = os.environ.get("DIXON_COLES_ENABLED", "false").strip().lower() == "true"
+
 # Sdílený stav pro SKUTEČNÝ postup obohacování zápasů (kolikátý z kolika
 # appka právě zpracovala) — appka ho drží v paměti procesu, ne v DB,
 # protože ho potřebuje jen po dobu jednoho generování (pár desítek
@@ -1920,12 +1933,37 @@ def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lo
     weather = data_provider.get_match_weather(fixture.get("venue_city"), fixture.get("kickoff_time"))
     data_availability["weather"] = weather is not None
 
+    # Dixon-Coles (2026-08-06) — appka VYPNUTO defaultně (DIXON_COLES_ENABLED),
+    # bezpečný přepínač na vyzkoušení bez rizika, že appka přestane
+    # generovat tikety. Zapnuté: appka zkusí zafitovanou útočnou/obrannou
+    # sílu CELÉ ligy (viz data_provider.get_dixon_coles_strengths) místo
+    # heuristického odhadu ze dvou týmů. Bez dost dat appka funkce vrátí
+    # None a normalize_to_match_input tiše spadne zpátky na starý odhad
+    # (dixon_coles_xg zůstane None) — appka NIKDY negeneruje o nic míň
+    # tiketů kvůli tomuhle přepínači, jen appka může použít přesnější xG.
+    dixon_coles_xg = None
+    if DIXON_COLES_ENABLED and league_id and fixture.get("season"):
+        try:
+            strengths = data_provider.get_dixon_coles_strengths(provider, int(league_id), int(fixture["season"]))
+            if strengths:
+                dixon_coles_xg = data_provider.dixon_coles_expected_goals(
+                    fixture["home_team_id"], fixture["away_team_id"], strengths,
+                )
+        except Exception as e:
+            print(f"[dixon-coles] Výpočet pro {fixture['home_team']} vs {fixture['away_team']} selhal: {e}")
+        if dixon_coles_xg:
+            # Heuristický odhad appka vidí v "[enrich]" logu o pár řádků výš
+            # (avg_goals za posledních 10 zápasů) — appka ho tu nepočítá
+            # znovu (musela by duplikovat celou home_factor/away_factor
+            # logiku z normalize_to_match_input), stačí porovnat ručně.
+            print(f"[dixon-coles] {fixture['home_team']} vs {fixture['away_team']}: DC xG=({dixon_coles_xg[0]}, {dixon_coles_xg[1]})")
+
     return data_provider.normalize_to_match_input(
         Sport.FOOTBALL, fixture, home_stats, away_stats, odds, home_form, away_form, weather,
         home_injury_count=home_injury_count, away_injury_count=away_injury_count,
         home_rest_days=home_rest_days, away_rest_days=away_rest_days,
         home_dead_rubber=home_dead_rubber, away_dead_rubber=away_dead_rubber,
-        data_availability=data_availability,
+        data_availability=data_availability, dixon_coles_xg=dixon_coles_xg,
     )
 
 
@@ -4761,6 +4799,77 @@ def test_oddspapi(
     import requests as _requests
     resp = _requests.get(f"{op_provider.BASE_URL}/account", params={"apiKey": op_provider.api_key}, timeout=10)
     return {"status": resp.status_code, "account": resp.json() if resp.ok else resp.text[:500]}
+
+
+@app.get("/admin/test-dixon-coles")
+def test_dixon_coles(
+    request: Request, league_id: int, season: Optional[int] = None,
+    home_team_id: Optional[int] = None, away_team_id: Optional[int] = None,
+):
+    """
+    Diagnostika (2026-08-06) pro ruční ověření Dixon-Coles fitu PŘED
+    zapnutím DIXON_COLES_ENABLED naostro — appka NIC neukládá a nijak
+    neovlivňuje živé generování, jen appce fituje a rovnou ukáže
+    výsledek. Admin-key gated.
+
+    - Bez home_team_id/away_team_id appka vrátí souhrn: kolik zápasů appka
+      fitovala, jestli fit zkonvergoval, a TOP 5 nejsilnějších/nejslabších
+      týmů podle attack/defense — rychlá "vypadá to rozumně?" kontrola.
+    - S oběma team_id appka navíc spočítá konkrétní DC xG pro ten zápas.
+
+    season appka nechá appce doplnit sama (_season_year_for_league), pokud
+    ho nezadáš.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        provider = data_provider.APIFootballProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    from datetime import date as _date
+    resolved_season = season or data_provider._season_year_for_league(league_id, _date.today())
+
+    strengths = data_provider.get_dixon_coles_strengths(provider, league_id, resolved_season)
+    if strengths is None:
+        import probability_model as _pm
+        return {
+            "status": "no_fit", "league_id": league_id, "season": resolved_season,
+            "detail": (
+                f"Appka nemá dost dat (min {_pm.DIXON_COLES_MIN_MATCHES} odehraných zápasů, "
+                f"min {_pm.DIXON_COLES_MIN_TEAMS} týmů) nebo fit selhal — appka by v produkci "
+                "spadla zpátky na starý heuristický odhad."
+            ),
+        }
+
+    teams = strengths["teams"]
+    ranked_attack = sorted(teams.items(), key=lambda kv: kv[1]["attack"], reverse=True)
+    ranked_defense = sorted(teams.items(), key=lambda kv: kv[1]["defense"])  # nižší = lepší obrana
+
+    result = {
+        "status": "fitted",
+        "league_id": league_id,
+        "season": resolved_season,
+        "sample_size": strengths["sample_size"],
+        "converged": strengths["converged"],
+        "league_avg_goals": strengths["league_avg_goals"],
+        "teams_total": len(teams),
+        "top5_attack": ranked_attack[:5],
+        "top5_defense": ranked_defense[:5],
+        "bottom5_attack": ranked_attack[-5:],
+    }
+
+    if home_team_id and away_team_id:
+        dc_xg = data_provider.dixon_coles_expected_goals(home_team_id, away_team_id, strengths)
+        result["match_xg"] = {
+            "home_team_id": home_team_id, "away_team_id": away_team_id,
+            "dixon_coles_xg": dc_xg,
+            "note": "None znamená, že appka pro jeden z týmů nemá zafitovaná čísla (nováček/chybné ID).",
+        }
+
+    return result
 
 
 @app.get("/admin/edge-diagnostic")

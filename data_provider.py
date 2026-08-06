@@ -31,7 +31,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from probability_model import MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator, HT_GOAL_SHARE
+from probability_model import (
+    MatchInput, Sport, MarketType, devig_market, devig_two_way, MarketEvaluator, HT_GOAL_SHARE,
+    fit_dixon_coles_strengths, dixon_coles_expected_goals,
+)
 
 
 # ---------------------------------------------------------------------
@@ -151,11 +154,20 @@ def normalize_to_match_input(
     home_dead_rubber: float = 1.0,
     away_dead_rubber: float = 1.0,
     data_availability: Optional[dict] = None,
+    dixon_coles_xg: Optional[tuple[float, float]] = None,
 ) -> MatchInput:
     """
     Převede syrová data z providera na MatchInput konzumovaný
     probability_model.TicketGenerator. Mapování klíčů (`fixture["..."]`)
     je třeba upravit dle konkrétního API kontraktu.
+
+    dixon_coles_xg: appka SPOČÍTÁ heuristický odhad (níže) vždy — appka
+    ho nechává i jako bezpečný fallback — ale pokud appka dostane
+    zafitovaný pár (home_xg, away_xg) z probability_model.
+    dixon_coles_expected_goals (viz backend_api.DIXON_COLES_ENABLED),
+    appka ho použije MÍSTO heuristického odhadu. weather/injury/rest_days/
+    dead_rubber korekce appka aplikuje na OBOJÍ stejně (multiplikativní
+    faktor je nezávislý na tom, odkud appka vzala základní xG).
     """
     weather_factor = weather_goal_adjustment_factor(weather)
     home_factor = weather_factor * injury_goal_adjustment_factor(home_injury_count) \
@@ -172,6 +184,10 @@ def normalize_to_match_input(
         away_stats, is_home=False, recency_weighted_avg=away_recent_form,
         adjustment_factor=away_factor, opponent_stats=home_stats,
     )
+    if dixon_coles_xg is not None:
+        dc_home_xg, dc_away_xg = dixon_coles_xg
+        home_xg = round(dc_home_xg * home_factor, 3)
+        away_xg = round(dc_away_xg * away_factor, 3)
     expected_cards = _estimate_expected_cards(home_stats, away_stats)
 
     # Appka DŘÍV bez reálného kurzu cenu VYMÝŠLELA z vlastního modelu
@@ -2407,6 +2423,37 @@ class APIFootballProvider(SportsDataProvider):
             pass
         return data
 
+    def get_league_results(self, league_id: str, season: int) -> list[dict]:
+        """
+        VŠECHNY dokončené zápasy jedné ligy/sezóny appka stahuje JEDNÍM
+        požadavkem (na rozdíl od get_upcoming_matches výše, který jde
+        den po dni) — appka to používá jen k jednorázovému fitování
+        Dixon-Coles sil (viz probability_model.fit_dixon_coles_strengths
+        a data_provider.get_dixon_coles_strengths), ne k běžnému
+        generování, takže appka nepotřebuje appku volat často (24h DB
+        cache, stejně jako standings výše).
+        """
+        cache_key = f"league_results:{league_id}:{season}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            import db as _db
+            db_cached = _db.cache_get(cache_key)
+            if db_cached is not None:
+                self._cache.set(cache_key, db_cached)
+                return db_cached
+        except Exception:
+            pass
+        fixtures = self._get("/fixtures", {"league": league_id, "season": season, "status": "FT"})
+        self._cache.set(cache_key, fixtures)
+        try:
+            import db as _db
+            _db.cache_set(cache_key, fixtures, ttl_seconds=24 * 3600)
+        except Exception:
+            pass
+        return fixtures
+
 
 # ---------------------------------------------------------------------
 # Adaptéry: skutečný JSON tvar API-Football -> generické dicty, které
@@ -2434,6 +2481,81 @@ def adapt_fixture_result(fixture: dict) -> dict:
         "ht_home_goals": halftime.get("home"),
         "ht_away_goals": halftime.get("away"),
     }
+
+
+def adapt_league_results_for_dixon_coles(fixtures: list[dict]) -> list[tuple[int, int, int, int]]:
+    """
+    Raw /fixtures?league&season&status=FT (viz APIFootballProvider.
+    get_league_results) -> (home_team_id, away_team_id, home_goals,
+    away_goals) tuply, které fit_dixon_coles_strengths očekává. Appka
+    přeskočí zápasy s chybějícím skóre (mělo by být vzácné u FT zápasů,
+    ale appka radši ověří, než aby fit spadl na None).
+    """
+    results: list[tuple[int, int, int, int]] = []
+    for fx in fixtures:
+        goals = fx.get("goals", {})
+        hg, ag = goals.get("home"), goals.get("away")
+        if hg is None or ag is None:
+            continue
+        try:
+            home_id = fx["teams"]["home"]["id"]
+            away_id = fx["teams"]["away"]["id"]
+        except (KeyError, TypeError):
+            continue
+        results.append((home_id, away_id, int(hg), int(ag)))
+    return results
+
+
+def get_dixon_coles_strengths(provider: "APIFootballProvider", league_id: int, season: int) -> Optional[dict]:
+    """
+    DB-kešovaný (24h) wrapper okolo fit_dixon_coles_strengths — appka
+    fit počítá jen jednou za den na ligu, ne při každém zápase/generování
+    (fitování je levné výpočetně, ale appka nechce zbytečně opakovat
+    STEJNÝ výsledek, a hlavně nechce zbytečně volat get_league_results
+    znovu, i když TA má vlastní cache — appka radši kešuje i výsledek
+    fitu samotný, ať se numerika nepočítá pořád dokola).
+
+    Vrací None potichu (žádná výjimka) při jakémkoli selhání — appka
+    tohle bere jako "appka nemá dost podložený DC odhad pro tuhle ligu",
+    volající kód (viz backend_api.DIXON_COLES_ENABLED) se v takovém
+    případě chová přesně jako by appka DC model vůbec neměla (fallback
+    na starý heuristický odhad).
+    """
+    cache_key = f"dixon_coles_strengths:{league_id}:{season}"
+    # In-memory appka zkusí NEJDŘÍV (provider je sdílený napříč vlákny
+    # jednoho generování, viz FIXTURE_ENRICHMENT_WORKERS) — bez tohohle
+    # by appka dělala jeden DB dotaz PRO KAŽDÝ zápas stejné ligy ve
+    # stejném requestu, i když výsledek by byl pořád stejný.
+    cached = provider._cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        import db as _db
+        cached = _db.cache_get(cache_key)
+        if cached is not None:
+            provider._cache.set(cache_key, cached)
+            return cached
+    except Exception:
+        pass
+
+    try:
+        fixtures = provider.get_league_results(league_id, season)
+        results = adapt_league_results_for_dixon_coles(fixtures)
+        strengths = fit_dixon_coles_strengths(results)
+    except Exception as e:
+        print(f"[dixon-coles] Fit pro ligu {league_id}/{season} selhal: {e}")
+        return None
+
+    if strengths is None:
+        return None
+
+    provider._cache.set(cache_key, strengths)
+    try:
+        import db as _db
+        _db.cache_set(cache_key, strengths, ttl_seconds=24 * 3600)
+    except Exception:
+        pass
+    return strengths
 
 
 def adapt_fixture_card_count(statistics: list[dict]) -> Optional[int]:

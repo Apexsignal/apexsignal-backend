@@ -369,6 +369,160 @@ def score_grid_probabilities(home_xg: float, away_xg: float, rho: float = DIXON_
 
 
 # ---------------------------------------------------------------------
+# Dixon-Coles ÚTOČNÁ/OBRANNÁ SÍLA týmů (fitovaná přes celou ligu, ne jen
+# odhadovaná z posledních zápasů dvou týmů jako _estimate_expected_goals
+# v data_provider.py). Nízkoskórová tau korekce výše appka aplikuje VŽDY
+# (rho=-0.13, literaturní hodnota) — tohle je ta druhá, chybějící
+# polovina "opravdového" Dixon-Coles modelu: společný odhad síly VŠECH
+# týmů v lize najednou, ne po dvou.
+#
+# Appka nemá k dispozici scipy/numpy (viz requirements.txt) — MLE fit
+# nezávislého Poissonova modelu appka proto počítá iterativním
+# proporcionálním fitováním (IPF, ekvivalentní Sinkhorn-Knopp škálování),
+# což je standardní postup i v akademické literatuře pro tenhle typ
+# modelu a dá se celý napsat čistým Pythonem bez optimalizační knihovny.
+#
+# DŮLEŽITÉ — appka tohle zapíná jen přes DIXON_COLES_ENABLED (viz
+# backend_api.py), s tvrdým pádem zpátky na starý heuristický odhad
+# (_estimate_expected_goals) pro KAŽDOU ligu/tým zvlášť, kde appka nemá
+# dost odehraných zápasů nebo fit nekonverguje — appka radši použije
+# starý, ověřený odhad, než aby nabídla tiket na nedostatečně podložený
+# nový model.
+# ---------------------------------------------------------------------
+DIXON_COLES_HOME_ADVANTAGE = 1.10  # stejná hodnota jako v _estimate_expected_goals (data_provider.py)
+DIXON_COLES_AWAY_FACTOR = 0.92
+DIXON_COLES_MIN_MATCHES = 60       # appka nefituje ligu s málo odehranými zápasy — nespolehlivé
+DIXON_COLES_MIN_TEAMS = 6          # appka nedůvěřuje fitu na hrstku týmů (malý pohár apod.)
+DIXON_COLES_MAX_ITERATIONS = 200
+DIXON_COLES_CONVERGENCE_TOL = 1e-4
+
+
+def fit_dixon_coles_strengths(
+    results: list[tuple[int, int, int, int]],
+    home_advantage: float = DIXON_COLES_HOME_ADVANTAGE,
+    away_factor: float = DIXON_COLES_AWAY_FACTOR,
+) -> Optional[dict]:
+    """
+    results: seznam (home_team_id, away_team_id, home_goals, away_goals)
+    za VŠECHNY odehrané zápasy jedné ligy/sezóny appka fituje najednou
+    (viz data_provider.get_dixon_coles_strengths, které tenhle seznam
+    appce sestaví z API-Football /fixtures?league&season&status=FT).
+
+    Vrací None, pokud appka nemá dost dat na spolehlivý fit (viz
+    DIXON_COLES_MIN_MATCHES/MIN_TEAMS) — appka radši nic, než aby
+    appka fitovala na hrstce zápasů.
+
+    Jinak vrací:
+        {
+            "teams": {team_id: {"attack": float, "defense": float}, ...},
+            "league_avg_goals": float,  # průměr gólů na tým na zápas
+            "sample_size": int,         # počet zápasů, ze kterých appka fitovala
+            "converged": bool,
+        }
+    Attack/defense appka škáluje kolem 1.0 (ligový průměr) — attack=1.3
+    znamená "dá o 30 % víc gólů, než průměrný tým ligy", defense=0.8
+    znamená "inkasuje o 20 % míň, než průměrný tým ligy".
+    """
+    if len(results) < DIXON_COLES_MIN_MATCHES:
+        return None
+
+    team_ids: set[int] = set()
+    for h, a, _, _ in results:
+        team_ids.add(h)
+        team_ids.add(a)
+    if len(team_ids) < DIXON_COLES_MIN_TEAMS:
+        return None
+
+    league_avg_goals = sum(hg + ag for _, _, hg, ag in results) / (2 * len(results))
+    if league_avg_goals <= 0:
+        return None
+
+    # Appka si pro každý tým předpočítá (soupeř, hrál_doma, góly_dal, góly_dostal)
+    # napříč VŠEMI jeho zápasy — jeden průchod dat appce stačí, iterace pak
+    # jen znovu a znovu přepočítávají attack/defense nad stejným seznamem.
+    team_matches: dict[int, list[tuple[int, bool, int, int]]] = {t: [] for t in team_ids}
+    for h, a, hg, ag in results:
+        team_matches[h].append((a, True, hg, ag))
+        team_matches[a].append((h, False, ag, hg))
+
+    attack = {t: 1.0 for t in team_ids}
+    defense = {t: 1.0 for t in team_ids}
+    converged = False
+
+    for _ in range(DIXON_COLES_MAX_ITERATIONS):
+        new_attack: dict[int, float] = {}
+        for t, matches in team_matches.items():
+            expected_sum, actual_sum = 0.0, 0
+            for opp, is_home, scored, _conceded in matches:
+                factor = home_advantage if is_home else away_factor
+                expected_sum += league_avg_goals * defense[opp] * factor
+                actual_sum += scored
+            new_attack[t] = actual_sum / expected_sum if expected_sum > 0 else attack[t]
+
+        new_defense: dict[int, float] = {}
+        for t, matches in team_matches.items():
+            expected_sum, actual_sum = 0.0, 0
+            for opp, is_home, _scored, conceded in matches:
+                # Appka teď počítá s NOVĚ spočítaným attack soupeře (o řádek
+                # výš) — rychlejší konvergence než čekat na další iteraci
+                # (Gauss-Seidel varianta IPF, ne čistě "Jacobi").
+                opp_factor = away_factor if is_home else home_advantage
+                expected_sum += league_avg_goals * new_attack[opp] * opp_factor
+                actual_sum += conceded
+            new_defense[t] = actual_sum / expected_sum if expected_sum > 0 else defense[t]
+
+        max_delta = max(
+            max(abs(new_attack[t] - attack[t]) for t in team_ids),
+            max(abs(new_defense[t] - defense[t]) for t in team_ids),
+        )
+        attack, defense = new_attack, new_defense
+        if max_delta < DIXON_COLES_CONVERGENCE_TOL:
+            converged = True
+            break
+
+    # Appka po fitu ještě přeškáluje na přesný ligový průměr 1.0 — IPF
+    # k tomu konverguje přirozeně, ale malá numerická odchylka appce
+    # zůstává, tohle ji smaže a dělá čísla čitelnější (attack=1.3 je pak
+    # vždycky přesně "o 30 % nad průměrem ligy", ne "o 29.7 %").
+    avg_attack = sum(attack.values()) / len(attack)
+    avg_defense = sum(defense.values()) / len(defense)
+    if avg_attack > 0:
+        attack = {t: v / avg_attack for t, v in attack.items()}
+    if avg_defense > 0:
+        defense = {t: v / avg_defense for t, v in defense.items()}
+
+    return {
+        "teams": {t: {"attack": round(attack[t], 4), "defense": round(defense[t], 4)} for t in team_ids},
+        "league_avg_goals": round(league_avg_goals, 4),
+        "sample_size": len(results),
+        "converged": converged,
+    }
+
+
+def dixon_coles_expected_goals(
+    home_team_id: int, away_team_id: int, strengths: dict,
+    home_advantage: float = DIXON_COLES_HOME_ADVANTAGE, away_factor: float = DIXON_COLES_AWAY_FACTOR,
+) -> Optional[tuple[float, float]]:
+    """
+    Spočítá home_xg/away_xg ze zafitovaných sil (fit_dixon_coles_strengths).
+    Vrací None, pokud appka pro NĚKTERÝ z týmů nemá zafitovaná čísla
+    (nováček bez dost odehraných zápasů, chyba v párování ID...) — appka
+    v takovém případě spadne zpátky na starý heuristický odhad (viz
+    data_provider._estimate_expected_goals), ne že by appka cokoli
+    dopočítávala napůl.
+    """
+    teams = strengths.get("teams", {})
+    home = teams.get(home_team_id)
+    away = teams.get(away_team_id)
+    if home is None or away is None:
+        return None
+    league_avg = strengths["league_avg_goals"]
+    home_xg = league_avg * home["attack"] * away["defense"] * home_advantage
+    away_xg = league_avg * away["attack"] * home["defense"] * away_factor
+    return round(home_xg, 3), round(away_xg, 3)
+
+
+# ---------------------------------------------------------------------
 # De-vig: odstranění bookmakerské marže z kurzů → "fair" pravděpodobnost.
 # Tohle je statisticky spolehlivější vstup než vlastní heuristický odhad,
 # protože tržní kurz už v sobě zahrnuje obrovské množství informací
