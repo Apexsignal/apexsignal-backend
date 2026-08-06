@@ -2075,6 +2075,15 @@ class APIFootballProvider(SportsDataProvider):
         # API-Football (429). Appka to zkusí pár krát znovu s prodlevou,
         # než to appka celé vzdá — jedno 429 uprostřed běhu appku dřív
         # celou shodilo (HTTP 500), i když šlo jen o dočasné zpomalení.
+        #
+        # API-Football appce "moc požadavků" NEVRACÍ vždycky jako HTTP 429
+        # — appka živě potvrdila (2026-08-06, široké okno 375 zápasů), že
+        # appka umí odpovědět HTTP 200 s "errors":{"rateLimit":"Too many
+        # requests..."} v těle. Appka tenhle tvar dřív bránila jako
+        # kteroukoli jinou chybu (okamžitě RuntimeError, appka ten zápas
+        # rovnou zahodila) — appka ho teď rozezná zvlášť a zachází s ním
+        # stejně jako s 429 (zkusí to znovu s prodlevou), místo aby zápas
+        # rovnou vzdala.
         last_error = None
         for attempt in range(3):
             _api_football_rate_limiter.wait()
@@ -2087,8 +2096,16 @@ class APIFootballProvider(SportsDataProvider):
                 continue
             resp.raise_for_status()
             payload = resp.json()
-            if payload.get("errors"):
-                raise RuntimeError(f"API-Football vrátilo chybu: {payload['errors']}")
+            errors = payload.get("errors")
+            if errors:
+                is_rate_limit = (
+                    isinstance(errors, dict) and any("rate" in str(k).lower() for k in errors)
+                ) or "rate limit" in str(errors).lower() or "too many requests" in str(errors).lower()
+                if is_rate_limit and attempt < 2:
+                    last_error = RuntimeError(f"API-Football rate limit v těle odpovědi: {errors}")
+                    time.sleep(3.0 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"API-Football vrátilo chybu: {errors}")
             return payload.get("response", [])
         raise last_error
 
