@@ -500,6 +500,55 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Prodejci (Pepa a další) appce přivádí platící klienty přes appčiny
+    # pevné Stripe Payment Linky (500/1000/2000/2500/3000 Kč) — seller_code
+    # jde do Stripe jako client_reference_id, appka podle něj ve webhooku
+    # pozná, čí klient zaplatil (viz _seller_commission_split).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sellers (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    seller_code VARCHAR(32) UNIQUE NOT NULL,
+                    display_name VARCHAR(120) NOT NULL,
+                    active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+
+    # Appka sem loguje KAŽDOU platbu přivedeného klienta — jedna řádka =
+    # jedna platba, ne souhrn. Díky tomu appka umí ukázat prodejci celou
+    # historii, ne jen aktuální stav, a stripe_checkout_session_id appce
+    # zabrání připsat stejnou platbu dvakrát (viz webhook).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seller_earnings (
+                    id SERIAL PRIMARY KEY,
+                    seller_id INTEGER NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+                    stripe_checkout_session_id VARCHAR(120) UNIQUE NOT NULL,
+                    client_email VARCHAR(255),
+                    tier_price_kc INTEGER NOT NULL,
+                    our_cut_kc INTEGER NOT NULL,
+                    seller_cut_kc INTEGER NOT NULL,
+                    paid_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_seller_earnings_seller_id ON seller_earnings (seller_id)")
+    except Exception:
+        pass
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
@@ -1243,6 +1292,64 @@ def get_card_fingerprints(user_id: int) -> set[str]:
     with get_cursor() as cur:
         cur.execute("SELECT fingerprint FROM user_card_fingerprints WHERE user_id = %s", (user_id,))
         return {r["fingerprint"] for r in cur.fetchall()}
+
+
+# =====================================================================
+# Prodejci (provizní systém) — viz sellers/seller_earnings v ensure_schema.
+# =====================================================================
+def create_seller(user_id: int, seller_code: str, display_name: str) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sellers (user_id, seller_code, display_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET seller_code = EXCLUDED.seller_code, display_name = EXCLUDED.display_name
+            RETURNING id
+            """,
+            (user_id, seller_code, display_name),
+        )
+        return cur.fetchone()["id"]
+
+
+def get_seller_by_user_id(user_id: int) -> Optional[dict]:
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM sellers WHERE user_id = %s AND active = true", (user_id,))
+        return cur.fetchone()
+
+
+def get_seller_by_code(seller_code: str) -> Optional[dict]:
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM sellers WHERE seller_code = %s AND active = true", (seller_code,))
+        return cur.fetchone()
+
+
+def record_seller_earning(
+    seller_id: int, stripe_checkout_session_id: str, client_email: Optional[str],
+    tier_price_kc: int, our_cut_kc: int, seller_cut_kc: int,
+) -> bool:
+    """Appka appce vrátí True, jen když reálně zapsala NOVOU platbu —
+    stripe_checkout_session_id je UNIQUE, takže appka stejnou platbu
+    (např. při zopakovaném Stripe webhooku) nikdy nepřipíše dvakrát."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seller_earnings
+                (seller_id, stripe_checkout_session_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (stripe_checkout_session_id) DO NOTHING
+            """,
+            (seller_id, stripe_checkout_session_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc),
+        )
+        return cur.rowcount > 0
+
+
+def get_seller_earnings(seller_id: int) -> list[dict]:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM seller_earnings WHERE seller_id = %s ORDER BY paid_at DESC",
+            (seller_id,),
+        )
+        return cur.fetchall()
 
 
 # =====================================================================

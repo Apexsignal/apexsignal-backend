@@ -1154,6 +1154,22 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 TELEGRAM_LINK_CODE_TTL_MINUTES = 60
 CHANNEL_PRICE_KC = 990
 
+# =====================================================================
+# Provizní systém pro prodejce — appka jim dá 5 pevných Stripe Payment
+# Linků (appce nejde přednastavit libovolnou částku, viz debata s
+# uživatelem). Prodejce si podle domluvy s klientem vybere jeden z pěti
+# a pošle mu ho i se svým seller_code v client_reference_id. Klíč je
+# celá Kč částka, hodnota (appčin podíl, podíl prodejce) — obojí v Kč.
+# =====================================================================
+SELLER_COMMISSION_TIERS: dict[int, tuple[int, int]] = {
+    500: (200, 300),
+    1000: (250, 750),
+    2000: (300, 1700),
+    2500: (500, 2000),
+    3000: (600, 2400),
+}
+SELLER_PAYMENT_LINKS_SETTING_KEY = "seller_payment_links_v1"
+
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
     """Appka řídí typ tiketu jen podle risk_level, stejně jako
@@ -1639,8 +1655,24 @@ async def stripe_webhook(request: Request):
     if event_type == "checkout.session.completed":
         metadata = obj.get("metadata") or {}
         user_id = int(metadata.get("user_id", 0)) or None
+        seller_code = (obj.get("client_reference_id") or "").strip()
 
-        if user_id and metadata.get("unlimited_generation") == "1":
+        if seller_code and (seller := db.get_seller_by_code(seller_code)):
+            # Prodejecká platba (viz SELLER_COMMISSION_TIERS) — appka ji
+            # pozná podle client_reference_id, appka ji MUSÍ odchytit dřív
+            # než větev pro appčin vlastní kanál níž, protože obě appka
+            # posílá jako mode="subscription" přes pevný Payment Link.
+            amount_total_kc = (obj.get("amount_total") or 0) // 100
+            tier = SELLER_COMMISSION_TIERS.get(amount_total_kc)
+            if not tier:
+                print(f"[stripe] Prodejecká platba s neznámou částkou {amount_total_kc} Kč (session {obj.get('id')})")
+            else:
+                our_cut_kc, seller_cut_kc = tier
+                email = (obj.get("customer_details") or {}).get("email") or obj.get("customer_email")
+                db.record_seller_earning(
+                    seller["id"], obj["id"], email, amount_total_kc, our_cut_kc, seller_cut_kc,
+                )
+        elif user_id and metadata.get("unlimited_generation") == "1":
             stripe_subscription_id = obj.get("subscription")
             period_end = None
             if stripe_subscription_id:
@@ -1955,6 +1987,105 @@ def admin_create_channel_payment_link(request: Request):
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
 
     return {"price_id": price.id, "payment_link_id": payment_link.id, "payment_link_url": payment_link.url, "price_kc": CHANNEL_PRICE_KC}
+
+
+@app.post("/admin/sellers/create-payment-links")
+def admin_create_seller_payment_links(request: Request):
+    """
+    Appka JEDNORÁZOVĚ vytvoří 5 pevných Stripe Payment Linků (podle
+    SELLER_COMMISSION_TIERS) sdílených VŠEMI prodejci — appka je
+    nerozlišuje samostatnými odkazy na prodejce, ale přes
+    client_reference_id, který si každý prodejce připojí do URL sám
+    (viz GET /seller/dashboard). Appka výsledné URL uloží do
+    app_settings, ať tohle nemusí volat podruhé.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
+    links: dict[str, str] = {}
+    try:
+        for tier_kc in SELLER_COMMISSION_TIERS:
+            price = stripe.Price.create(
+                currency="czk",
+                unit_amount=tier_kc * 100,
+                recurring={"interval": "month"},
+                product_data={"name": f"ApexSignal — prodejcem doporučený přístup ({tier_kc} Kč/měsíc)"},
+            )
+            payment_link = stripe.PaymentLink.create(
+                line_items=[{"price": price.id, "quantity": 1}],
+                after_completion={"type": "redirect", "redirect": {"url": f"{frontend_url}/?payment=success"}},
+            )
+            links[str(tier_kc)] = payment_link.url
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    db.set_setting(SELLER_PAYMENT_LINKS_SETTING_KEY, json.dumps(links))
+    return {"links": links}
+
+
+class CreateSellerRequest(BaseModel):
+    email: str
+    display_name: str
+
+
+@app.post("/admin/sellers/create")
+def admin_create_seller(req: CreateSellerRequest, request: Request):
+    """Appka appce označí existující účet (musí se už dřív zaregistrovat
+    normálně přes appku) jako prodejce a přidělí mu seller_code."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(req.email.strip().lower())
+    if not user:
+        raise HTTPException(status_code=404, detail="Účet s tímhle e-mailem appka nenašla — musí se nejdřív zaregistrovat.")
+
+    seller_code = secrets.token_hex(4)
+    seller_id = db.create_seller(user["id"], seller_code, req.display_name.strip())
+    return {"seller_id": seller_id, "seller_code": seller_code, "display_name": req.display_name.strip()}
+
+
+@app.get("/seller/dashboard")
+def seller_dashboard(user_id: int = Depends(get_current_user_id)):
+    """Appka sem prodejce pustí, jen když appka jeho user_id má
+    zapsané v sellers — jinak 403. Appka appce vrátí jeho osobní odkazy
+    (appčiny sdílené Payment Linky + jeho vlastní client_reference_id)
+    a celou historii jeho zaznamenaných plateb i součet provize."""
+    seller = db.get_seller_by_user_id(user_id)
+    if not seller:
+        raise HTTPException(status_code=403, detail="Tenhle účet není appce registrovaný jako prodejce.")
+
+    raw_links = db.get_setting(SELLER_PAYMENT_LINKS_SETTING_KEY)
+    base_links = json.loads(raw_links) if raw_links else {}
+    my_links = {
+        tier_kc: f"{url}?client_reference_id={seller['seller_code']}"
+        for tier_kc, url in base_links.items()
+    }
+
+    earnings = db.get_seller_earnings(seller["id"])
+    total_seller_kc = sum(e["seller_cut_kc"] for e in earnings)
+    total_clients = len(earnings)
+
+    return {
+        "seller_code": seller["seller_code"],
+        "display_name": seller["display_name"],
+        "payment_links": my_links,
+        "total_clients": total_clients,
+        "total_earned_kc": total_seller_kc,
+        "earnings": [
+            {
+                "client_email": e["client_email"],
+                "tier_price_kc": e["tier_price_kc"],
+                "seller_cut_kc": e["seller_cut_kc"],
+                "paid_at": e["paid_at"].isoformat() if e["paid_at"] else None,
+            }
+            for e in earnings
+        ],
+    }
 
 
 # =====================================================================
