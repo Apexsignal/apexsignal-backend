@@ -1669,9 +1669,18 @@ async def stripe_webhook(request: Request):
             else:
                 our_cut_kc, seller_cut_kc = tier
                 email = (obj.get("customer_details") or {}).get("email") or obj.get("customer_email")
-                db.record_seller_earning(
+                is_new = db.record_seller_earning(
                     seller["id"], obj["id"], email, amount_total_kc, our_cut_kc, seller_cut_kc,
                 )
+                if is_new and seller.get("telegram_chat_id"):
+                    try:
+                        _send_telegram_message(
+                            seller["telegram_chat_id"],
+                            f"✅ Nová platba!\n{email or 'e-mail neznámý'} zaplatil {amount_total_kc} Kč.\n"
+                            f"Tvůj podíl: {seller_cut_kc} Kč.\n\nNezapomeň ho přidat do svého kanálu.",
+                        )
+                    except Exception as e:
+                        print(f"[stripe] Nepodařilo se poslat Telegram notifikaci prodejci {seller['id']}: {e}")
         elif user_id and metadata.get("unlimited_generation") == "1":
             stripe_subscription_id = obj.get("subscription")
             period_end = None
@@ -2070,10 +2079,15 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
     total_seller_kc = sum(e["seller_cut_kc"] for e in earnings)
     total_clients = len(earnings)
 
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+    telegram_link_url = f"https://t.me/{bot_username}?start=seller_{seller['seller_code']}" if bot_username else None
+
     return {
         "seller_code": seller["seller_code"],
         "display_name": seller["display_name"],
         "payment_links": my_links,
+        "telegram_linked": bool(seller.get("telegram_chat_id")),
+        "telegram_link_url": telegram_link_url,
         "total_clients": total_clients,
         "total_earned_kc": total_seller_kc,
         "earnings": [
@@ -5575,6 +5589,17 @@ async def telegram_webhook(request: Request):
 
         if not code:
             _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+            return {"ok": True}
+
+        if code.startswith("seller_"):
+            # Prodejce si tenhle odkaz vezme ze svého /seller/dashboard —
+            # appka mu spáruje chat_id, ať appka umí poslat DM při každé
+            # nové platbě (viz seller-earning větev ve Stripe webhooku).
+            seller_code = code[len("seller_"):]
+            if db.link_seller_telegram(seller_code, chat_id):
+                _send_telegram_message(chat_id, "Hotovo — appka ti sem teď bude posílat zprávu při každé nové platbě od tvých klientů.")
+            else:
+                _send_telegram_message(chat_id, TELEGRAM_LINK_INVALID_MESSAGE)
             return {"ok": True}
 
         linked_subscription_id = db.consume_telegram_link_code(code)

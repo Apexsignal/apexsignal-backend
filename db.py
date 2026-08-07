@@ -513,11 +513,17 @@ def ensure_schema() -> None:
                     user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     seller_code VARCHAR(32) UNIQUE NOT NULL,
                     display_name VARCHAR(120) NOT NULL,
+                    telegram_chat_id BIGINT,
                     active BOOLEAN NOT NULL DEFAULT true,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE sellers ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT")
     except Exception:
         pass
 
@@ -1321,6 +1327,18 @@ def get_seller_by_code(seller_code: str) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM sellers WHERE seller_code = %s AND active = true", (seller_code,))
         return cur.fetchone()
+
+
+def link_seller_telegram(seller_code: str, chat_id: int) -> bool:
+    """Appka appce spáruje prodejcovo Telegram chat_id podle jeho
+    seller_code (z odkazu https://t.me/BOT?start=seller_<code>) — appka
+    díky tomu umí prodejci poslat DM při každé nové platbě."""
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE sellers SET telegram_chat_id = %s WHERE seller_code = %s AND active = true",
+            (chat_id, seller_code),
+        )
+        return cur.rowcount > 0
 
 
 def record_seller_earning(
