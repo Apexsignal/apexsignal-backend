@@ -132,7 +132,7 @@ na GitHubu"). Nová konverzace si je musí získat z těchhle míst:
 | Telegram bot | @BotFather → Render | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_ID_WIFE`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET` |
 | Účty appky pro cron úlohy | Render (ID appčiných účtů v DB) | `DAILY_TICKETS_USER_ID`, `TRANSPARENCY_USER_ID`, `TEST3_USER_ID` |
 | Netlify (frontend deploy) | předkonfigurováno v MCP nástroji, není potřeba token ručně | site ID `6039a72d-adb0-4efa-b0a2-798e2f7f8e63` |
-| **SportBreak.cz** (ruční nahrávání reálných tiketů) | appka login zná: `apexsignal02@seznam.cz` — **heslo appka do repa neukládá**, sdělí ho uživatel přímo v chatu nové konverzaci, až ho bude appka potřebovat | — |
+| **SportBreak.cz** (ruční nahrávání reálných tiketů) | login: `apexsignal@seznam.cz` (POZOR: ne `apexsignal02@...`, to je špatně a appka na to dřív omylem narazila) — **heslo appka do repa neukládá**, sdělí ho uživatel přímo v chatu nové konverzaci, až ho bude appka potřebovat. Formulář na přidání tiketu: `/cs/a/tiket/pridani` (POST, pole `ticketComponents[N][...]` pro N-tou nohu kombinace — sport/date/country/league/home/away/tip/course/matchUrl, plus `confidence` 1-10, `betOffice`, `service`). Nejdřív je nutné GETnout `/cs/` (založí session cookie) a teprve pak POSTnout přihlášení (`email`+`password`+`_do=signInForm-form-submit`) — bez toho prvního GETu přihlášení tiše neprojde, bez chybové hlášky. | — |
 
 Pozn.: appka je "fotbal only" byznys rozhodnutí (uživatel: "Ne bude jen
 fotbal žadnej tenis") — `APITENNIS_KEY` v kódu existuje, ale appka ho
