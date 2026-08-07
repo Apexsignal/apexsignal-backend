@@ -778,19 +778,9 @@ def render_page(
   <h2>Tři cesty, jeden model</h2>
   <p class="lede">Liší se jen tím, kdo dělá výběr a kolik toho chceš — appka, ty sám, nebo appka bez omezení.</p>
   <div class="offers">
-    <div class="offer primary">
-      <span class="eyebrow">Kanál na Telegramu</span>
-      <div class="offer-price">990 Kč <small>/ měsíc</small></div>
-      <p>Každé ráno appka pošle 1 tiket — hlavně krátký, občas (když appka najde
-      opravdovou hodnotu) radši ten hodnotnější, střední. Nic si sám negeneruješ,
-      appka pošle výběr rovnou na Telegram. {compare_line}</p>
-      <ol class="offer-steps">
-        <li>Zaplatíš kartou přes Stripe — bez zakládání účtu.</li>
-        <li>Hned ti přijde e-mail s odkazem na propojení Telegramu.</li>
-        <li>Klikneš na odkaz a od dalšího rána ti chodí tikety.</li>
-      </ol>
-      <a class="btn btn-fill" href="{escape(payment_link) if payment_link else '#'}">Aktivovat kanál</a>
-    </div>
+    <!-- Kanál na Telegramu (990 Kč) appka dočasně schovala z landing page
+         na uživatelův pokyn — kód zůstává, jen se nevykresluje, ať se
+         dá rychle vrátit zpět. -->
     <div class="offer">
       <span class="eyebrow">Aplikace — appka za pokus</span>
       <div class="offer-price">{app_offer_price}</div>
