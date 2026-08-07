@@ -1834,12 +1834,13 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # přes Render API, 2026-08-07: appka zaznamenala TŘI OOM pády za sebou na
 # 2denním okně) padalo appku na starter Render planu (512 MB RAM). API
 # kvóta appce dovolí i 400, ale appčina PAMĚŤ ne — appka limit stahuje
-# zpátky na 200, ať appka má rozumnou rezervu proti pádu i u širších oken
-# (appka to kombinuje s nižším FIXTURE_ENRICHMENT_WORKERS a dávkovým
+# zpátky na 120 (dřív 200, ale i to appce spadlo i bez rozšíření okna,
+# viz 2026-08-07), ať appka má rozumnou rezervu proti pádu i u širších
+# oken (appka to kombinuje s nižším FIXTURE_ENRICHMENT_WORKERS a dávkovým
 # zpracováním s průběžným gc.collect(), viz _build_football_matches v
 # backend_api.py) — teprve až appka přejde na vyšší Render plán (víc
 # RAM), dává smysl tohle číslo zase zvednout.
-MAX_FIXTURES_PER_REQUEST = 200
+MAX_FIXTURES_PER_REQUEST = 120
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.

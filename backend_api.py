@@ -2505,7 +2505,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
         # co appka reálně udělala.
         if result["safe"] is None:
-            wider_days = req.time_frame_days + 3
+            wider_days = req.time_frame_days + 1
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
             all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
@@ -2581,7 +2581,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
         # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
         # zkusí, ale vždycky to řekne přes horizon_note.
         if result["safe"] is None:
-            wider_days = req.time_frame_days + 3
+            wider_days = req.time_frame_days + 1
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
             all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
