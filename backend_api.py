@@ -65,14 +65,18 @@ import stripe
 # _api_football_rate_limiter v data_provider.py) appka zvedla i tohle,
 # ať appka tu vyšší propustnost reálně využije.
 #
-# Appka tohle SNÍŽILA z 40 na 20 (2026-08-05) — appka na Renderu jede na
-# starter plánu (512 MB RAM, appka na něj naráží OOM při širokém okně
-# kandidátů), a 40 souběžných OS vláken najednou (vlastní stack + GIL
-# režie u každého) je zbytečně moc, když stejně jen ~12 z nich může
-# reálně volat API-Football najednou (viz rate limiter). Appka radši
-# vyšší plán zatím neplatí, tak aspoň sníží špičkovou paměť tímhle —
-# mírně pomalejší generování při širokém okně, ne rychlejší pád.
-FIXTURE_ENRICHMENT_WORKERS = 20
+# Appka tohle SNÍŽILA z 40 na 20 (2026-08-05), a pak z 20 na 10
+# (2026-08-07) — appka na Renderu jede na starter plánu (512 MB RAM) a
+# i po prvním snížení appka živě zaznamenala TŘI OOM pády za sebou na
+# 2denním okně (přes Render API, /admin/lost-tickets-report vyšetřování).
+# 10 souběžných vláken je pořád víc než appčin rate limiter stejně pustí
+# najednou (~12 req/s, ale KAŽDÉ vlákno dělá ~10-12 SEKVENČNÍCH volání na
+# zápas, takže 10 vláken = max ~10 zápasů rozpracovaných najednou, ne 10
+# jednotlivých požadavků) — appka radši dál obětuje rychlost za stabilitu,
+# dokud nemá vyšší plán (viz i MAX_FIXTURES_PER_REQUEST a dávkové
+# zpracování v _build_football_matches níž — všechny tři appka ladila
+# společně na stejný cíl).
+FIXTURE_ENRICHMENT_WORKERS = 10
 
 # Dixon-Coles zafitovaná útočná/obranná síla CELÉ ligy (2026-08-06) — appka
 # to zkusila jako přesnější náhradu heuristického odhadu z posledních
@@ -2007,6 +2011,18 @@ def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lo
     )
 
 
+FIXTURE_ENRICHMENT_BATCH_SIZE = 40  # appka (2026-08-07, viz FIXTURE_ENRICHMENT_WORKERS
+# výš) zpracovává zápasy po DÁVKÁCH, ne všechny najednou — appka dřív
+# appka pouhým jedním voláním executor.submit() na VŠECHNY zápasy (klidně
+# 200-400) rovnou vytvořila stejný počet Future objektů a živě k nim
+# patřících syrových dat zápasu (raw fixture dict, appka ho drží celý po
+# dobu čekání ve frontě) — i při jen 10 souběžně BĚŽÍCÍCH vláknech tohle
+# appce v paměti drželo naráz VŠECHNY zbylé nezpracované zápasy. Appka
+# teď frontu drží krátkou (max BATCH_SIZE čekajících) a mezi dávkami
+# uvolní paměť (gc.collect()), ať appka nemá špičku paměti úměrnou
+# CELÉMU oknu, ale jen jedné dávce.
+
+
 def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Optional[str] = None) -> list[MatchInput]:
     """
     Appka zpracuje zápasy SOUBĚŽNĚ (víc vláken najednou), ne jeden po
@@ -2026,20 +2042,26 @@ def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Opti
 
     _progress_set_total(request_id, len(raw_fixtures))
 
-    with ThreadPoolExecutor(max_workers=FIXTURE_ENRICHMENT_WORKERS) as executor:
-        future_to_idx = {
-            executor.submit(_enrich_one_fixture, provider, raw, standings_cache, standings_lock, dixon_coles_enabled): idx
-            for idx, raw in enumerate(raw_fixtures, start=1)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                match = future.result()
-                if match is not None:
-                    matches.append(match)
-            except Exception as exc:
-                print(f"[ERROR] _enrich_one_fixture failed for fixture index {idx}: {exc}")  # Viditelný log!
-            _progress_increment(request_id)
+    for batch_start in range(0, len(raw_fixtures), FIXTURE_ENRICHMENT_BATCH_SIZE):
+        batch = raw_fixtures[batch_start:batch_start + FIXTURE_ENRICHMENT_BATCH_SIZE]
+        with ThreadPoolExecutor(max_workers=FIXTURE_ENRICHMENT_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(_enrich_one_fixture, provider, raw, standings_cache, standings_lock, dixon_coles_enabled): idx
+                for idx, raw in enumerate(batch, start=batch_start + 1)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    match = future.result()
+                    if match is not None:
+                        matches.append(match)
+                except Exception as exc:
+                    print(f"[ERROR] _enrich_one_fixture failed for fixture index {idx}: {exc}")  # Viditelný log!
+                _progress_increment(request_id)
+        # Appka uvolní paměť PO KAŽDÉ dávce, ne až na konci celé funkce —
+        # appka to udělala kvůli živě potvrzeným OOM pádům na širokém
+        # okně (2026-08-07), viz FIXTURE_ENRICHMENT_BATCH_SIZE výš.
+        gc.collect()
 
     return matches
 

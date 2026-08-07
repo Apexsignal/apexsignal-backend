@@ -1830,13 +1830,16 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # forma, zranění, tabulka...).
 #
 # Po přechodu na Mega plán (150 000 req/den, viz _api_football_rate_limiter)
-# appka zvedla limit ze 150 na 400: 400 × ~11 ≈ 4400 požadavků na jedno
-# "studené" generování (bez cache) — appka jich denní kvótou snese cca
-# 30+, i bez počítání s tím, že cache týmových statistik (24 h) a
-# seznamu zápasů (30 min) dělá DALŠÍ generování ten samý den výrazně
-# levnější. Předtím appka na Pro plánu (7 500/den, 150 zápasů) snesla jen
-# 4-5 takových za den.
-MAX_FIXTURES_PER_REQUEST = 400
+# appka zvedla limit ze 150 na 400 — appce to ale opakovaně (živě potvrzeno
+# přes Render API, 2026-08-07: appka zaznamenala TŘI OOM pády za sebou na
+# 2denním okně) padalo appku na starter Render planu (512 MB RAM). API
+# kvóta appce dovolí i 400, ale appčina PAMĚŤ ne — appka limit stahuje
+# zpátky na 200, ať appka má rozumnou rezervu proti pádu i u širších oken
+# (appka to kombinuje s nižším FIXTURE_ENRICHMENT_WORKERS a dávkovým
+# zpracováním s průběžným gc.collect(), viz _build_football_matches v
+# backend_api.py) — teprve až appka přejde na vyšší Render plán (víc
+# RAM), dává smysl tohle číslo zase zvednout.
+MAX_FIXTURES_PER_REQUEST = 200
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
