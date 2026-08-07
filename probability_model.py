@@ -100,6 +100,21 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedů
                               # vs. Juventud, uruguayská Apertura) reálně měl, appka radši
                               # utáhla na 6 — víc jistoty na úkor trochu menšího poolu.
 
+OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
+                              # tým nepovažuje za "útočný" (uživatel 2026-08-06:
+                              # "Chci aby over tipy se vybírali opravdu z útočných
+                              # týmů co dávají góly"). LEAGUE_AVERAGE_GOALS_PER_TEAM
+                              # v data_provider.py je 1.3 (univerzální ligový průměr) —
+                              # appka záměrně dala práh MÍRNĚ NAD průměr, ať "útočný"
+                              # skutečně znamená nadprůměrně gólový tým, ne jen běžný.
+                              # Kontrolováno na home_attack_rate/away_attack_rate
+                              # (MatchInput) — appčina VLASTNÍ útočná forma týmu bez
+                              # vlivu obrany soupeře, appka to NEPOUŽÍVÁ k výpočtu
+                              # pravděpodobnosti (to pořád dělá home/away_expected_goals,
+                              # co obranu soupeře zohledňuje), jen jako dodatečný filtr,
+                              # ať appka nenabídne Over kvůli děravé obraně soupeře u
+                              # týmu, co sám gólově nic nedokazuje.
+
 
 def evaluate_selection_outcome(
     selection: "SelectionCandidate", home_goals: int, away_goals: int, total_cards: Optional[int] = None,
@@ -234,8 +249,14 @@ class MarketType(str, Enum):
 # nabízených chipů), aby se u tenisu nenabízel "Over gólů" apod.
 SPORT_MARKETS: dict[Sport, list[MarketType]] = {
     Sport.FOOTBALL: [
-        MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS,
-        MarketType.DOUBLE_CHANCE, MarketType.HT_OVER_GOALS, MarketType.HT_UNDER_GOALS,
+        # UNDER_GOALS/HT_UNDER_GOALS appka přestala NABÍZET (uživatel
+        # 2026-08-06: "Chci under odstranit dat jen over") — appka je
+        # záměrně nechává v MarketType enumu i v MARKET_LABELS/
+        # evaluate_selection_outcome (viz komentáře tam), ať appka historické
+        # tikety s touhle nohou dál správně zobrazí a dosettluje. Jen appka
+        # už žádného NOVÉHO kandidáta na under nevygeneruje (viz build_candidates).
+        MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.BTTS,
+        MarketType.DOUBLE_CHANCE, MarketType.HT_OVER_GOALS,
     ],
     Sport.TENNIS: [MarketType.MATCH_WINNER, MarketType.OVER_GAMES, MarketType.OVER_ACES],
     Sport.HOCKEY: [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.OVER_PENALTY_MINUTES],
@@ -623,6 +644,18 @@ class MatchInput:
     home_expected_goals_ht: float = 0.0
     away_expected_goals_ht: float = 0.0
 
+    # Čistě VLASTNÍ útočná forma týmu (shrinkage + nedávná forma), BEZ
+    # vlivu domácí výhody/obrany soupeře/počasí/zranění — na rozdíl od
+    # home_expected_goals/away_expected_goals appka tohle nepoužívá k
+    # výpočtu pravděpodobnosti, jen jako filtr: appka "Over gólů" nabídne
+    # pouze zápasy, kde OBA týmy samy o sobě skórují (viz
+    # OVER_GOALS_MIN_TEAM_ATTACK_RATE) — appka nechce nabízet over jen
+    # proto, že soupeř má děravou obranu, ale tým samotný gólově nic
+    # nedokazuje (uživatel to výslovně chtěl, 2026-08-06: "Chci aby over
+    # tipy se vybirali opravdu z utocnych tymu co davaji goly").
+    home_attack_rate: float = 0.0
+    away_attack_rate: float = 0.0
+
     favorite_win_market_odds: float = 1.0
     # True jen když favorite_win_market_odds pochází ze SKUTEČNÉHO tržního
     # kurzu (API-Football/the-odds-api/OddsPapi) — appka dřív bez reálného
@@ -816,25 +849,24 @@ class MarketEvaluator:
             )
             has_reliable_form = home_reliable and away_reliable
 
-            for threshold, odds in match.over_goals_odds.items():
-                prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
-                if has_reliable_form:
+            # Appka Under gólů kompletně zrušila (uživatel 2026-08-06:
+            # "Chci under odstranit dat jen over") — appka teď nabízí
+            # jen Over, a to navíc podmíněně: OBA týmy musí mít vlastní
+            # útočnou formu aspoň OVER_GOALS_MIN_TEAM_ATTACK_RATE (viz
+            # konstanta výše, MatchInput.home_attack_rate/away_attack_rate).
+            # Appka dřív nabízela Over i u zápasů, kde appce vyšla vysoká
+            # pravděpodobnost jen kvůli DĚRAVÉ OBRANĚ soupeře, ne proto,
+            # že by tým sám o sobě skóroval — uživatel chtěl přesně tohle
+            # odfiltrovat ("over tipy se vybírali opravdu z útočných týmů
+            # co dávají góly").
+            both_teams_attacking = (
+                match.home_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
+                and match.away_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
+            )
+            if has_reliable_form and both_teams_attacking:
+                for threshold, odds in match.over_goals_odds.items():
+                    prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
                     candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
-
-                # Under góly appka dřív dopočítávala z 1/(1-prob) — tím
-                # srovnávala model sám se sebou, ne se skutečným trhem, takže
-                # kontrola kladného edge (viz _candidate/_build_ticket)
-                # nedávala smysl. Teď appka bere jen SKUTEČNÝ tržní kurz na
-                # under (match.under_goals_odds, viz adapt_api_football_odds
-                # a _enrich_with_market_odds) — pokud appka žádný nemá, appka
-                # kandidáta na under prostě nenabídne, nic si nevymýšlí.
-                under_odds = match.under_goals_odds.get(threshold)
-                if under_odds and under_odds >= MIN_SELECTION_ODDS:
-                    under_prob = 1.0 - prob
-                    candidates.append(cls._candidate(
-                        match, MarketType.UNDER_GOALS, f"under_{threshold}", under_prob, under_odds,
-                        market_key_type=MarketType.OVER_GOALS,
-                    ))
 
             if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None and has_reliable_form:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
@@ -850,20 +882,13 @@ class MarketEvaluator:
                 for selection, odds in match.double_chance_odds.items():
                     candidates.append(cls._candidate(match, MarketType.DOUBLE_CHANCE, selection, dc_probs[selection], odds))
 
-            if match.sport == Sport.FOOTBALL and has_reliable_form:
+            # Poločasové Under appka zrušila stejným pravidlem jako
+            # celozápasové výš — appka nabízí jen poločasový Over, a i ten
+            # jen s ověřenou útočnou formou obou týmů.
+            if match.sport == Sport.FOOTBALL and has_reliable_form and both_teams_attacking:
                 for threshold, odds in match.ht_over_goals_odds.items():
                     prob = cls.ht_over_goals_probability(match.home_expected_goals_ht, match.away_expected_goals_ht, threshold)
                     candidates.append(cls._candidate(match, MarketType.HT_OVER_GOALS, f"over_{threshold}", prob, odds))
-
-                # Stejný vzor jako u UNDER_GOALS výš — appka bere jen SKUTEČNÝ
-                # tržní kurz na under, nic si nedopočítává.
-                for threshold, under_odds in match.ht_under_goals_odds.items():
-                    if under_odds >= MIN_SELECTION_ODDS:
-                        over_prob = cls.ht_over_goals_probability(match.home_expected_goals_ht, match.away_expected_goals_ht, threshold)
-                        candidates.append(cls._candidate(
-                            match, MarketType.HT_UNDER_GOALS, f"under_{threshold}", 1.0 - over_prob, under_odds,
-                            market_key_type=MarketType.HT_OVER_GOALS,
-                        ))
 
             # Karty appka přestala nabízet (rozhodnuto 2026-08-01) — žádný
             # reálný tržní kurz appka na ně nikdy neměla (the-odds-api

@@ -176,11 +176,11 @@ def normalize_to_match_input(
         * rest_days_adjustment_factor(away_rest_days) * away_dead_rubber
     # Domácí góly appka počítá i podle HOSTOVA obranného průměru (a naopak)
     # — viz opponent_stats v _estimate_expected_goals.
-    home_xg = _estimate_expected_goals(
+    home_xg, home_attack_rate = _estimate_expected_goals(
         home_stats, is_home=True, recency_weighted_avg=home_recent_form,
         adjustment_factor=home_factor, opponent_stats=away_stats,
     )
-    away_xg = _estimate_expected_goals(
+    away_xg, away_attack_rate = _estimate_expected_goals(
         away_stats, is_home=False, recency_weighted_avg=away_recent_form,
         adjustment_factor=away_factor, opponent_stats=home_stats,
     )
@@ -217,6 +217,8 @@ def normalize_to_match_input(
         away_expected_goals=away_xg,
         home_expected_goals_ht=round(home_xg * HT_GOAL_SHARE, 3) if home_xg else 0.0,
         away_expected_goals_ht=round(away_xg * HT_GOAL_SHARE, 3) if away_xg else 0.0,
+        home_attack_rate=home_attack_rate,
+        away_attack_rate=away_attack_rate,
         expected_cards=expected_cards,
         home_games_played=home_stats.get("games_played", 0),
         away_games_played=away_stats.get("games_played", 0),
@@ -548,7 +550,7 @@ DEFENSE_FACTOR_MAX = 1.6  # s extrémní (často málo podloženou) obranou nesm
 def _estimate_expected_goals(
     team_stats: dict, is_home: bool, recency_weighted_avg: Optional[float] = None,
     adjustment_factor: float = 1.0, opponent_stats: Optional[dict] = None,
-) -> float:
+) -> tuple[float, float]:
     """
     Zjednodušený xG odhad: průměr vstřelených gólů, upravený o domácí/
     venkovní výhodu a o obrannou sílu SOUPEŘE, se čtyřmi vrstvami
@@ -580,6 +582,14 @@ def _estimate_expected_goals(
     (odhad útočné/obranné síly regresí přes celou ligovou tabulku, ne
     jen pár týmu) — to by vyžadovalo samostatný (a placený) zdroj dat.
     Tohle je levnější mezikrok se stejnými daty, co appka už beztak má.
+
+    Vrací (xg, attack_rate) — xg je finální odhad gólů V TOMHLE zápase
+    (po domácí výhodě, obraně soupeře, počasí/zranění/odpočinku/motivaci),
+    attack_rate je čistě VLASTNÍ útočná forma týmu (shrinkage + nedávná
+    forma, ale BEZ vlivu soupeře/kontextu) — appka ho používá k odfiltrování
+    "Over gólů" tipů, kde appce vyšla vysoká pravděpodobnost jen kvůli
+    děravé obraně soupeře, ne proto, že by tým sám byl útočný (viz
+    OVER_GOALS_MIN_TEAM_ATTACK_RATE v probability_model.py).
     """
     avg_goals_scored = team_stats.get("avg_goals_scored_last_10", 1.2)
     games_played = team_stats.get("games_played", 0)
@@ -615,7 +625,8 @@ def _estimate_expected_goals(
             defense_factor = min(max(defense_factor, DEFENSE_FACTOR_MIN), DEFENSE_FACTOR_MAX)
 
     home_advantage_factor = 1.10 if is_home else 0.92
-    return round(shrunk_avg * home_advantage_factor * adjustment_factor * defense_factor, 2)
+    xg = round(shrunk_avg * home_advantage_factor * adjustment_factor * defense_factor, 2)
+    return xg, round(shrunk_avg, 2)
 
 
 def adapt_recent_form_goals(fixtures: list[dict], team_id: int, venue: Optional[str] = None) -> Optional[float]:
