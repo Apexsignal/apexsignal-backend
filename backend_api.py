@@ -326,6 +326,66 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_lead_submissions: dict[str, list[float]] = {}
+LEAD_MAX_PER_IP_PER_HOUR = 5
+
+
+def _lead_rate_limited(ip: str) -> bool:
+    """Appka nábor-formulář nechává veřejný bez přihlášení — tenhle prostý
+    in-memory limit (5 odeslání/hodinu z jedné IP) appku chrání proti
+    zaplavení appčina Telegramu spamem, bez nutnosti nové DB tabulky."""
+    now = time.time()
+    cutoff = now - 3600
+    hits = [t for t in _lead_submissions.get(ip, []) if t > cutoff]
+    _lead_submissions[ip] = hits
+    if len(hits) >= LEAD_MAX_PER_IP_PER_HOUR:
+        return True
+    hits.append(now)
+    return False
+
+
+class LeadApplyRequest(BaseModel):
+    name: str
+    phone: str
+    email: str
+    gdpr_consent: bool
+    answers: dict[str, str] = {}
+
+
+@app.post("/leads/apply")
+def submit_lead_application(req: LeadApplyRequest, request: Request):
+    """Příjem odpovědí z náborové stránky (kvíz + kontakt). Appka je
+    NIKAM neukládá do DB — jen je pošle appčinu vlastnímu Telegramu
+    (TELEGRAM_CHAT_ID), stejně jako appka posílá upozornění na nové
+    registrace. Bez GDPR souhlasu appka žádost odmítne rovnou na vstupu."""
+    if not req.gdpr_consent:
+        raise HTTPException(status_code=400, detail="Je potřeba souhlas se zpracováním osobních údajů.")
+    if not req.name.strip() or not req.phone.strip() or not req.email.strip():
+        raise HTTPException(status_code=400, detail="Chybí jméno, telefon nebo e-mail.")
+
+    client_ip = _client_ip(request)
+    if _lead_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Příliš mnoho odeslání, zkus to prosím později.")
+
+    lines = [
+        "📋 Nová poptávka z náborové stránky",
+        f"Jméno: {req.name.strip()}",
+        f"Telefon: {req.phone.strip()}",
+        f"E-mail: {req.email.strip()}",
+    ]
+    for key, val in req.answers.items():
+        lines.append(f"{key}: {val}")
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if chat_id:
+        try:
+            _send_telegram_message(int(chat_id), "\n".join(lines))
+        except Exception as e:
+            print(f"[leads] Nepodařilo se poslat Telegram upozornění: {e}")
+
+    return {"status": "received"}
+
+
 def _notify_owner_new_registration(email: str, source: str) -> None:
     """Appka appce pošle upozornění na appčin vlastní Telegram
     (TELEGRAM_CHAT_ID) při KAŽDÉ nové registraci — appka to volá jen
