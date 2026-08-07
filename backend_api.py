@@ -1152,7 +1152,7 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 # částku, co appka strhne, drží ten Payment Link na Stripe straně.
 # =====================================================================
 TELEGRAM_LINK_CODE_TTL_MINUTES = 60
-CHANNEL_PRICE_KC = 490
+CHANNEL_PRICE_KC = 990
 
 
 def _ticket_type_for_risk_level(risk_level: int) -> str:
