@@ -1361,6 +1361,17 @@ def record_seller_earning(
         return cur.rowcount > 0
 
 
+def get_active_sellers_with_telegram() -> list[dict]:
+    """Appka sem sahá při denní rozesílce (viz /admin/client-tickets-send)
+    — appka posílá appčin denní tiket i prodejcům, ne jen platícím
+    odběratelům appčina kanálu, ať mají co přeposílat do svého kanálu."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT id, seller_code, telegram_chat_id FROM sellers WHERE active = true AND telegram_chat_id IS NOT NULL"
+        )
+        return cur.fetchall()
+
+
 def get_seller_earnings(seller_id: int) -> list[dict]:
     with get_cursor() as cur:
         cur.execute(

@@ -2058,6 +2058,29 @@ def admin_create_seller(req: CreateSellerRequest, request: Request):
     return {"seller_id": seller_id, "seller_code": seller_code, "display_name": req.display_name.strip()}
 
 
+class SellerApplyRequest(BaseModel):
+    display_name: str
+
+
+@app.post("/seller/apply")
+def seller_apply(req: SellerApplyRequest, user_id: int = Depends(get_current_user_id)):
+    """Samoobslužná varianta /admin/sellers/create — přihlášený uživatel
+    appce založí prodejecký účet sám, appka nemusí volat admin příkaz
+    ručně za appku při každém novém prodejci. display_name appka zatím
+    neověřuje (appka to zobrazí jen v appčině dashboardu jemu samotnému,
+    nikde veřejně) — appka je nechá měnit i opakovaným voláním."""
+    display_name = req.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="Chybí jméno.")
+    if len(display_name) > 120:
+        raise HTTPException(status_code=400, detail="Jméno je moc dlouhé.")
+
+    existing = db.get_seller_by_user_id(user_id)
+    seller_code = existing["seller_code"] if existing else secrets.token_hex(4)
+    seller_id = db.create_seller(user_id, seller_code, display_name)
+    return {"seller_id": seller_id, "seller_code": seller_code, "display_name": display_name}
+
+
 @app.get("/seller/dashboard")
 def seller_dashboard(user_id: int = Depends(get_current_user_id)):
     """Appka sem prodejce pustí, jen když appka jeho user_id má
@@ -2088,6 +2111,10 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
         "payment_links": my_links,
         "telegram_linked": bool(seller.get("telegram_chat_id")),
         "telegram_link_url": telegram_link_url,
+        # "Obohacení" appčina základního modelu (tikety + provize) — když
+        # má prodejce navíc appčino existující Neomezené generování,
+        # appka mu dovolí generovat si tikety sám, ne jen dostávat appčiny.
+        "can_self_generate": _has_active_unlimited(user_id),
         "total_clients": total_clients,
         "total_earned_kc": total_seller_kc,
         "earnings": [
@@ -5426,6 +5453,10 @@ def client_tickets_send(request: Request):
     # vrátilo i všechny, kdo si kdy jen napsali /start — tedy i lidi bez
     # jediné zaplacené koruny.
     recipients = db.get_paid_telegram_subscribers()
+    # Prodejci appce nejsou "platící odběratelé appčina kanálu" (get_paid_
+    # telegram_subscribers je nenajde), ale appka jim tikety posílá stejně
+    # — appka jim dává obsah k přeposlání do jejich vlastního kanálu.
+    seller_recipients = db.get_active_sellers_with_telegram()
 
     results = []
     for recipient in recipients:
@@ -5437,9 +5468,19 @@ def client_tickets_send(request: Request):
             except Exception as e:
                 results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": f"error: {e}"})
 
+    for seller in seller_recipients:
+        chat_id = seller["telegram_chat_id"]
+        for r in picks:
+            try:
+                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id)
+                results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": "sent"})
+            except Exception as e:
+                results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": f"error: {e}"})
+
     return {
         "picks_sent": [r["ticket_id"] for r in picks],
         "recipients": len(recipients),
+        "seller_recipients": len(seller_recipients),
         "results": results,
     }
 
