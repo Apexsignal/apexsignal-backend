@@ -2997,6 +2997,77 @@ def admin_win_loss_report(request: Request):
     }
 
 
+@app.get("/admin/lost-tickets-report")
+def admin_lost_tickets_report(request: Request, days: int = 7):
+    """
+    Diagnostika (2026-08-06) — appka na žádost uživatele rozebírá PROHRANÉ
+    tikety za posledních `days` dní: ke KAŽDÉMU appka najde konkrétní
+    nohu/nohy, co ho prohrály (result='lost'), a k tomu spočítá statistiku
+    podle typu trhu (kde appka nejvíc prohrává). Read-only, nic neukládá.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.id AS ticket_id, t.ticket_type, t.total_odds, t.actual_stake_amount,
+                   t.actual_odds, t.created_at, u.email
+              FROM tickets t
+              JOIN users u ON u.id = t.user_id
+             WHERE t.status = 'lost' AND t.created_at >= now() - (%s || ' days')::interval
+             ORDER BY t.created_at DESC
+            """,
+            (days,),
+        )
+        lost_tickets = cur.fetchall()
+
+        ticket_ids = [t["ticket_id"] for t in lost_tickets]
+        losing_selections_by_ticket: dict[int, list[dict]] = {}
+        market_loss_count: dict[str, int] = {}
+        if ticket_ids:
+            cur.execute(
+                """
+                SELECT ticket_id, home_team, away_team, market_type, selection, odds,
+                       model_probability, market_probability, league, kickoff_date
+                  FROM ticket_selections
+                 WHERE ticket_id = ANY(%s) AND result = 'lost'
+                """,
+                (ticket_ids,),
+            )
+            for row in cur.fetchall():
+                losing_selections_by_ticket.setdefault(row["ticket_id"], []).append(dict(row))
+                m = row["market_type"] or "neznámý"
+                market_loss_count[m] = market_loss_count.get(m, 0) + 1
+
+    tickets_out = []
+    total_staked = 0.0
+    total_lost_kc = 0.0
+    for t in lost_tickets:
+        stake = float(t.get("actual_stake_amount") or 0)
+        total_staked += stake
+        total_lost_kc += stake
+        tickets_out.append({
+            "ticket_id": t["ticket_id"],
+            "email": t["email"],
+            "ticket_type": t["ticket_type"],
+            "odds": t.get("actual_odds") or t["total_odds"],
+            "stake_kc": stake,
+            "created_at": t["created_at"].isoformat() if t["created_at"] else None,
+            "losing_legs": losing_selections_by_ticket.get(t["ticket_id"], []),
+        })
+
+    return {
+        "days": days,
+        "lost_tickets_count": len(lost_tickets),
+        "total_staked_kc": round(total_staked, 0),
+        "total_lost_kc": round(total_lost_kc, 0),
+        "losses_by_market_type": dict(sorted(market_loss_count.items(), key=lambda kv: kv[1], reverse=True)),
+        "tickets": tickets_out,
+    }
+
+
 @app.post("/admin/settle-all-pending")
 def admin_settle_all_pending(request: Request):
     """
