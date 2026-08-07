@@ -76,6 +76,21 @@ MODEL_HIGH_CONFIDENCE_CAP = 0.75  # tvrdý strop na SUROVÝ model_probability (a
                               # pravděpodobnost — tu appka nechává beze změny, reálný
                               # trh appka nepřepisuje.
 
+FINAL_PROBABILITY_CAP = 0.85  # tvrdý strop na FINÁLNÍ (zobrazenou/stakingovou)
+                              # pravděpodobnost, bez ohledu na to, jestli appka vzala
+                              # model nebo tržní číslo — appka to přidala 2026-08-06,
+                              # protože MODEL_HIGH_CONFIDENCE_CAP výš (0.75) chrání jen
+                              # SUROVÝ model, ale appka na /admin/calibration-report
+                              # živě potvrdila STEJNÝ přehnaně sebejistý vzorec i u
+                              # KOŠŮ 80-100 % (kde appka většinou ukazuje TRŽNÍ
+                              # pravděpodobnost, ne modelovou): 80→66,2 %, 85→71,6 %,
+                              # 90→72,7 %, 95→63,2 %, 100→75 % reálně vyhrálo — i
+                              # skutečný tržní kurz appce u nejtěsnějších favoritů (často
+                              # exotické/nižší ligy s méně likvidním trhem) soustavně
+                              # nadhodnocoval šanci. 0.85 appka volí o něco výš než
+                              # MODEL_HIGH_CONFIDENCE_CAP — tržnímu číslu appka pořád
+                              # věří víc než vlastnímu modelu, jen ne bezmezně.
+
 HT_GOAL_SHARE = 0.45  # jaký podíl z CELKOVÉHO očekávaného počtu gólů appka
                               # čeká už v prvním poločase — 0.45 je konzervativní
                               # střed běžně citovaného rozmezí (fotbalová
@@ -868,7 +883,14 @@ class MarketEvaluator:
                     prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
                     candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
 
-            if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None and has_reliable_form:
+            # BTTS appka živě potvrdila jako nejslabší aktivní trh appky
+            # (45 % win rate, appka to zjistila přes /admin/win-loss-report
+            # 2026-08-06, výrazně pod Over gólů 73 % a Výhrou 94 %) — appka
+            # mu teď dává STEJNOU podmínku útočnosti jako Over gólů výš
+            # (both_teams_attacking), protože "oba dají gól" logicky
+            # potřebuje přesně to samé — dva týmy, co samy skórují, ne
+            # jen počet gólů nahnaný děravou obranou jedné strany.
+            if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None and has_reliable_form and both_teams_attacking:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
                 candidates.append(cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds))
 
@@ -1114,6 +1136,7 @@ class MarketEvaluator:
         market_key = f"{(market_key_type or market_type).value}:{selection}"
         market_probability = match.market_implied_probabilities.get(market_key)
         final_probability = market_probability if market_probability is not None else model_probability
+        final_probability = min(final_probability, FINAL_PROBABILITY_CAP)
         reasoning = MarketEvaluator._build_reasoning(match, market_type, selection, model_probability, market_probability)
         data_quality = MarketEvaluator._build_data_quality_note(match)
         return SelectionCandidate(
