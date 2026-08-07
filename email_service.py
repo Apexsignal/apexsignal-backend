@@ -160,6 +160,35 @@ def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     return send_email(to_email, "Obnovení hesla — ApexSignal", _wrap_html(inner))
 
 
+def send_lead_followup_email(to_email: str, name: str) -> bool:
+    """Appka tohle posílá hned po odeslání náborového formuláře (viz
+    POST /leads/apply) — appka chce, aby zájemce před telefonátem/schůzkou
+    stihl mrknout na apexsignal.cz a appku samotnou, ať ví, o čem se bude
+    mluvit, a appka/David nezačíná vysvětlování od nuly."""
+    first_name = (name or "").strip().split(" ")[0] or "ahoj"
+    inner = f"""
+    <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Ahoj {first_name},</p>
+    <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
+      díky za zájem! Ozvu se ti co nejdřív a domluvíme si hovor nebo schůzku.
+    </p>
+    <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
+      Než spolu budeme mluvit, mrkni prosím na web a klidně i appku samotnou —
+      ať víš, o čem přesně bude řeč:
+    </p>
+    <p style="margin:24px 0;">
+      <a href="https://www.apexsignal.cz" style="background:#19E0C4;color:#0B0E14;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">www.apexsignal.cz</a>
+    </p>
+    <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
+      Mrkni klidně i na <a href="https://www.apexsignal.cz/transparentni-ucet" style="color:#19E0C4;">transparentní účet</a> —
+      tam appka ukazuje reálnou historii tiketů, žádná vymyšlená čísla.
+    </p>
+    <p style="color:#8A93A8;font-size:13px;line-height:1.6;">
+      Brzy na slyšenou,<br>David
+    </p>
+    """
+    return send_email(to_email, "Díky za zájem — mrkni na ApexSignal, než se ozvu", _wrap_html(inner))
+
+
 def send_verification_email(to_email: str, verify_link: str) -> bool:
     inner = f"""
     <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Díky za registraci v appce ApexSignal! Potvrď prosím svůj e-mail — hned potom ti připíšeme první krátký tiket zdarma na vyzkoušení.</p>

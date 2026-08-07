@@ -383,6 +383,11 @@ def submit_lead_application(req: LeadApplyRequest, request: Request):
         except Exception as e:
             print(f"[leads] Nepodařilo se poslat Telegram upozornění: {e}")
 
+    try:
+        email_service.send_lead_followup_email(req.email.strip(), req.name.strip())
+    except Exception as e:
+        print(f"[leads] Nepodařilo se poslat navazující e-mail: {e}")
+
     return {"status": "received"}
 
 
