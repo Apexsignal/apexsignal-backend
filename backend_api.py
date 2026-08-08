@@ -3141,31 +3141,46 @@ def admin_calibration_report(request: Request):
 
 
 @app.get("/admin/win-loss-report")
-def admin_win_loss_report(request: Request):
+def admin_win_loss_report(request: Request, since: Optional[str] = None, until: Optional[str] = None):
     """
     Appka tímhle appce spočítá kompletní statistiku úspěšnosti napříč
     VŠEMI účty appky (appčiny vlastní i klientské) — kolik tiketů/výběrů
     appka vyhrála/prohrála, rozpad podle typu tiketu a podle typu trhu.
     Appka počítá jen vyhodnocené (won/lost), pending appka do procent
     nezapočítává (nemá smysl, výsledek appka ještě nezná).
+
+    since/until (YYYY-MM-DD, appka je bere jako UTC) appka appce nechala
+    volitelné — appce umožní srovnat konkrétní období (např. "jak appka
+    vypadala týden 10. 7." vs. "posledních 10 dní"), beze změny výchozího
+    chování (bez parametrů appka pořád počítá úplně celou historii).
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
+    date_clause = ""
+    date_params: list = []
+    if since:
+        date_clause += " AND t.created_at >= %s"
+        date_params.append(since)
+    if until:
+        date_clause += " AND t.created_at < %s"
+        date_params.append(until)
+
     with db.get_cursor() as cur:
-        cur.execute("SELECT status, COUNT(*) AS c FROM tickets GROUP BY status")
+        cur.execute(f"SELECT status, COUNT(*) AS c FROM tickets t WHERE true{date_clause} GROUP BY status", date_params)
         by_status = {r["status"]: r["c"] for r in cur.fetchall()}
 
         # Appka zisk/ztrátu nedrží jako sloupec — appka ho dopočítává za
         # běhu ze sázky/kurzu/výsledku (viz Repo._compute_actual_profit_loss),
         # appka to tady dělá stejně, v Pythonu, ne v SQL.
         cur.execute(
-            """
+            f"""
             SELECT ticket_type, status, total_odds, actual_stake_amount, actual_odds
-              FROM tickets
-             WHERE status IN ('won', 'lost')
-            """
+              FROM tickets t
+             WHERE status IN ('won', 'lost'){date_clause}
+            """,
+            date_params,
         )
         settled_rows = cur.fetchall()
 
@@ -3193,25 +3208,36 @@ def admin_win_loss_report(request: Request):
         }
 
         cur.execute(
-            """
+            f"""
             SELECT ts.market_type, ts.result, COUNT(*) AS c
               FROM ticket_selections ts
               JOIN tickets t ON t.id = ts.ticket_id
-             WHERE ts.result IN ('won', 'lost')
+             WHERE ts.result IN ('won', 'lost'){date_clause}
              GROUP BY ts.market_type, ts.result
-            """
+            """,
+            date_params,
         )
         by_market_rows = cur.fetchall()
 
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*) AS c
-              FROM ticket_selections
-             WHERE result IN ('won', 'lost')
-            """
+              FROM ticket_selections ts
+              JOIN tickets t ON t.id = ts.ticket_id
+             WHERE ts.result IN ('won', 'lost'){date_clause}
+            """,
+            date_params,
         )
         total_selections = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) AS c FROM ticket_selections WHERE result = 'won'")
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS c
+              FROM ticket_selections ts
+              JOIN tickets t ON t.id = ts.ticket_id
+             WHERE ts.result = 'won'{date_clause}
+            """,
+            date_params,
+        )
         won_selections = cur.fetchone()["c"]
 
     def _pct(won: int, lost: int) -> float:
