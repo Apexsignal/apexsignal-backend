@@ -5346,6 +5346,44 @@ def edge_diagnostic(request: Request, time_frame_days: int = 5, min_prob: float 
     }
 
 
+@app.get("/admin/stripe-account-info")
+def admin_stripe_account_info(request: Request):
+    """Diagnostický endpoint appka appce přidala na jedno ověření — appka
+    přes API nevidí bankovní účet ani karty (Stripe tohle záměrně
+    nezpřístupňuje), jen jméno účtu a historii produktů, ať appka appce
+    pomůže zjistit, jestli appka jede na novém nebo starém Stripe účtu."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    try:
+        account = stripe.Account.retrieve()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba (Account.retrieve): {e}")
+
+    try:
+        products = stripe.Product.list(limit=100)
+        product_list = [
+            {"id": p["id"], "name": p.get("name"), "created": p.get("created"), "active": p.get("active")}
+            for p in products.get("data", [])
+        ]
+    except Exception as e:
+        product_list = [{"error": str(e)}]
+
+    return {
+        "account_id": account.get("id"),
+        "business_name": (account.get("business_profile") or {}).get("name"),
+        "email": account.get("email"),
+        "country": account.get("country"),
+        "created": account.get("created"),
+        "charges_enabled": account.get("charges_enabled"),
+        "payouts_enabled": account.get("payouts_enabled"),
+        "products": sorted(product_list, key=lambda p: p.get("created", 0)),
+    }
+
+
 @app.get("/admin/candidate-pool-preview")
 def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
