@@ -4178,6 +4178,24 @@ def _generate_one_ticket_for_cron(
     return result["safe"]
 
 
+@app.post("/admin/send-ticket-to-telegram")
+def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
+    """Appka appce pošle KONKRÉTNÍ uložený tiket appce na appčin vlastní
+    Telegram (TELEGRAM_CHAT_ID) — appka to appce hodí, kdykoliv appka
+    chce appce jednorázově něco poslat mimo appčin pravidelný denní
+    cron (viz run_daily_tickets)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    row = rows[0]
+    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(row["ticket"], row["ticket_id"]))
+    return {"status": "sent", "ticket_id": ticket_id}
+
+
 def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
     return {
         "ticket_id": ticket_id,
