@@ -91,6 +91,38 @@ FINAL_PROBABILITY_CAP = 0.85  # tvrdý strop na FINÁLNÍ (zobrazenou/stakingovo
                               # MODEL_HIGH_CONFIDENCE_CAP — tržnímu číslu appka pořád
                               # věří víc než vlastnímu modelu, jen ne bezmezně.
 
+# ---------------------------------------------------------------------
+# Appčina VLASTNÍ kalibrační křivka — místo jednoho plochého stropu appka
+# appce dovolí posunout finální pravděpodobnost směrem k tomu, co appka
+# historicky OPRAVDU vídá v daném pravděpodobnostním koši (viz
+# /admin/calibration-report a /admin/recompute-calibration-curve v
+# backend_api.py). Appka appce tohle naplní na začátku KAŽDÉHO generování
+# (set_calibration_curve) — modul appka drží bezstavový/čistý jinak, tohle
+# je jediná výjimka, protože křivka appku potřebuje mimo probability_model.py
+# (SQL nad appčinou databází), a threadovat ji jako parametr přes celý
+# volací řetězec (MarketEvaluator → _candidate) appka vyhodnotila jako
+# zbytečně invazivní pro jedno číslo.
+_CALIBRATION_CURVE: dict[int, float] = {}
+
+
+def set_calibration_curve(curve: dict[int, float]) -> None:
+    global _CALIBRATION_CURVE
+    _CALIBRATION_CURVE = curve or {}
+
+
+def _apply_calibration_correction(probability: float) -> float:
+    """Appka najde nejbližší koš po 5 % a posune appčino číslo na to, co
+    appka tam historicky OPRAVDU vyhrává — beze změny, pokud appka
+    křivku nemá načtenou nebo pro ten koš appka nemá uloženou hodnotu
+    (viz CALIBRATION_BUCKET_MIN_SAMPLES v backend_api.py — příliš málo
+    pozorování appka do křivky vůbec neuloží)."""
+    if not _CALIBRATION_CURVE:
+        return probability
+    bucket = max(0, min(100, int(round(probability * 20)) * 5))
+    real_pct = _CALIBRATION_CURVE.get(bucket)
+    return real_pct / 100 if real_pct is not None else probability
+
+
 HT_GOAL_SHARE = 0.45  # jaký podíl z CELKOVÉHO očekávaného počtu gólů appka
                               # čeká už v prvním poločase — 0.45 je konzervativní
                               # střed běžně citovaného rozmezí (fotbalová
@@ -1136,6 +1168,7 @@ class MarketEvaluator:
         market_key = f"{(market_key_type or market_type).value}:{selection}"
         market_probability = match.market_implied_probabilities.get(market_key)
         final_probability = market_probability if market_probability is not None else model_probability
+        final_probability = _apply_calibration_correction(final_probability)
         final_probability = min(final_probability, FINAL_PROBABILITY_CAP)
         reasoning = MarketEvaluator._build_reasoning(match, market_type, selection, model_probability, market_probability)
         data_quality = MarketEvaluator._build_data_quality_note(match)

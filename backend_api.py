@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field, field_validator
 from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
     MarketEvaluator, SPORT_MARKETS, MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS,
-    edge_capped_model_probability, kelly_stake_fraction,
+    edge_capped_model_probability, kelly_stake_fraction, set_calibration_curve,
 )
 import data_provider
 import ai_reviewer
@@ -105,6 +105,25 @@ def _is_dixon_coles_enabled() -> bool:
     except Exception:
         value = env_default
     return (value or "false").strip().lower() == "true"
+
+
+# Appčina vlastní kalibrační křivka (viz set_calibration_curve v
+# probability_model.py) — appka ji přepočítá na appčin pokyn
+# (/admin/recompute-calibration-curve), appka ji uloží sem a appka ji
+# načte na začátku KAŽDÉHO generování (_load_calibration_curve níž),
+# stejný vzor appka už používá u Dixon-Coles přepínače výš.
+CALIBRATION_CURVE_SETTING_KEY = "calibration_curve_v1"
+CALIBRATION_BUCKET_MIN_SAMPLES = 15  # appka appce zamítne koš s míň pozorováními — moc šumu na to, aby appka věřila korekci
+
+
+def _load_calibration_curve() -> None:
+    try:
+        raw = db.get_setting(CALIBRATION_CURVE_SETTING_KEY)
+        curve = {int(k): float(v) for k, v in json.loads(raw).items()} if raw else {}
+    except Exception as e:
+        print(f"[calibration] Nepodařilo se načíst kalibrační křivku, appka jede bez korekce: {e}")
+        curve = {}
+    set_calibration_curve(curve)
 
 
 # E-maily účtů appky, co appka pouští k appce-interním přepínačům (zatím
@@ -2276,6 +2295,7 @@ def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Opti
     # Appka zjistí přepínač JEDNOU na celý běh (ne pro každý zápas zvlášť)
     # — jeden DB dotaz místo desítek souběžných ve vláknech níž.
     dixon_coles_enabled = _is_dixon_coles_enabled()
+    _load_calibration_curve()
 
     _progress_set_total(request_id, len(raw_fixtures))
 
@@ -3137,6 +3157,69 @@ def admin_calibration_report(request: Request):
             "starsi": {**older, "win_rate_pct": _rate(older)},
         },
         "slabe_trhy_btts_a_over_cards": weak_out,
+    }
+
+
+@app.post("/admin/recompute-calibration-curve")
+def admin_recompute_calibration_curve(request: Request):
+    """
+    Appka appce spočítá appčinu VLASTNÍ kalibrační korekční křivku a
+    uloží ji do app_settings (viz set_calibration_curve v
+    probability_model.py) — od příštího generování appka appce posune
+    finální pravděpodobnost směrem k tomu, co appka v daném koši
+    historicky OPRAVDU vyhrává, místo aby appka slepě věřila
+    de-vigovanému číslu.
+
+    Na rozdíl od /admin/calibration-report appka tady bucketuje podle
+    'probability' (appkou FINÁLNĚ použité/zobrazené číslo — tržní, pokud
+    appka ho má, jinak model), ne podle 'model_probability' — appka
+    koriguje přesně to číslo, co appka i klientovi ukazuje a na co appka
+    staví vklad. Koše s míň než CALIBRATION_BUCKET_MIN_SAMPLES appka do
+    křivky vůbec neuloží (příliš málo dat, korekce by byla jen šum) —
+    appka pro ně zůstane beze změny (fallback na nekorigovanou hodnotu).
+
+    Appka tohle appce nikdy nespouští automaticky — appka to appce nechá
+    jako vědomé rozhodnutí appky, kdy je appka spustí (appka doporučuje
+    ne dřív, než appka nasbírá dost čerstvých, spolehlivě vyhodnocených
+    dat — viz oprava settlement 30. 7.).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT probability, result
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost') AND probability IS NOT NULL
+            """
+        )
+        rows = cur.fetchall()
+
+    buckets: dict[int, dict] = {}
+    for row in rows:
+        p = row["probability"]
+        bucket = max(0, min(100, int(round(float(p) * 20)) * 5))
+        acc = buckets.setdefault(bucket, {"won": 0, "lost": 0})
+        acc[row["result"]] += 1
+
+    curve: dict[str, float] = {}
+    skipped_low_sample = []
+    for bucket, acc in sorted(buckets.items()):
+        total = acc["won"] + acc["lost"]
+        if total < CALIBRATION_BUCKET_MIN_SAMPLES:
+            skipped_low_sample.append({"bucket": bucket, "count": total})
+            continue
+        curve[str(bucket)] = round(acc["won"] / total * 100, 1)
+
+    db.set_setting(CALIBRATION_CURVE_SETTING_KEY, json.dumps(curve))
+    set_calibration_curve({int(k): v for k, v in curve.items()})  # appka appce ať rovnou platí i v týhle běžící instanci
+
+    return {
+        "curve_saved": curve,
+        "skipped_low_sample_buckets": skipped_low_sample,
+        "min_samples_required": CALIBRATION_BUCKET_MIN_SAMPLES,
     }
 
 
