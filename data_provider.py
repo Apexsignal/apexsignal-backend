@@ -1174,8 +1174,19 @@ def adapt_odds_api_event(event: dict) -> dict:
     home_probs, away_probs, home_prices = [], [], []
     btts_probs, btts_prices = [], []
     totals_by_threshold: dict[float, list[tuple[float, float, float, float]]] = {}  # threshold -> [(cena_over, p_over, cena_under, p_under), ...]
+    # Appka appce zvlášť sleduje Pinnacle — je proslulý nejnižší marží a
+    # nejpřesnějším trhem ze všech appčiných bookmakerů (nejmíň postižený
+    # tzv. favourite-longshot bias, kdy trh systematicky mírně přeceňuje
+    # favority — viz kalibrační report appky). Pokud appka Pinnacle k
+    # zápasu má, appka appce dá přednost JEHO vlastní de-vigované
+    # pravděpodobnosti před průměrem přes všechny bookmakery (ty rekreační
+    # tím zkreslením trpí víc). Bez Pinnacle appka spadne na dosavadní
+    # průměr — beze změny chování.
+    pinnacle_home_prob = pinnacle_away_prob = pinnacle_btts_prob = None
+    pinnacle_totals: dict[float, tuple[float, float]] = {}  # threshold -> (p_over, p_under)
 
     for bm in bookmakers:
+        is_pinnacle = bm.get("key") == "pinnacle"
         markets = bm.get("markets", [])
 
         h2h = next((m for m in markets if m["key"] == "h2h"), None)
@@ -1185,8 +1196,12 @@ def adapt_odds_api_event(event: dict) -> dict:
             if home_name in probs:
                 home_probs.append(probs[home_name])
                 home_prices.append(next(o["price"] for o in h2h["outcomes"] if o["name"] == home_name))
+                if is_pinnacle:
+                    pinnacle_home_prob = probs[home_name]
             if away_name in probs:
                 away_probs.append(probs[away_name])
+                if is_pinnacle:
+                    pinnacle_away_prob = probs[away_name]
 
         btts = next((m for m in markets if m["key"] == "btts"), None)
         if btts:
@@ -1196,6 +1211,8 @@ def adapt_odds_api_event(event: dict) -> dict:
                 p_yes, _ = devig_two_way(yes_o["price"], no_o["price"])
                 btts_probs.append(p_yes)
                 btts_prices.append(yes_o["price"])
+                if is_pinnacle:
+                    pinnacle_btts_prob = p_yes
 
         totals = next((m for m in markets if m["key"] == "totals"), None)
         if totals:
@@ -1206,15 +1223,23 @@ def adapt_odds_api_event(event: dict) -> dict:
                 totals_by_threshold.setdefault(over_o["point"], []).append(
                     (over_o["price"], p_over, under_o["price"], p_under)
                 )
+                if is_pinnacle:
+                    pinnacle_totals[over_o["point"]] = (p_over, p_under)
 
     if home_probs:
-        result["market_implied_probabilities"]["match_winner:home"] = sum(home_probs) / len(home_probs)
+        result["market_implied_probabilities"]["match_winner:home"] = (
+            pinnacle_home_prob if pinnacle_home_prob is not None else sum(home_probs) / len(home_probs)
+        )
         result["favorite_win_market_odds"] = _median(home_prices)
     if away_probs:
-        result["market_implied_probabilities"]["match_winner:away"] = sum(away_probs) / len(away_probs)
+        result["market_implied_probabilities"]["match_winner:away"] = (
+            pinnacle_away_prob if pinnacle_away_prob is not None else sum(away_probs) / len(away_probs)
+        )
 
     if btts_probs:
-        result["market_implied_probabilities"]["btts:yes"] = sum(btts_probs) / len(btts_probs)
+        result["market_implied_probabilities"]["btts:yes"] = (
+            pinnacle_btts_prob if pinnacle_btts_prob is not None else sum(btts_probs) / len(btts_probs)
+        )
         result["btts_yes_odds"] = _median(btts_prices)
 
     if totals_by_threshold:
@@ -1224,9 +1249,12 @@ def adapt_odds_api_event(event: dict) -> dict:
         prices_and_probs = totals_by_threshold[threshold]
         result["over_threshold"] = threshold
         result["over_odds"] = _median([p for p, _, _, _ in prices_and_probs])
-        result["over_probability"] = sum(p for _, p, _, _ in prices_and_probs) / len(prices_and_probs)
         result["under_odds"] = _median([p for _, _, p, _ in prices_and_probs])
-        result["under_probability"] = sum(p for _, _, _, p in prices_and_probs) / len(prices_and_probs)
+        if threshold in pinnacle_totals:
+            result["over_probability"], result["under_probability"] = pinnacle_totals[threshold]
+        else:
+            result["over_probability"] = sum(p for _, p, _, _ in prices_and_probs) / len(prices_and_probs)
+            result["under_probability"] = sum(p for _, _, _, p in prices_and_probs) / len(prices_and_probs)
 
     return result
 
@@ -2751,8 +2779,14 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
     over_goals_prices: dict[float, list[float]] = {}
     under_goals_prices: dict[float, list[float]] = {}
     over_cards_prices: dict[float, list[float]] = {}
+    # Appka appce dá přednost Pinnacle cenám před mediánem přes všechny
+    # bookmakery, pokud appka Pinnacle k zápasu má — viz stejný komentář
+    # u adapt_odds_api_event výše (favourite-longshot bias).
+    pinnacle_home = pinnacle_draw = pinnacle_away = None
+    pinnacle_btts_yes = pinnacle_btts_no = None
 
     for bm in bookmakers:
+        is_pinnacle = str(bm.get("name", "")).strip().lower() == "pinnacle"
         for bet in bm.get("bets", []):
             name = bet.get("name")
             values = bet.get("values", [])
@@ -2764,10 +2798,16 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
                         continue
                     if v.get("value") == "Home":
                         home_prices.append(odd)
+                        if is_pinnacle:
+                            pinnacle_home = odd
                     elif v.get("value") == "Draw":
                         draw_prices.append(odd)
+                        if is_pinnacle:
+                            pinnacle_draw = odd
                     elif v.get("value") == "Away":
                         away_prices.append(odd)
+                        if is_pinnacle:
+                            pinnacle_away = odd
             elif name == "Goals Over/Under":
                 for v in values:
                     val = str(v.get("value", ""))
@@ -2787,8 +2827,12 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
                         continue
                     if v.get("value") == "Yes":
                         btts_yes_prices.append(odd)
+                        if is_pinnacle:
+                            pinnacle_btts_yes = odd
                     elif v.get("value") == "No":
                         btts_no_prices.append(odd)
+                        if is_pinnacle:
+                            pinnacle_btts_no = odd
             elif name == "Cards Over/Under":
                 for v in values:
                     val = str(v.get("value", ""))
@@ -2802,9 +2846,12 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
     if home_prices:
         result["match_winner"]["favorite"] = _median(home_prices)
     if home_prices and draw_prices and away_prices:
-        probs = devig_market([
-            ("home", _median(home_prices)), ("draw", _median(draw_prices)), ("away", _median(away_prices)),
-        ])
+        if pinnacle_home and pinnacle_draw and pinnacle_away:
+            probs = devig_market([("home", pinnacle_home), ("draw", pinnacle_draw), ("away", pinnacle_away)])
+        else:
+            probs = devig_market([
+                ("home", _median(home_prices)), ("draw", _median(draw_prices)), ("away", _median(away_prices)),
+            ])
         result["market_implied_probabilities"]["match_winner:home"] = probs["home"]
         result["market_implied_probabilities"]["match_winner:away"] = probs["away"]
 
@@ -2834,7 +2881,10 @@ def adapt_api_football_odds(odds_response: dict) -> dict:
     if btts_yes_prices:
         result["btts_yes"] = _median(btts_yes_prices)
         if btts_no_prices:
-            p_yes, _ = devig_two_way(_median(btts_yes_prices), _median(btts_no_prices))
+            if pinnacle_btts_yes and pinnacle_btts_no:
+                p_yes, _ = devig_two_way(pinnacle_btts_yes, pinnacle_btts_no)
+            else:
+                p_yes, _ = devig_two_way(_median(btts_yes_prices), _median(btts_no_prices))
             result["market_implied_probabilities"]["btts:yes"] = p_yes
 
     return result
