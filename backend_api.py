@@ -5372,6 +5372,52 @@ def admin_stripe_account_info(request: Request):
     except Exception as e:
         product_list = [{"error": str(e)}]
 
+    try:
+        balance = stripe.Balance.retrieve()
+        balance_summary = {
+            "available": [{"amount": b["amount"] / 100, "currency": b["currency"]} for b in balance.get("available", [])],
+            "pending": [{"amount": b["amount"] / 100, "currency": b["currency"]} for b in balance.get("pending", [])],
+        }
+    except Exception as e:
+        balance_summary = {"error": str(e)}
+
+    try:
+        external_accounts = (account.get("external_accounts") or {}).get("data", [])
+        payout_targets = [
+            {
+                "type": ea.get("object"),
+                "bank_name": ea.get("bank_name"),
+                "last4": ea.get("last4"),
+                "currency": ea.get("currency"),
+                "default_for_currency": ea.get("default_for_currency"),
+            }
+            for ea in external_accounts
+        ]
+    except Exception as e:
+        payout_targets = [{"error": str(e)}]
+
+    try:
+        payouts = stripe.Payout.list(limit=10)
+        payout_list = [
+            {"id": p["id"], "amount": p["amount"] / 100, "currency": p["currency"], "status": p["status"], "arrival_date": p["arrival_date"]}
+            for p in payouts.get("data", [])
+        ]
+    except Exception as e:
+        payout_list = [{"error": str(e)}]
+
+    try:
+        customers = stripe.Customer.list(limit=1)
+        customer_count_note = "appka umí jen nahlédnout do posledních záznamů, ne přesný celkový počet bez stránkování"
+    except Exception as e:
+        customers = None
+        customer_count_note = str(e)
+
+    try:
+        webhooks = stripe.WebhookEndpoint.list(limit=20)
+        webhook_list = [{"url": w["url"], "status": w["status"], "enabled_events": w["enabled_events"]} for w in webhooks.get("data", [])]
+    except Exception as e:
+        webhook_list = [{"error": str(e)}]
+
     return {
         "account_id": account.get("id"),
         "business_name": (account.get("business_profile") or {}).get("name"),
@@ -5380,6 +5426,11 @@ def admin_stripe_account_info(request: Request):
         "created": account.get("created"),
         "charges_enabled": account.get("charges_enabled"),
         "payouts_enabled": account.get("payouts_enabled"),
+        "balance_kc": balance_summary,
+        "payout_targets": payout_targets,
+        "recent_payouts": payout_list,
+        "customers_note": customer_count_note,
+        "webhook_endpoints": webhook_list,
         "products": sorted(product_list, key=lambda p: p.get("created", 0)),
     }
 
