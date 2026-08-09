@@ -1464,16 +1464,24 @@ class TicketGenerator:
             ]
 
         # Vždy řaď sestupně podle pravděpodobnosti — chceme nejjistější výběry.
-        # match_winner appka navíc (2026-08-09, uživatelovo přání) řadí PŘED
-        # ostatní trhy bez ohledu na syrovou pravděpodobnost — appka na
-        # výhře naměřila 84,2% skutečnou úspěšnost (nejspolehlivější trh,
-        # viz /admin/all-markets-calibration), kdežto over_goals/BTTS appka
+        # appka navíc (2026-08-09, uživatelovo přání: "Dat prednost vyhra
+        # favorita, pak vyhra nebo remiza, pak over golu a pak vsechno
+        # dalsi") řadí trhy podle pevného pořadí spolehlivosti bez ohledu
+        # na syrovou pravděpodobnost — match_winner (84,2% skutečná
+        # úspěšnost, viz /admin/all-markets-calibration) appka staví
+        # nejvýš, dvojtip (bezpečnostní noha z podstaty) druhý, over góly
+        # třetí, všechno ostatní (BTTS, over_cards) naposled — appka je
         # zpřísnila kvůli prokázané přeceněnosti. _search_combo zkouší
         # "zahrnout" větev dřív pro kandidáty DŘÍV v ordered_pool (DFS níže),
-        # takže tohle řazení appku dá match_winner do tiketu přednostně,
-        # kdykoli existuje kombinace, co ho obsahuje.
+        # takže tohle řazení appku dá vyšší prioritě přednost, kdykoli
+        # existuje kombinace, co ji obsahuje.
+        MARKET_PRIORITY = {
+            MarketType.MATCH_WINNER: 0,
+            MarketType.DOUBLE_CHANCE: 1,
+            MarketType.OVER_GOALS: 2,
+        }
         ordered_pool = sorted(
-            pool, key=lambda c: (c.market_type != MarketType.MATCH_WINNER, -c.probability)
+            pool, key=lambda c: (MARKET_PRIORITY.get(c.market_type, 3), -c.probability)
         )
 
         min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
