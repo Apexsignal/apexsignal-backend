@@ -1463,8 +1463,18 @@ class TicketGenerator:
                 if c.market_probability is None or edge_capped_model_probability(c) * c.odds > 1.0
             ]
 
-        # Vždy řaď sestupně podle pravděpodobnosti — chceme nejjistější výběry
-        ordered_pool = sorted(pool, key=lambda c: c.probability, reverse=True)
+        # Vždy řaď sestupně podle pravděpodobnosti — chceme nejjistější výběry.
+        # match_winner appka navíc (2026-08-09, uživatelovo přání) řadí PŘED
+        # ostatní trhy bez ohledu na syrovou pravděpodobnost — appka na
+        # výhře naměřila 84,2% skutečnou úspěšnost (nejspolehlivější trh,
+        # viz /admin/all-markets-calibration), kdežto over_goals/BTTS appka
+        # zpřísnila kvůli prokázané přeceněnosti. _search_combo zkouší
+        # "zahrnout" větev dřív pro kandidáty DŘÍV v ordered_pool (DFS níže),
+        # takže tohle řazení appku dá match_winner do tiketu přednostně,
+        # kdykoli existuje kombinace, co ho obsahuje.
+        ordered_pool = sorted(
+            pool, key=lambda c: (c.market_type != MarketType.MATCH_WINNER, -c.probability)
+        )
 
         min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
         min_odds_hard = self.MIN_ODDS_HARD.get(ticket_type, 2.0)
