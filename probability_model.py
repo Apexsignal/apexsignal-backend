@@ -37,7 +37,10 @@ AGGRESSIVE_ODDS_RANGE = (5.0, 10.0)  # zachováno pro zpětnou kompatibilitu
 
 # Tři rozsahy pro nový systém délky tiketu
 TICKET_RANGES = {
-    "kratky":  (2.0, 3.0),     # Krátký — kurz 2–3 (jak je v UI)
+    "kratky":  (1.90, 3.0),    # Krátký — dolní limit 9.8.2026 uvolněn z 2.0 na
+                               # 1.90 (uživatelovo přání, po ručně poslaném
+                               # tiketu s kurzem 1.96: "tohle je dobra
+                               # tolerance 1.90")
     "stredni": (3.0, 6.0),     # Střední — kurz 3–6 (jak je v UI)
     "boost":   (10.0, 15.0),   # BOOST — kurz 10–15 (jak je v UI)
 }
@@ -1423,7 +1426,7 @@ class TicketGenerator:
         "boost": 3,     # Minimálně 3 výběry
     }
     MIN_ODDS_HARD = {
-        "kratky": 2.0,   # KRÁTKÝ: min 2.0 (dolní limit 2.0-3.0)
+        "kratky": 1.90,  # KRÁTKÝ: min 1.90 (dolní limit 1.90-3.0, viz TICKET_RANGES)
         "stredni": 3.0,  # STŘEDNÍ: min 3.0 (dolní limit 3.0-6.0)
         "boost": 10.0,   # BOOST: min 10.0 (dolní limit 10.0-15.0)
     }
