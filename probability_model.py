@@ -111,16 +111,23 @@ def set_calibration_curve(curve: dict[int, float]) -> None:
 
 
 def _apply_calibration_correction(probability: float) -> float:
-    """Appka najde nejbližší koš po 5 % a posune appčino číslo na to, co
-    appka tam historicky OPRAVDU vyhrává — beze změny, pokud appka
-    křivku nemá načtenou nebo pro ten koš appka nemá uloženou hodnotu
-    (viz CALIBRATION_BUCKET_MIN_SAMPLES v backend_api.py — příliš málo
-    pozorování appka do křivky vůbec neuloží)."""
+    """Appka najde nejbližší koš po 5 % a POUZE STÁHNE appčino číslo dolů na to,
+    co appka tam historicky OPRAVDU vyhrává — nikdy nahoru. Korekce je záměrně
+    jednosměrná: křivka se počítá z malého vzorku (řádově dny/týdny), takže koš,
+    kde appka historicky vyhrává VÍC než tvrdí, je s velkou pravděpodobností jen
+    šum malého vzorku, ne skutečná nedoceněnost — kdyby appka takový koš tlačila
+    nahoru, znovu by si zavedla přesně to přeceňování, kvůli kterému tahle
+    korekce vznikla, jen jinou cestou. Beze změny, pokud appka křivku nemá
+    načtenou nebo pro ten koš appka nemá uloženou hodnotu (viz
+    CALIBRATION_BUCKET_MIN_SAMPLES v backend_api.py — příliš málo pozorování
+    appka do křivky vůbec neuloží)."""
     if not _CALIBRATION_CURVE:
         return probability
     bucket = max(0, min(100, int(round(probability * 20)) * 5))
     real_pct = _CALIBRATION_CURVE.get(bucket)
-    return real_pct / 100 if real_pct is not None else probability
+    if real_pct is None:
+        return probability
+    return min(probability, real_pct / 100)
 
 
 HT_GOAL_SHARE = 0.45  # jaký podíl z CELKOVÉHO očekávaného počtu gólů appka
