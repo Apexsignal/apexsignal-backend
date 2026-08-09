@@ -1897,14 +1897,19 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # appka zvedla limit ze 150 na 400 — appce to ale opakovaně (živě potvrzeno
 # přes Render API, 2026-08-07: appka zaznamenala TŘI OOM pády za sebou na
 # 2denním okně) padalo appku na starter Render planu (512 MB RAM). API
-# kvóta appce dovolí i 400, ale appčina PAMĚŤ ne — appka limit stahuje
+# kvóta appce dovolí i 400, ale appčina PAMĚŤ ne — appka limit stáhla
 # zpátky na 120 (dřív 200, ale i to appce spadlo i bez rozšíření okna,
-# viz 2026-08-07), ať appka má rozumnou rezervu proti pádu i u širších
-# oken (appka to kombinuje s nižším FIXTURE_ENRICHMENT_WORKERS a dávkovým
-# zpracováním s průběžným gc.collect(), viz _build_football_matches v
-# backend_api.py) — teprve až appka přejde na vyšší Render plán (víc
-# RAM), dává smysl tohle číslo zase zvednout.
-MAX_FIXTURES_PER_REQUEST = 120
+# viz 2026-08-07).
+#
+# 2026-08-09: appka mezitím opravila pravděpodobnou příčinu OOM (viz
+# InMemoryCache výš — cache byla neomezená, appka ji teď aktivně zametá
+# a stropuje). Uživatel chce větší vzorek zápasů denně, appka proto
+# zkouší OPATRNÝ krok nahoru (120 → 180, pořád pod tím, co appce dřív
+# prokazatelně spadlo na 200) — NE rovnou zpátky na 400. Appka to musí
+# sledovat pár dní na Renderu (OOM restarty), než appka zkusí zvednout
+# dál. Teprve na vyšším Render plánu (víc RAM) dává smysl mířit zpátky
+# na 400.
+MAX_FIXTURES_PER_REQUEST = 180
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
