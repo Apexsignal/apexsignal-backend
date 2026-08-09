@@ -167,6 +167,13 @@ OVER_GOALS_STRICT_THRESHOLDS = {2.0, 2.5}  # appka na těchhle dvou prazích
                               # OVER_GOALS_STRICT_MIN_PROB místo běžného prahu.
 OVER_GOALS_STRICT_MIN_PROB = 0.75
 
+BTTS_STRICT_MIN_PROB = 0.75  # appka (2026-08-09) přes /admin/all-markets-calibration
+                              # živě naměřila jen 55.9 % skutečnou úspěšnost na BTTS
+                              # (34 vzorků), u proher model v průměru o 10.9 p. b.
+                              # sebejistější než trh — stejný systematický vzorec jako
+                              # u over_2.0/over_2.5, appka na to reaguje stejně (vyšší
+                              # práh místo běžných 65-71 %).
+
 OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # (2026-08-09) na over_goals vyšla jen 1 z 10
                               # (10 %) — appka ji na uživatelův pokyn
@@ -956,7 +963,14 @@ class MarketEvaluator:
             # jen počet gólů nahnaný děravou obranou jedné strany.
             if match.sport == Sport.FOOTBALL and match.btts_yes_odds is not None and has_reliable_form and both_teams_attacking:
                 prob = cls.btts_probability(match.home_expected_goals, match.away_expected_goals)
-                candidates.append(cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds))
+                candidate = cls._candidate(match, MarketType.BTTS, "yes", prob, match.btts_yes_odds)
+                # appka (2026-08-09) přes /admin/all-markets-calibration živě
+                # naměřila jen 55.9 % skutečnou úspěšnost na 34 vzorcích, u
+                # proher navíc model v průměru o 10.9 p. b. sebejistější než
+                # trh — stejný vzorec systematické přeceněnosti jako appka
+                # opravila u over_2.0/over_2.5 (viz OVER_GOALS_STRICT_MIN_PROB).
+                if candidate.probability >= BTTS_STRICT_MIN_PROB and candidate.model_probability >= BTTS_STRICT_MIN_PROB:
+                    candidates.append(candidate)
 
             # Dvojtip a poločasové góly (2026-08-05) — appka je dostává jen
             # pro malou shortlist zápasů (viz _enrich_shortlist_with_extra_markets
