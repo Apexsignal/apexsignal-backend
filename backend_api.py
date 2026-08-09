@@ -3160,6 +3160,81 @@ def admin_calibration_report(request: Request):
     }
 
 
+@app.get("/admin/goals-market-calibration")
+def admin_goals_market_calibration(request: Request):
+    """
+    Diagnostika (2026-08-09) — appka na žádost uživatele rozebírá KONKRÉTNĚ
+    over_goals/under_goals (appčiny historicky nejslabší trhy podle
+    /admin/win-loss-report), rozpadlé podle KONKRÉTNÍHO prahu (over_1.5 vs
+    over_2.5 atd.) — appka to /admin/calibration-report nemá, ten kalibruje
+    jen podle appkou odhadnuté pravděpodobnosti napříč VŠEMI trhy dohromady.
+    Appka navíc pro každý koš spočítá průměrný rozdíl model_probability
+    minus market_probability, ať appka pozná, jestli appka soustavně věří
+    vlastnímu modelu víc, než by měla vůči trhu. Read-only, nic neukládá.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT market_type, selection, result, probability, model_probability, market_probability, league
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost') AND market_type IN ('over_goals', 'under_goals')
+            """
+        )
+        rows = cur.fetchall()
+
+    by_threshold: dict[str, dict] = {}
+    by_league: dict[str, dict] = {}
+    for row in rows:
+        key = f"{row['market_type']}:{row['selection']}"
+        acc = by_threshold.setdefault(key, {"won": 0, "lost": 0, "model_minus_market_gaps": []})
+        acc[row["result"]] += 1
+        if row["model_probability"] is not None and row["market_probability"] is not None:
+            acc["model_minus_market_gaps"].append(float(row["model_probability"]) - float(row["market_probability"]))
+
+        league_key = f"{row['market_type']}:{row['league'] or 'neznámá'}"
+        lacc = by_league.setdefault(league_key, {"won": 0, "lost": 0})
+        lacc[row["result"]] += 1
+
+    threshold_out = []
+    for key, acc in sorted(by_threshold.items()):
+        total = acc["won"] + acc["lost"]
+        gaps = acc["model_minus_market_gaps"]
+        threshold_out.append({
+            "trh_a_prah": key,
+            "won": acc["won"], "lost": acc["lost"],
+            "win_rate_pct": round(acc["won"] / total * 100, 1) if total else 0.0,
+            "pocet": total,
+            "prumerny_rozdil_model_minus_trh_pct": round(sum(gaps) / len(gaps) * 100, 1) if gaps else None,
+        })
+    threshold_out.sort(key=lambda x: x["pocet"], reverse=True)
+
+    league_out = []
+    for key, acc in by_league.items():
+        total = acc["won"] + acc["lost"]
+        if total < 3:  # appka appce zamlčí ligy s příliš málo vzorky, ať to appku nemate šumem
+            continue
+        league_out.append({
+            "trh_a_liga": key, "won": acc["won"], "lost": acc["lost"],
+            "win_rate_pct": round(acc["won"] / total * 100, 1), "pocet": total,
+        })
+    league_out.sort(key=lambda x: x["win_rate_pct"])
+
+    return {
+        "podle_prahu": threshold_out,
+        "podle_ligy_min_3_vzorky": league_out,
+        "poznamka": (
+            "'prumerny_rozdil_model_minus_trh_pct' kladné číslo = appčin vlastní "
+            "model byl v průměru sebejistější než trh u PROHRANÝCH výběrů — "
+            "vysoké kladné číslo je varovný signál systematické přeceněnosti "
+            "modelu u toho konkrétního prahu, ne jen smůla na jednom zápase."
+        ),
+    }
+
+
 @app.post("/admin/recompute-calibration-curve")
 def admin_recompute_calibration_curve(request: Request):
     """
