@@ -27,6 +27,7 @@ import time
 import threading
 import unicodedata
 import difflib
+from collections import OrderedDict
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -41,9 +42,29 @@ from probability_model import (
 # Jednoduchý TTL cache (snižuje zátěž na rate-limited API)
 # ---------------------------------------------------------------------
 class InMemoryCache:
+    """
+    appka (2026-08-09) zjistila, že tenhle cache byl doteď NEOMEZENÝ —
+    záznamy se mazaly jen LÍNĚ (při čtení KONKRÉTNÍHO klíče po vypršení
+    TTL), takže fixture, na který se appka po prvním generování už nikdy
+    nevrátila (běžné — appka denně nabízí jiné zápasy), zůstal v paměti
+    navždy, i dávno po vypršení TTL. Appka na to přišla, když uživatel
+    chtěl vědět, PROČ appce na starter Renderu (512 MB) opakovaně
+    docházela paměť při širším okně kandidátů — appka to řešila jen
+    snížením MAX_FIXTURES_PER_REQUEST (viz data_provider.py), tenhle
+    neomezený růst cache appka do teď neřešila vůbec. Appka teď drží
+    tvrdý strop (MAX_ENTRIES) a vypršelé záznamy proaktivně zametá při
+    KAŽDÉM zápisu (ne jen líně při čtení) — nad stropem appka navíc
+    zahodí nejstarší vložené, i kdyby jim TTL ještě neskončilo.
+    """
+    MAX_ENTRIES = 4000  # appka na jedno generování dělá ~11 volání/zápas ×
+                         # až 400 zápasů = ~4400 possible entries per cache
+                         # instanci — appka dá strop těsně pod tím, ať appka
+                         # nikdy neroste bez konce, i kdyby appka mezitím
+                         # nestihla vymést vypršelé.
+
     def __init__(self, ttl_seconds: int = 30):
         self._ttl = ttl_seconds
-        self._store: dict[str, tuple[float, object]] = {}
+        self._store: OrderedDict[str, tuple[float, object]] = OrderedDict()
 
     def get(self, key: str):
         item = self._store.get(key)
@@ -57,6 +78,21 @@ class InMemoryCache:
 
     def set(self, key: str, value) -> None:
         self._store[key] = (time.time() + self._ttl, value)
+        self._store.move_to_end(key)
+        if len(self._store) > self.MAX_ENTRIES:
+            self._sweep_expired_or_oldest()
+
+    def _sweep_expired_or_oldest(self) -> None:
+        now = time.time()
+        expired_keys = [k for k, (expires_at, _) in self._store.items() if now > expires_at]
+        for k in expired_keys:
+            del self._store[k]
+        # appka i po vymetení vypršelých pořád nad stropem (appka má hodně
+        # ŽIVÝCH záznamů najednou, ne jen zapomenuté staré) — appka zahodí
+        # nejstarší VLOŽENÉ (OrderedDict drží pořadí vkládání/move_to_end),
+        # i kdyby jim TTL ještě neskončilo, ať appka strop opravdu drží.
+        while len(self._store) > self.MAX_ENTRIES:
+            self._store.popitem(last=False)
 
 
 # ---------------------------------------------------------------------
