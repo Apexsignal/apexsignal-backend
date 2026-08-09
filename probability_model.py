@@ -154,6 +154,25 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedů
                               # vs. Juventud, uruguayská Apertura) reálně měl, appka radši
                               # utáhla na 6 — víc jistoty na úkor trochu menšího poolu.
 
+OVER_GOALS_STRICT_THRESHOLDS = {2.0, 2.5}  # appka na těchhle dvou prazích
+                              # (2026-08-09) živě naměřila přes
+                              # /admin/goals-market-calibration jen 61.5 %,
+                              # resp. 54.5 % skutečnou úspěšnost (nižší
+                              # prahy 1.5/1.75 appce jedou spolehlivě 71-85 %)
+                              # — u over_2.5 appka navíc u prohraných výběrů
+                              # měla v průměru o 11.4 p. b. sebejistější model
+                              # než trh, jasný signál systematické přecenění,
+                              # ne smůla na jednom zápase. Uživatel: "Zprisnu
+                              # to" — appka na těchhle dvou prazích vyžaduje
+                              # OVER_GOALS_STRICT_MIN_PROB místo běžného prahu.
+OVER_GOALS_STRICT_MIN_PROB = 0.75
+
+OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
+                              # (2026-08-09) na over_goals vyšla jen 1 z 10
+                              # (10 %) — appka ji na uživatelův pokyn
+                              # ("vyradit skotskou ligu") z Over gólů úplně
+                              # vyřazuje, ne jen zpřísňuje.
+
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný" (uživatel 2026-08-06:
                               # "Chci aby over tipy se vybírali opravdu z útočných
@@ -917,10 +936,16 @@ class MarketEvaluator:
                 match.home_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
                 and match.away_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
             )
-            if has_reliable_form and both_teams_attacking:
+            if has_reliable_form and both_teams_attacking and match.country not in OVER_GOALS_EXCLUDED_COUNTRIES:
                 for threshold, odds in match.over_goals_odds.items():
                     prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
-                    candidates.append(cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds))
+                    candidate = cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds)
+                    if threshold in OVER_GOALS_STRICT_THRESHOLDS and (
+                        candidate.probability < OVER_GOALS_STRICT_MIN_PROB
+                        or candidate.model_probability < OVER_GOALS_STRICT_MIN_PROB
+                    ):
+                        continue
+                    candidates.append(candidate)
 
             # BTTS appka živě potvrdila jako nejslabší aktivní trh appky
             # (45 % win rate, appka to zjistila přes /admin/win-loss-report
