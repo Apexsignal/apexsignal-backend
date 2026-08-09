@@ -167,6 +167,14 @@ OVER_GOALS_STRICT_THRESHOLDS = {2.0, 2.5}  # appka na těchhle dvou prazích
                               # OVER_GOALS_STRICT_MIN_PROB místo běžného prahu.
 OVER_GOALS_STRICT_MIN_PROB = 0.75
 
+MATCH_WINNER_MIN_PROB = 0.65  # appčin absolutní tvrdý floor (uživatel: "Ok
+                              # dame tedy limit 65% maximalne. Vse niz uz
+                              # ne.") — appka na match_winner (2026-08-09,
+                              # 84.2% skutečná úspěšnost, model tam appce
+                              # vyšel MÍŇ sebejistý než trh) pouští favority
+                              # dolů až na tenhle floor, i když ostatní trhy
+                              # mají vyšší (71%) běžný požadavek.
+
 BTTS_STRICT_MIN_PROB = 0.75  # appka (2026-08-09) přes /admin/all-markets-calibration
                               # živě naměřila jen 55.9 % skutečnou úspěšnost na BTTS
                               # (34 vzorků), u proher model v průměru o 10.9 p. b.
@@ -1050,9 +1058,22 @@ class MarketEvaluator:
         # (viz #109 — 93,8% model, 55,8% zobrazeno). Appka teď vyžaduje
         # OBĚ čísla nad prahem, ať práh platí i pro to, co appka doopravdy
         # posílá klientovi, ne jen pro appčin interní odhad.
+        def effective_min_prob(c: SelectionCandidate) -> float:
+            # appka (2026-08-09) přes /admin/all-markets-calibration živě
+            # naměřila na match_winner 84.2% skutečnou úspěšnost (95 vzorků)
+            # a model tam byl DOKONCE MÍŇ sebejistý než trh — na rozdíl od
+            # over_2.5/BTTS appka tady nemá důkaz přeceněnosti, naopak. Appka
+            # proto na výhře pouští i slabší favority (kurz cca 1.5) až na
+            # appčin absolutní tvrdý floor (uživatel: "limit 65% maximalne,
+            # vse niz uz ne") — na zbylých trzích běžný (přísnější) min_prob
+            # zůstává beze změny.
+            if c.market_type == MarketType.MATCH_WINNER:
+                return min(min_prob, MATCH_WINNER_MIN_PROB)
+            return min_prob
+
         return [
             c for c in candidates
-            if c.model_probability >= min_prob and c.probability >= min_prob and passes_odds_filter(c)
+            if c.model_probability >= effective_min_prob(c) and c.probability >= effective_min_prob(c) and passes_odds_filter(c)
         ]
 
     @staticmethod
