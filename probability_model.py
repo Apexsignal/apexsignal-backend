@@ -199,6 +199,15 @@ OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # ("vyradit skotskou ligu") z Over gólů úplně
                               # vyřazuje, ne jen zpřísňuje.
 
+MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL"}  # appka (2026-08-13) přes
+                              # /admin/all-markets-calibration zjistila FNL
+                              # (ruská 2. liga) na výhře favorita jen 33.3 %
+                              # (3/9) — zatímco match_winner celkově appce jede
+                              # 84.8 % (99 vzorků). Stejný princip jako
+                              # OVER_GOALS_EXCLUDED_COUNTRIES u Skotska —
+                              # appka radši ligu úplně vynechá, než aby ji
+                              # jen zpřísňovala.
+
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.6  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
                               # zadal už 2026-08-06 ("Chci aby over tipy se
@@ -927,7 +936,11 @@ class MarketEvaluator:
                 match.home_expected_goals, match.away_expected_goals
             )
             favorite_side = max(winner_probs, key=winner_probs.get)
-            if favorite_side != "draw" and match.favorite_odds_verified:
+            if (
+                favorite_side != "draw"
+                and match.favorite_odds_verified
+                and match.league not in MATCH_WINNER_EXCLUDED_LEAGUES
+            ):
                 candidates.append(cls._candidate(
                     match, MarketType.MATCH_WINNER, favorite_side,
                     winner_probs[favorite_side], match.favorite_win_market_odds,
