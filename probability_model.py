@@ -157,17 +157,25 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedů
                               # vs. Juventud, uruguayská Apertura) reálně měl, appka radši
                               # utáhla na 6 — víc jistoty na úkor trochu menšího poolu.
 
-OVER_GOALS_STRICT_THRESHOLDS = {2.0, 2.5}  # appka na těchhle dvou prazích
+OVER_GOALS_STRICT_THRESHOLDS = {1.5, 2.0, 2.5}  # appka na 2.0/2.5
                               # (2026-08-09) živě naměřila přes
                               # /admin/goals-market-calibration jen 61.5 %,
-                              # resp. 54.5 % skutečnou úspěšnost (nižší
-                              # prahy 1.5/1.75 appce jedou spolehlivě 71-85 %)
-                              # — u over_2.5 appka navíc u prohraných výběrů
-                              # měla v průměru o 11.4 p. b. sebejistější model
-                              # než trh, jasný signál systematické přecenění,
-                              # ne smůla na jednom zápase. Uživatel: "Zprisnu
-                              # to" — appka na těchhle dvou prazích vyžaduje
-                              # OVER_GOALS_STRICT_MIN_PROB místo běžného prahu.
+                              # resp. 54.5 % skutečnou úspěšnost — u over_2.5
+                              # appka navíc u prohraných výběrů měla v průměru
+                              # o 11.4 p. b. sebejistější model než trh, jasný
+                              # signál systematické přecenění, ne smůla na
+                              # jednom zápase. Uživatel: "Zprisnu to" — appka
+                              # na těchhle prazích vyžaduje OVER_GOALS_STRICT_MIN_PROB
+                              # místo běžného prahu.
+                              # 1.5 appka přidala 2026-08-13 — celá historie
+                              # appčina daily účtu (53 vzorků) ukázala jen
+                              # 62.3 % skutečnou úspěšnost, a u proher appka
+                              # měla VYŠŠÍ průměrnou model. jistotu (75.1 %)
+                              # než u výher (73.8 %) — model tenhle práh vůbec
+                              # nedokázal rozlišit, stejný vzorec jako u 2.0/2.5.
+                              # Uživatel: "Potrebuji over gol aby se brali
+                              # golovy tymy!!!" — appka to řeší DVOJITĚ, spolu
+                              # se zvednutým OVER_GOALS_MIN_TEAM_ATTACK_RATE.
 OVER_GOALS_STRICT_MIN_PROB = 0.75
 
 MATCH_WINNER_MIN_PROB = 0.65  # appčin absolutní tvrdý floor (uživatel: "Ok
