@@ -1909,7 +1909,16 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # sledovat pár dní na Renderu (OOM restarty), než appka zkusí zvednout
 # dál. Teprve na vyšším Render plánu (víc RAM) dává smysl mířit zpátky
 # na 400.
-MAX_FIXTURES_PER_REQUEST = 180
+#
+# 2026-08-13: uživatel chce zpřísněné filtry (útočnost, over_1.5 na 75 %,
+# vyřazená FNL/Skotsko) mít nad VĚTŠÍM poolem, ať appka nezačne mít málo
+# kandidátů. Appka zkouší 180 → 220 — POZOR, tohle je PRVNÍ krok NAD
+# hranici (200), na které appka dřív prokazatelně padala (ještě před
+# opravou cache). Cache fix by měl hlavní příčinu řešit, ale appka na
+# tohle číslo nemá žádné živé potvrzení — appka to musí sledovat na
+# Renderu (OOM restarty) obzvlášť pozorně po tomhle nasazení. Uživatel
+# zvažuje i upgrade Render plánu (víc RAM), pak by šlo mířit zpátky na 400.
+MAX_FIXTURES_PER_REQUEST = 220
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
