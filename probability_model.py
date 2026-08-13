@@ -191,13 +191,21 @@ OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # ("vyradit skotskou ligu") z Over gólů úplně
                               # vyřazuje, ne jen zpřísňuje.
 
-OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
-                              # tým nepovažuje za "útočný" (uživatel 2026-08-06:
-                              # "Chci aby over tipy se vybírali opravdu z útočných
-                              # týmů co dávají góly"). LEAGUE_AVERAGE_GOALS_PER_TEAM
-                              # v data_provider.py je 1.3 (univerzální ligový průměr) —
-                              # appka záměrně dala práh MÍRNĚ NAD průměr, ať "útočný"
-                              # skutečně znamená nadprůměrně gólový tým, ne jen běžný.
+OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.6  # góly/zápas — appka pod tímhle
+                              # tým nepovažuje za "útočný". Uživatel tohle
+                              # zadal už 2026-08-06 ("Chci aby over tipy se
+                              # vybírali opravdu z útočných týmů co dávají
+                              # góly") s prahem 1.4 — appka 2026-08-13 zjistila
+                              # (celá historie appčina daily účtu), že over_1.5
+                              # jede jen 62.3 % (u proher appka měla v průměru
+                              # VYŠŠÍ model. jistotu 75.1 % než u výher 73.8 %,
+                              # jasný signál, že 1.4 pořád propouští týmy, co
+                              # gólově nic nedokazují) — uživatel na to znovu:
+                              # "Potrebuji over gol aby se brali golovy tymy!!!"
+                              # LEAGUE_AVERAGE_GOALS_PER_TEAM v data_provider.py
+                              # je 1.3 (univerzální ligový průměr) — 1.6 je
+                              # o 23 % nad průměr, výrazně přísnější než
+                              # předchozí "mírně nad průměr" 1.4.
                               # Kontrolováno na home_attack_rate/away_attack_rate
                               # (MatchInput) — appčina VLASTNÍ útočná forma týmu bez
                               # vlivu obrany soupeře, appka to NEPOUŽÍVÁ k výpočtu
