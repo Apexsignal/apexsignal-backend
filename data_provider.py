@@ -2097,6 +2097,29 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
           # patří tam mezi soutěže s reálným sázkovým pokrytím
 }
 
+# appka (2026-08-14) zjistila, že v dnech s víc než MAX_FIXTURES_PER_REQUEST
+# zápasy appka dřív ořezávala čistě podle kick-off času (nejdřívější zápasy
+# vyhrávaly, cokoliv pozdějšího odpoledne/večer appka nedostala vůbec do
+# poolu) — uživatel: "Ok bod 2!! Taky by mela vzit zapasy treba podle
+# nejakeho kriteria kde hraje favorit nebo vyssi ligy nejdriv". Appka
+# "kde hraje favorit" v týhle fázi vyhodnotit nemůže (appka v tuhle chvíli
+# má jen syrový seznam zápasů z API-Football, žádné kurzy ani xG — to appka
+# počítá až PO obohacení, ne předem, a obohatit VŠECHNY zápasy dne jen kvůli
+# seřazení by appku vrátilo přesně k tomu drahému volání, co appka MAX_FIXTURES
+# stropem řeší). Ligovou úroveň ale appka zná hned ze syrových dat (league id),
+# takže aspoň tohle appka řeší — nejvyšší soutěže (první liga per země +
+# evropské/mezinárodní poháry) appka bere PŘED nižšími ligami a domácími
+# poháry, bez ohledu na kick-off čas. V rámci stejné úrovně appka pořád řadí
+# podle času (dřívější dřív), ať appka nemá důvod skákat po celém dni náhodně.
+TOP_TIER_LEAGUE_IDS: set[int] = {
+    39, 78, 135, 140, 61, 88, 94, 144, 203, 179, 207, 218, 172, 373, 357, 164,
+    113, 103, 119, 244, 197, 235, 106, 271, 283, 286, 210, 332, 345, 383, 318,
+    71, 128, 268, 270, 239, 265, 242, 281, 250, 252, 344, 253, 262, 98, 292,
+    188, 307, 233,
+    # evropské kluby + hlavní mezinárodní soutěže
+    2, 3, 848, 531, 1, 4, 960, 5, 13, 11, 9, 15,
+}
+
 
 
 # API-Football označuje klubové sezóny startovním rokem — sezóna 2025/26
@@ -2306,7 +2329,10 @@ class APIFootballProvider(SportsDataProvider):
                 day_fixtures = [f for f in day_fixtures if not_night(f)]
             else:
                 day_fixtures = [f for f in day_fixtures if is_upcoming(f)]
-            day_fixtures.sort(key=lambda f: f.get("fixture", {}).get("date", ""))
+            day_fixtures.sort(key=lambda f: (
+                0 if f.get("league", {}).get("id") in TOP_TIER_LEAGUE_IDS else 1,
+                f.get("fixture", {}).get("date", ""),
+            ))
             fixtures.extend(day_fixtures[:remaining])
             time.sleep(0.3)
 
