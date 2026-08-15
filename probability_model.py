@@ -208,21 +208,27 @@ MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL"}  # appka (2026-08-13) přes
                               # appka radši ligu úplně vynechá, než aby ji
                               # jen zpřísňovala.
 
-OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.6  # góly/zápas — appka pod tímhle
+OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
                               # zadal už 2026-08-06 ("Chci aby over tipy se
                               # vybírali opravdu z útočných týmů co dávají
-                              # góly") s prahem 1.4 — appka 2026-08-13 zjistila
-                              # (celá historie appčina daily účtu), že over_1.5
-                              # jede jen 62.3 % (u proher appka měla v průměru
-                              # VYŠŠÍ model. jistotu 75.1 % než u výher 73.8 %,
-                              # jasný signál, že 1.4 pořád propouští týmy, co
-                              # gólově nic nedokazují) — uživatel na to znovu:
-                              # "Potrebuji over gol aby se brali golovy tymy!!!"
+                              # góly") s prahem 1.4.
+                              #
+                              # 2026-08-13 appka zkusila 1.4 → 1.6 (viz git
+                              # historie) — 2026-08-14 se ale živě ukázalo, že
+                              # appka to v kombinaci s ostatními dnešními
+                              # zpřísněními (over_1.5 na 75 %, FNL/Skotsko)
+                              # přehnala: i na běžném 2denním okně (180 zápasů,
+                              # appka měla u VŠECH spolehlivou formu) appce
+                              # zbylo jen 8 kandidátů celkem, z toho 0 na BTTS
+                              # a jen 1 na Over góly. Podmínka OBOU týmů
+                              # současně nad prahem se ukázala mnohem přísnější,
+                              # než appka čekala — vrací se na ověřeně
+                              # fungujících 1.4, ostatní dnešní zpřísnění
+                              # (over_1.5 strict, FNL) appka nechává.
                               # LEAGUE_AVERAGE_GOALS_PER_TEAM v data_provider.py
-                              # je 1.3 (univerzální ligový průměr) — 1.6 je
-                              # o 23 % nad průměr, výrazně přísnější než
-                              # předchozí "mírně nad průměr" 1.4.
+                              # je 1.3 (univerzální ligový průměr) — 1.4 je
+                              # záměrně jen "mírně nad průměr", ne výrazně.
                               # Kontrolováno na home_attack_rate/away_attack_rate
                               # (MatchInput) — appčina VLASTNÍ útočná forma týmu bez
                               # vlivu obrany soupeře, appka to NEPOUŽÍVÁ k výpočtu
