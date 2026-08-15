@@ -2329,10 +2329,24 @@ class APIFootballProvider(SportsDataProvider):
                 day_fixtures = [f for f in day_fixtures if not_night(f)]
             else:
                 day_fixtures = [f for f in day_fixtures if is_upcoming(f)]
-            day_fixtures.sort(key=lambda f: (
-                0 if f.get("league", {}).get("id") in TOP_TIER_LEAGUE_IDS else 1,
-                f.get("fixture", {}).get("date", ""),
-            ))
+            def _sort_key(f: dict) -> tuple:
+                league_id = f.get("league", {}).get("id")
+                tier = 0 if league_id in TOP_TIER_LEAGUE_IDS else 1
+                # appka (2026-08-14) přidává ještě jedno kritérium ZDARMA
+                # (žádné nové API volání) — pokud appka statistiky některého
+                # z týmů v zápase náhodou UŽ má v cache (z jiného zápasu
+                # stejného týmu, obohaceného dřív v týhle session), appka
+                # tenhle zápas mírně zvýhodní. Enrichment pak vyjde levněji
+                # (méně skutečných síťových volání do stropu 220), takže
+                # appka za stejný počet zápasů reálně stihne obohatit víc.
+                home_id = f.get("teams", {}).get("home", {}).get("id")
+                away_id = f.get("teams", {}).get("away", {}).get("id")
+                home_cached = self._cache.get(f"team_stats:{home_id}:{league_id}") is not None
+                away_cached = self._cache.get(f"team_stats:{away_id}:{league_id}") is not None
+                cache_bonus = 0 if (home_cached or away_cached) else 1
+                return (tier, cache_bonus, f.get("fixture", {}).get("date", ""))
+
+            day_fixtures.sort(key=_sort_key)
             fixtures.extend(day_fixtures[:remaining])
             time.sleep(0.3)
 
