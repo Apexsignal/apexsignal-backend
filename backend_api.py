@@ -5716,6 +5716,58 @@ def admin_stripe_account_info(request: Request):
     }
 
 
+@app.get("/admin/odds-coverage-sample")
+def odds_coverage_sample(request: Request, sample_size: int = 15):
+    """
+    Appka (2026-08-15) potřebuje zjistit, jestli appce chybí kandidáti
+    kvůli tomu, že appka na zápasy ještě nemá kurzy (bookmakeři je prostě
+    ještě nezveřejnili), nebo kvůli bugu ve zpracování. Na rozdíl od
+    /admin/candidate-pool-preview appka tady NEPOČÍTÁ kandidáty přes 6
+    prahů pro VŠECHNY zápasy — appka jen vezme prvních `sample_size`
+    zápasů dne (ze stejné 30min cache, žádné nové drahé volání navíc) a
+    zeptá se appčina PRIMÁRNÍHO zdroje kurzů (API-Football /odds) přímo,
+    kolik z nich má bookmakery. Výrazně levnější, appka tohle klidně
+    zavolá bez rizika, že appce znovu spadne server.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    raw_fixtures = provider.get_upcoming_matches(Sport.FOOTBALL, 1)
+    sample = raw_fixtures[:sample_size]
+
+    results = []
+    for raw in sample:
+        fixture = data_provider.adapt_api_football_fixture(raw)
+        try:
+            odds_raw = provider.get_pre_match_odds(fixture["id"])
+            bookmaker_count = len(odds_raw.get("bookmakers", []))
+        except Exception as e:
+            bookmaker_count = None
+            results.append({
+                "match": f"{fixture['home_team']} - {fixture['away_team']}",
+                "league_id": fixture.get("league_id"), "error": str(e),
+            })
+            continue
+        results.append({
+            "match": f"{fixture['home_team']} - {fixture['away_team']}",
+            "league_id": fixture.get("league_id"),
+            "kickoff": fixture.get("kickoff_time"),
+            "bookmaker_count": bookmaker_count,
+            "has_odds": bookmaker_count is not None and bookmaker_count > 0,
+        })
+
+    with_odds = sum(1 for r in results if r.get("has_odds"))
+    return {
+        "total_fixtures_today": len(raw_fixtures),
+        "sampled": len(sample),
+        "with_odds": with_odds,
+        "without_odds": len(sample) - with_odds,
+        "results": results,
+    }
+
+
 @app.get("/admin/candidate-pool-preview")
 def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
