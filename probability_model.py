@@ -157,7 +157,7 @@ MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS = 6  # pod tímhle appka týmu nedů
                               # vs. Juventud, uruguayská Apertura) reálně měl, appka radši
                               # utáhla na 6 — víc jistoty na úkor trochu menšího poolu.
 
-OVER_GOALS_STRICT_THRESHOLDS = {1.5, 2.0, 2.5}  # appka na 2.0/2.5
+OVER_GOALS_STRICT_THRESHOLDS = {2.0, 2.5}  # appka na 2.0/2.5
                               # (2026-08-09) živě naměřila přes
                               # /admin/goals-market-calibration jen 61.5 %,
                               # resp. 54.5 % skutečnou úspěšnost — u over_2.5
@@ -167,15 +167,20 @@ OVER_GOALS_STRICT_THRESHOLDS = {1.5, 2.0, 2.5}  # appka na 2.0/2.5
                               # jednom zápase. Uživatel: "Zprisnu to" — appka
                               # na těchhle prazích vyžaduje OVER_GOALS_STRICT_MIN_PROB
                               # místo běžného prahu.
-                              # 1.5 appka přidala 2026-08-13 — celá historie
-                              # appčina daily účtu (53 vzorků) ukázala jen
-                              # 62.3 % skutečnou úspěšnost, a u proher appka
-                              # měla VYŠŠÍ průměrnou model. jistotu (75.1 %)
-                              # než u výher (73.8 %) — model tenhle práh vůbec
-                              # nedokázal rozlišit, stejný vzorec jako u 2.0/2.5.
-                              # Uživatel: "Potrebuji over gol aby se brali
-                              # golovy tymy!!!" — appka to řeší DVOJITĚ, spolu
-                              # se zvednutým OVER_GOALS_MIN_TEAM_ATTACK_RATE.
+                              #
+                              # 1.5 appka na chvíli (2026-08-13) přidala taky,
+                              # ale 2026-08-15 přes nový /admin/probability-distribution
+                              # appka zjistila skutečnou příčinu appčiny bídy
+                              # kandidátů: Over góly mají napříč VŠEMI zápasy
+                              # nízkou průměrnou model. pravděpodobnost (34 %,
+                              # appka to změřila na 138 syrových kandidátech) —
+                              # fotbal je prostě z podstaty nejistý na počet
+                              # gólů, ne appčina chyba. 75% práh na nejběžnějším
+                              # prahu 1.5 appce skoro nic nenechal projít. Appka
+                              # ho vrací zpátky na běžný 71% obecný práh —
+                              # OVER_GOALS_MIN_TEAM_ATTACK_RATE (1.4) a vyřazená
+                              # Skotsko appka nechává, ty appce dál filtrují
+                              # slabé kandidáty, jen ne tak drasticky.
 OVER_GOALS_STRICT_MIN_PROB = 0.75
 
 MATCH_WINNER_MIN_PROB = 0.65  # appčin absolutní tvrdý floor (uživatel: "Ok
@@ -186,12 +191,18 @@ MATCH_WINNER_MIN_PROB = 0.65  # appčin absolutní tvrdý floor (uživatel: "Ok
                               # dolů až na tenhle floor, i když ostatní trhy
                               # mají vyšší (71%) běžný požadavek.
 
-BTTS_STRICT_MIN_PROB = 0.75  # appka (2026-08-09) přes /admin/all-markets-calibration
+BTTS_STRICT_MIN_PROB = 0.71  # appka (2026-08-09) přes /admin/all-markets-calibration
                               # živě naměřila jen 55.9 % skutečnou úspěšnost na BTTS
                               # (34 vzorků), u proher model v průměru o 10.9 p. b.
-                              # sebejistější než trh — stejný systematický vzorec jako
-                              # u over_2.0/over_2.5, appka na to reaguje stejně (vyšší
-                              # práh místo běžných 65-71 %).
+                              # sebejistější než trh — appka práh zvedla na 75 %.
+                              #
+                              # 2026-08-15: /admin/probability-distribution ukázal,
+                              # že appka toho dne neměla ANI JEDEN BTTS kandidát
+                              # nad 75 % — appčin model je na "oba dají gól"
+                              # z podstaty málo sebejistý, 75% práh ho fakticky
+                              # úplně vypnul. Vrací se na běžný 71% obecný práh
+                              # (OVER_GOALS_MIN_TEAM_ATTACK_RATE 1.4 přes
+                              # both_teams_attacking appka pořád aplikuje).
 
 OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # (2026-08-09) na over_goals vyšla jen 1 z 10
