@@ -5716,6 +5716,62 @@ def admin_stripe_account_info(request: Request):
     }
 
 
+@app.get("/admin/probability-distribution")
+def probability_distribution(request: Request, time_frame_days: int = 2):
+    """
+    Appka (2026-08-15) potřebuje vidět, KDE přesně appce mizí kandidáti —
+    /admin/odds-coverage-sample ukázal, že kurzy appka má u VŠECH
+    vzorkovaných zápasů, takže hrdlo lahve musí být v samotném
+    pravděpodobnostním filtrování. Appka tady projede VŠECHNY zápasy dne
+    JEN JEDNOU (min_prob=0, appka si prahy spočítá sama z výsledků —
+    na rozdíl od /admin/candidate-pool-preview, co appka volá
+    build_candidates 6× pro 6 různých prahů, tohle appku stojí jen
+    1/6 výpočtu), a rozdělí kandidáty do bucketů podle probability —
+    appka tak uvidí, jestli je model prostě 'nejistý' (hodně kandidátů
+    pod 50 %), nebo appka přichází o kandidáty těsně pod appčiným
+    prahem (hodně jich je 55-65 %).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+
+    buckets = {"<50%": 0, "50-60%": 0, "60-65%": 0, "65-70%": 0, "70-75%": 0, "75-80%": 0, "80%+": 0}
+    by_market: dict[str, dict] = {}
+
+    def bucket_for(p: float) -> str:
+        if p < 0.50: return "<50%"
+        if p < 0.60: return "50-60%"
+        if p < 0.65: return "60-65%"
+        if p < 0.70: return "65-70%"
+        if p < 0.75: return "70-75%"
+        if p < 0.80: return "75-80%"
+        return "80%+"
+
+    total_raw_candidates = 0
+    for m in matches:
+        for c in MarketEvaluator.build_candidates(m, min_prob=0.0):
+            total_raw_candidates += 1
+            buckets[bucket_for(c.probability)] += 1
+            mstat = by_market.setdefault(c.market_type.value, {"count": 0, "sum_prob": 0.0})
+            mstat["count"] += 1
+            mstat["sum_prob"] += c.probability
+
+    by_market_avg = {
+        k: {"count": v["count"], "avg_probability": round(v["sum_prob"] / v["count"], 3)}
+        for k, v in by_market.items()
+    }
+
+    return {
+        "time_frame_days": time_frame_days,
+        "fixtures_checked": len(matches),
+        "total_raw_candidates_any_probability": total_raw_candidates,
+        "probability_buckets": buckets,
+        "by_market": by_market_avg,
+    }
+
+
 @app.get("/admin/odds-coverage-sample")
 def odds_coverage_sample(request: Request, sample_size: int = 15):
     """
