@@ -891,7 +891,11 @@ def render_page(
 <meta property="og:title" content="Transparentní účet — ApexSignal">
 <meta property="og:description" content="{escape(description)}">
 <meta property="og:url" content="{SITE_URL}">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://apexsignal.cz/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://apexsignal.cz/og-image.png">
 <meta name="robots" content="index, follow">
 <style>{STYLE}</style>
 </head>
