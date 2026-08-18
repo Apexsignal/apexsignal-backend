@@ -2766,6 +2766,13 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
             all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+            # appka (2026-08-18) zjistila, že tady chyběl stejný
+            # _filter_within_days, co appka má u PŮVODNÍHO (užšího) okna
+            # výš — bez něj mohl horizon_note slíbit "zápasy až za
+            # {wider_days} dní", ale appka klidně nabídla zápas o den
+            # dál (nahlásil uživatel — tiket na 3 dny obsahoval zápas
+            # za 4). Appka to teď hlídá stejně přísně jako užší okno.
+            all_wider_matches = _filter_within_days(all_wider_matches, wider_days)
             wider_result = ticket_generator.generate(
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
                 pool_filter=_pool_filter_for_risk(req.risk_level),
@@ -2842,6 +2849,10 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
             all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+            # Stejná oprava jako v _run_generate_job (appka 2026-08-18) —
+            # bez tohohle filtru mohl horizon_note slíbit "za wider_days
+            # dní", ale appka klidně nabídla zápas o den dál.
+            all_wider_matches = _filter_within_days(all_wider_matches, wider_days)
             wider_result = ticket_generator.regenerate(
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
                 pool_filter=_pool_filter_for_risk(req.risk_level),
