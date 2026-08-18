@@ -1378,8 +1378,8 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
                 "quantity": 1,
             }],
             metadata={"user_id": str(user_id), "tokens": str(req.tokens)},
-            success_url=f"{frontend_url}/?payment=success",
-            cancel_url=f"{frontend_url}/?payment=cancelled",
+            success_url=f"{frontend_url}/app/?payment=success",
+            cancel_url=f"{frontend_url}/app/?payment=cancelled",
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
@@ -1457,8 +1457,8 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
             # na Checkout Session, ale pozdější webhooky (obnovení,
             # zrušení) appce posílají přímo objekt Subscription, ne Session.
             subscription_data={"metadata": metadata},
-            success_url=f"{frontend_url}/?payment=success",
-            cancel_url=f"{frontend_url}/?payment=cancelled",
+            success_url=f"{frontend_url}/app/?payment=success",
+            cancel_url=f"{frontend_url}/app/?payment=cancelled",
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
@@ -1497,7 +1497,7 @@ def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
     try:
         session = stripe.billing_portal.Session.create(
             customer=customer_id,
-            return_url=os.environ.get("APP_URL", "https://apexsignal.cz"),
+            return_url=os.environ.get("APP_URL", "https://apexsignal.cz/app/"),
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
