@@ -512,6 +512,10 @@ line-height:1.8;display:flex;flex-direction:column;gap:10px}
 @media (max-width:560px){.sel{grid-template-columns:auto 1fr auto}.sel-pick{text-align:left}
 .wrap{gap:36px;padding-top:32px}.chart svg{height:200px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.lang-switch{display:flex;gap:8px;margin-top:8px}
+.lang-switch button{padding:6px 13px;border-radius:5px;border:1px solid var(--line);background:var(--raise);
+color:var(--ink);font-size:.82rem;cursor:pointer}
+.lang-switch button.active{border-color:var(--accent);background:var(--accent-glow);color:var(--accent);font-weight:600}
 """
 
 SCRIPT = """
@@ -606,6 +610,79 @@ RESEND_SCRIPT = """
       btn.disabled=false;
     });
   });
+})();
+"""
+
+
+I18N_SCRIPT = """
+(function(){
+  var DICT = {"ApexSignal — veřejný účet":"ApexSignal — публичный аккаунт","Dost bylo tipérů, co mažou prohry.":"Хватит прогнозистов, стирающих проигрыши.","Tady je jen matika. Model vybírá zápasy, appka ukazuje úplně všechno — výhry i prohry, natrvalo, beze změny. Žádná falešná jistota, žádné emoce. Výsledky jsou v jednotkách: každý tiket počítám jako jeden stejně velký vklad, ať jsou čísla porovnatelná a nezávisí na tom, kolik kdo sází.":"Здесь только математика. Модель выбирает матчи, а сервис показывает абсолютно всё — победы и поражения, навсегда, без изменений. Никакой ложной уверенности, никаких эмоций. Результаты — в условных единицах: каждый билет считается как одна и та же по размеру ставка, чтобы цифры были сравнимы и не зависели от того, кто сколько ставит.","Zisk k dnešnímu dni":"Прибыль на сегодня","Jak model vybírá tipy":"Как модель выбирает прогнозы","Čtyři kroky, žádná magie.":"Четыре шага, никакой магии.","Sbíráme data":"Собираем данные","Kurzy, statistiky týmů, forma, historie vzájemných zápasů — z nich model odvodí očekávaný počet gólů (xG) pro každý tým.":"Коэффициенты, статистика команд, форма, история личных встреч — из них модель выводит ожидаемое число голов (xG) для каждой команды.","Model spočítá pravděpodobnost":"Модель считает вероятность","Z xG obou týmů, přes Poissonovo rozdělení (matematický model počtu gólů), spočítá pravděpodobnost každého výsledku — výhry, přesného skóre, karet, i jestli skórují oba týmy.":"На основе xG обеих команд через распределение Пуассона (математическая модель числа голов) считается вероятность каждого исхода — победы, точного счёта, карточек, а также обеих забьют или нет.","Porovnáme s kurzem":"Сравниваем с коэффициентом","Kurz sázkové kanceláře přepočítáme na pravděpodobnost, očištěnou o její marži, a srovnáme ji s tím, co spočítal model.":"Коэффициент букмекера пересчитывается в вероятность, очищенную от его маржи, и сравнивается с тем, что посчитала модель.","Vybereme jen výhodu":"Выбираем только преимущество","Rozdílu se říká edge. Tip appka pošle, jen když model dané možnosti věří víc než trh — jinak radši žádný tip, než tip bez výhody.":"Эта разница называется edge (преимущество). Прогноз отправляется, только если модель доверяет варианту больше, чем рынок — иначе лучше никакого прогноза, чем прогноз без преимущества.","Jak si model vede":"Как модель себя показывает","ROI":"ROI","na vsazenou jednotku":"на одну единицу ставки","Úspěšnost":"Успешность","Zisk":"Прибыль","jednotek celkem":"единиц всего","Vyhodnoceno":"Оценено","tiketů":"билетов","Zatím žádný vyhodnocený tiket.":"Пока нет ни одного оценённого билета.","Účet právě začal běžet. Čísla se tu objeví, jakmile skončí první zápasy — a zůstanou tu i když vyjdou špatně.":"Аккаунт только начал работать. Цифры появятся здесь, как только закончатся первые матчи — и останутся тут, даже если окажутся плохими.","Graf se objeví, jakmile budou vyhodnocené aspoň dva tikety.":"График появится, как только будут оценены хотя бы два билета.","Kumulativní zisk při vkladu jedné jednotky na každý tiket. Kreslí se jen vyhodnocené tikety, v pořadí, v jakém padaly.":"Накопленная прибыль при ставке в одну единицу на каждый билет. Отображаются только оценённые билеты, в том порядке, в каком они выпадали.","1. tiket":"Билет №1","Jde sem každý tiket":"Сюда попадает каждый билет","Výhry i prohry, automaticky. Když má model špatný týden, uvidíš to tady dřív než kdekoli jinde.":"Победы и поражения — автоматически. Если у модели плохая неделя, ты увидишь это здесь раньше, чем где-либо ещё.","Sázka je skrytá do konce zápasu":"Ставка скрыта до конца матча","Zápasy vidíš hned. Skrytá zůstává jen samotná sázka — trh, výběr, kurz té nohy — dokud appka tiket nevyhodnotí, pak ji odhalí natrvalo.":"Матчи видны сразу. Скрыта только сама ставка — рынок, выбор, коэффициент этой ноги — пока билет не будет оценён, после чего она раскрывается навсегда.","Appka se pořád vyvíjí":"Сервис постоянно развивается","Model i appka samotná měly cestou chyby a technické problémy — appka je průběžně opravuje. Historii appka zpětně neupravuje ani nemaže — vidíš ji takovou, jaká skutečně byla.":"У модели и самого сервиса по пути случались ошибки и технические проблемы — они постепенно исправляются. История задним числом не редактируется и не удаляется — ты видишь её такой, какой она была на самом деле.","Tři cesty, jeden model":"Три пути, одна модель","Liší se jen tím, kdo dělá výběr a kolik toho chceš — appka, ty sám, nebo appka bez omezení.":"Различаются только тем, кто делает выбор и сколько тебе нужно — сервис, ты сам, или сервис без ограничений.","Aplikace — appka za pokus":"Приложение — сервис за попытку","Neomezené generování":"Безлимитная генерация","Generuješ si sám — vybereš jen krátký, nebo střední tiket, appka sama najde ligy a zápasy. Platíš jen za to, co si necháš vygenerovat.":"Генерируешь сам — выбираешь только короткий или средний билет, а лиги и матчи сервис найдёт сам. Платишь только за то, что реально сгенерируешь.","Generování připravujeme":"Генерацию готовим","Registrace a přihlášení fungují už teď. Appka jen ještě testuje a doostřuje samotné generování tiketů, ať ho nespustí dřív, než na to bude spolehlivé — uvnitř appky to uvidíš stejně napsané.":"Регистрация и вход уже работают. Сама генерация билетов ещё тестируется и дорабатывается, чтобы не запускать её раньше, чем она станет надёжной — внутри приложения ты увидишь то же самое.","Otevřít appku":"Открыть приложение","Generuješ si sám, kolikrát chceš (strop 10× denně proti zneužití), bez placení za jednotlivý tiket. Cílené na lidi, co appku chtějí používat naplno — vlastní analýzu zápasů, nebo i vlastní tipsterský byznys (založíš si skupinu a tikety, co appka vygeneruje, prodáváš dál sám).":"Генерируешь сам, сколько угодно раз (лимит 10×/день против злоупотреблений), без оплаты за каждый билет отдельно. Рассчитано на тех, кто хочет использовать сервис по полной — для собственного анализа матчей или даже собственного типстерского бизнеса (создаёшь свою группу и перепродаёшь сгенерированные билеты сам).","Ztratil jsi odkaz, nebo máš dotaz?":"Потерял ссылку или есть вопрос?","Zaplatil jsi kanál, ale párovací odkaz na Telegram vypršel nebo se ztratil? Napiš e-mail, kterým jsi platil, a pošleme nový.":"Оплатил канал, но ссылка для привязки Telegram истекла или потерялась? Напиши email, которым платил, и мы вышлем новую.","e-mail, kterým jsi platil":"email, которым платил","Poslat nový odkaz":"Отправить новую ссылку","Spravovat / zrušit předplatné":"Управление / отмена подписки","Nebo máš jiný dotaz? ":"Или есть другой вопрос? ","Napiš mi rovnou na Telegram →":"Напиши мне прямо в Telegram →","Historie tiketů":"История билетов","Zápasy appka ukazuje hned u každého tiketu. Skrytá zůstává jen samotná sázka — trh, konkrétní výběr a kurz té jedné nohy — dokud appka tiket nevyhodnotí. Jde tak dopředu ověřit, na co appka sází, ale nejde si to okopírovat, ani appka nemůže zpětně tvrdit něco jiného, než na co skutečně vsadila.":"Матчи видны сразу у каждого билета. Скрыта только сама ставка — рынок, конкретный выбор и коэффициент этой одной ноги — пока билет не будет оценён. Так можно заранее проверить, на что делается ставка, но скопировать её нельзя, и нельзя задним числом утверждать что-то другое, чем было поставлено на самом деле.","Výhry":"Победы","Prohry":"Поражения","Čekající":"Ожидающие","Zatím tu není žádný tiket. Jakmile model vybere první, objeví se tady.":"Пока здесь нет ни одного билета. Как только модель выберет первый, он появится здесь.","Appka k tomuhle tiketu nemá uložené zápasy.":"Для этого билета не сохранены матчи.","Kurz":"Коэффициент","Vklad":"Ставка","1 j.":"1 ед.","Výsledek":"Результат","Sázka":"Ставка","skrytá":"скрыта","ApexSignal je nástroj na rozhodování, ne sázková kancelář. Tikety si sázíš sám, kde chceš. Model se plete a plést se bude — žádný tip tu není jistota.":"ApexSignal — инструмент поддержки решений, а не букмекерская контора. Билеты ты ставишь сам, где хочешь. Модель ошибалась и будет ошибаться — ни один прогноз здесь не является гарантией.","18+. Hazardní hraní může být návykové. Sázej jen to, co si můžeš dovolit prohrát.":"18+. Азартные игры могут вызывать зависимость. Ставь только то, что готов позволить себе проиграть.","Pomoc při problémech s hraním: ":"Помощь при проблемах с игрой: ",", Národní linka pro odvykání 800 350 000.":", национальная линия помощи 800 350 000.","Krátký":"Короткий","Střední":"Средний","Dlouhý":"Длинный","BOOST":"BOOST","Výhra":"Победа","Prohra":"Поражение","Zrušeno":"Отменено","Vybráno":"Выведено","Čeká na výsledek":"Ожидает результата","Probíhá":"Идёт","Vítěz zápasu":"Победитель матча","Počet gólů":"Число голов","Oba týmy skórují":"Обе команды забьют","Počet karet":"Число карточек","Dvojtip":"Двойной шанс","Góly v poločase":"Голы в тайме","Počet gamů":"Число геймов","Počet es":"Число эйсов","Trestné minuty":"Штрафные минуты","Počet bodů":"Число очков","Počet trojek":"Число трёхочковых","Domácí":"Хозяева","Hosté":"Гости","Remíza":"Ничья","Ano":"Да","Ne":"Нет","1X (domácí nebo remíza)":"1X (хозяева или ничья)","X2 (hosté nebo remíza)":"X2 (гости или ничья)","12 (bez remízy)":"12 (без ничьей)","Tenhle výběr vyšel":"Эта подборка сыграла","Tenhle výběr nevyšel":"Эта подборка не сыграла","Appka tenhle výběr nedokázala vyhodnotit ze skóre":"Не удалось оценить эту подборку по счёту","Sázka zatím skrytá":"Ставка пока скрыта"};
+  var MONTHS_RU = {"ledna":"января","února":"февраля","března":"марта","dubna":"апреля","května":"мая","června":"июня","července":"июля","srpna":"августа","září":"сентября","října":"октября","listopadu":"ноября","prosince":"декабря"};
+  function translateDynamic(s){
+    var m;
+    if((m = /^(\\d+) z (\\d+) tiketů$/.exec(s))) return m[1] + ' из ' + m[2] + ' билетов';
+    if((m = /^(\\d+)\\. tiket$/.exec(s))) return 'Билет №' + m[1];
+    if((m = /^při vkladu 1 jednotky na každý z (\\d+) vyhodnocených tiketů(?: od (.+))?$/.exec(s)))
+      return 'при ставке в 1 единицу на каждый из ' + m[1] + ' оценённых билетов' + (m[2] ? ' с ' + translateDate(m[2]) : '');
+    if((m = /^ na (\\d+) vyhodnocených tiketech(?: od (.+))?$/.exec(s)))
+      return ' на ' + m[1] + ' оценённых билетах' + (m[2] ? ' с ' + translateDate(m[2]) : '');
+    if((m = /^ · Úspěšnost $/.exec(s))) return ' · Успешность ';
+    if(s === 'ROI ') return 'ROI ';
+    if((m = /^Přes ([\\d,]+)$/.exec(s))) return 'Больше ' + m[1];
+    if((m = /^Pod ([\\d,]+)$/.exec(s))) return 'Меньше ' + m[1];
+    if((m = /^(\\d{1,2})\\. (ledna|února|března|dubna|května|června|července|srpna|září|října|listopadu|prosince) (\\d{4})$/.exec(s)))
+      return translateDate(s);
+    return null;
+  }
+  function translateDate(s){
+    return s.replace(/(\\d{1,2})\\. (ledna|února|března|dubna|května|června|července|srpna|září|října|listopadu|prosince) (\\d{4})/,
+      function(_, d, mon, y){ return d + ' ' + (MONTHS_RU[mon] || mon) + ' ' + y; });
+  }
+  // Appka si u KAŽDÉHO textového uzlu pamatuje originál (ne celé
+  // .wrap.innerHTML) — grafu (equity curve) appka jinak přepsáním celého
+  // stromu vždycky zabila najetí myší (SCRIPT výš má listenery navázané
+  // na konkrétní DOM uzly, ne na CSS selektor).
+  var cache = [];
+  function collect(root){
+    if(cache.length) return cache;
+    var tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var n;
+    while((n = tw.nextNode())) cache.push({node: n, original: n.nodeValue});
+    return cache;
+  }
+  function translateNode(entry, lang){
+    var node = entry.node;
+    if(lang === 'cs'){ node.nodeValue = entry.original; return; }
+    var raw = entry.original;
+    if(!raw || !raw.trim()) return;
+    var trimmed = raw.trim();
+    var lead = raw.slice(0, raw.indexOf(trimmed));
+    var trail = raw.slice(lead.length + trimmed.length);
+    // appka odstavce v render_page() vrací jako víceřádkové f-stringy
+    // s odsazením (kvůli čitelnosti Python zdrojáku) — DOM textový uzel
+    // tak obsahuje skutečné \n a mezery navíc, které appka pro shodu se
+    // slovníkem (jednořádkové klíče) musí sloučit do jedné mezery.
+    var norm = trimmed.replace(/\s+/g, ' ');
+    var out = Object.prototype.hasOwnProperty.call(DICT, norm) ? DICT[norm] : translateDynamic(norm);
+    node.nodeValue = (out !== null && out !== undefined) ? lead + out + trail : raw;
+  }
+  function applyLang(lang){
+    var entries = collect(document.querySelector('.wrap'));
+    entries.forEach(function(e){ translateNode(e, lang); });
+    document.documentElement.setAttribute('lang', lang);
+    try { localStorage.setItem('apexsignal_lang', lang); } catch(e){}
+    var buttons = document.querySelectorAll('.lang-switch button');
+    buttons.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-lang') === lang); });
+  }
+  function wireToggle(){
+    document.querySelectorAll('.lang-switch button').forEach(function(b){
+      b.onclick = function(){ applyLang(b.getAttribute('data-lang')); };
+    });
+  }
+  wireToggle();
+  var saved = null;
+  try { saved = localStorage.getItem('apexsignal_lang'); } catch(e){}
+  if(saved === 'ru') applyLang('ru');
 })();
 """
 
@@ -821,6 +898,11 @@ def render_page(
 <body>
 <div class="wrap">
 
+<div class="lang-switch">
+  <button type="button" data-lang="cs" class="active">Čeština</button>
+  <button type="button" data-lang="ru">Русский</button>
+</div>
+
 <header>
   <p class="eyebrow">ApexSignal — veřejný účet</p>
   <h1>Dost bylo tipérů, co mažou prohry.</h1>
@@ -894,5 +976,6 @@ def render_page(
 <script id="curve-data" type="application/json">{curve_json}</script>
 <script>{_script_for(curve)}</script>
 <script>{RESEND_SCRIPT.replace("%BACKEND_URL%", backend_url)}</script>
+<script>{I18N_SCRIPT}</script>
 </body>
 </html>"""
