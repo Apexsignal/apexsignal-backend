@@ -36,16 +36,27 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
    s `access=push` appce nikdy neprošlo přes MCP tool-approval gate —
    pokud to nová konverzace nezkusí a nevyjde jí to samé, nezdržovat se
    tím, rovnou pracovat s lokálním klonem). Nasazuje se **přímo přes
-   Netlify CLI/MCP** (`mcp__...__netlify-deploy-services-updater`,
-   operace `deploy-site`), NE přes GitHub push. Aktuální Netlify účet:
-   `apexsignal03@seznam.cz`, **site ID `8caab98f-dbc0-4984-921b-846eb71d0c89`**
-   (starý účet/site ID `6039a72d-...` došly kredity, appka na něj
-   koncem července 2026 přestala mít i přístup — pokud se objeví staré
-   ID v historii, je to ten mrtvý účet, ne tenhle). Nasazení = zavolat
-   `deploy-site` s tímhle site ID, nástroj vrátí jednorázový
-   `npx @netlify/mcp@latest --site-id ... --proxy-path "..."` příkaz —
-   proxy-path token má krátkou platnost, spustit ho hned, ne uložit na
-   později.
+   Netlify** (NE přes GitHub push). **Aktuální, ověřený stav k 2026-08-18:**
+   MCP nástroj `mcp__...__netlify-deploy-services-updater` v této session
+   nebyl dostupný vůbec (nenašel ho ani `ToolSearch`) — nová konverzace
+   ať nejdřív zkusí jeho existenci ověřit, ale pokud chybí, nezdržovat se
+   a jít rovnou na fallback: **Netlify CLI přes `npx netlify-cli deploy`**
+   s `NETLIFY_AUTH_TOKEN` v env a `--site <ID>`. Token appka nemá uložený
+   trvale nikde (uživatel ho vygeneruje na
+   `https://app.netlify.com/user/applications#personal-access-tokens`
+   a pošle v chatu, až bude appka nasazovat) — cokoliv uloženého ve
+   scratchpadu z dřívějška je nespolehlivé, ověřit vždycky přes
+   `GET https://api.netlify.com/api/v1/sites` s tím tokenem, jestli mezi
+   vrácenými sites vůbec `apexsignalapp`/`apexsignal.cz` je, NEŘÍDIT SE
+   slepě starým ID v tomhle souboru.
+   **Skutečný, živě ověřený site (2026-08-18): jméno `apexsignalapp`,
+   site ID `4a1b79c9-f2ca-4a57-a5ff-df02c2c6bc57`, custom doména
+   `apexsignal.cz`.** Všechna dřívější ID v tomhle souboru
+   (`8caab98f-dbc0-4984-921b-846eb71d0c89`, i starší `6039a72d-...`)
+   jsou zastaralá/neplatná — appka je nekontrolovala živě přes API a jen
+   je opisovala z minulé session. Účet appka nezjišťovala (token se
+   ověřuje sám, ne přes e-mail), takže `apexsignal03@seznam.cz` neber
+   jako jistotu, jen jako poslední známý odhad.
 
    **Důležité pro editaci `index.html`:** je to jeden obří minifikovaný
    řádek (soubor má ~170 řádků celkem, ale ten jeden se scriptem má
@@ -220,7 +231,7 @@ na GitHubu"). Nová konverzace si je musí získat z těchhle míst:
 | Stripe Payment Link (kanál, 990 Kč) | Stripe dashboard → Render, appka umí vygenerovat nový přes `POST /admin/create-channel-payment-link` (jen konstantu `CHANNEL_PRICE_KC` NESTAČÍ změnit) | `STRIPE_CHANNEL_PAYMENT_LINK_URL` |
 | Telegram bot | @BotFather → Render | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_ID_WIFE`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET` |
 | Účty appky pro cron úlohy | Render (ID appčiných účtů v DB) | `DAILY_TICKETS_USER_ID`, `TRANSPARENCY_USER_ID`, `TEST3_USER_ID` |
-| Netlify (frontend deploy) | předkonfigurováno v MCP nástroji, není potřeba token ručně | site ID `8caab98f-dbc0-4984-921b-846eb71d0c89` (účet `apexsignal03@seznam.cz`) — **starý site ID `6039a72d-...` je mrtvý/bez přístupu, neuvažovat ho** |
+| Netlify (frontend deploy) | MCP nástroj (pokud dostupný) NEBO Netlify CLI + Personal Access Token, co pošle uživatel v chatu (`https://app.netlify.com/user/applications#personal-access-tokens`) | site `apexsignalapp`, ID `4a1b79c9-f2ca-4a57-a5ff-df02c2c6bc57` (`apexsignal.cz`) — **ověřeno živě 2026-08-18 přes `GET /api/v1/sites`, VŽDY takhle ověřit znovu, nespoléhat na ID zapsaná v historii tohoto souboru** |
 | **SportBreak.cz** (ruční nahrávání reálných tiketů) | appka login zná: `apexsignal02@seznam.cz` — **heslo appka do repa neukládá**, sdělí ho uživatel přímo v chatu nové konverzaci, až ho bude appka potřebovat | — |
 
 Pozn.: appka je "fotbal only" byznys rozhodnutí (uživatel: "Ne bude jen
@@ -290,14 +301,47 @@ GitHub appce nejde (viz sekce Repozitáře výše), takže appka na tenhle klon
 nemůže spoléhat jako na trvalý zdroj pravdy mezi sessions — jediný trvalý
 stav frontendu je to, co je nasazené na Netlify (`apexsignal.cz`).
 
-Této session appka do `index.html` přidala/opravila: `formatSelection()` +
+Dřívější session do `index.html` přidala/opravila: `formatSelection()` +
 `MARKET_LABELS_CS`/`SELECTION_LABELS_CS` (oprava syrových `market_type`/
 `selection` kódů zobrazených místo českého textu), chip "Under gólů" do
 "Typ trhu" pickeru (fotbal i hokej), skutečný progress bar generování
 (`pollGenerationProgress`, `GET /tickets/generate-progress`) nad starou
 dekorativní "Matrix" konzolí, a text neomezeného tarifu na 4 990 Kč.
-Nasazeno přes Netlify (`8caab98f-dbc0-4984-921b-846eb71d0c89`), živě
-ověřeno funkční (API-level, vizuální/browserové ověření v této session
-nešlo — outbound navigace na apexsignal.cz i checkout.stripe.com padala
-na `net::ERR_CONNECTION_RESET`, sandboxové omezení téhle session, ne
-chyba appky).
+
+**Session 2026-08-18 — CZ/EN/RU přepínač jazyků (appka i landing i právní
+stránky):** appka měla z dřívějška rozdělaný CZ/EN přepínač (běží přes
+globální monkey-patch `React.createElement`, který každý stringový
+child/`placeholder`/`title`/`alt` prohání přes `translateText()` —
+najde ho ve slovníku `TRANSLATIONS_CS_EN`/`TRANSLATIONS_CS_RU`, nebo
+zkusí `translateDynamic`/`translateDynamicRu` s regexy pro texty
+s proměnnými čísly/procenty). appka doplnila `TRANSLATIONS_CS_RU`
+(stejných 347 klíčů jako EN verze, jen ruské hodnoty),
+`translateDynamicRu` (stejných ~40 pravidel), `SELECTION_LABELS_RU`/
+`MARKET_LABELS_RU` pro `formatSelection()`, třetí tlačítko "Русский"
+do přepínače v nastavení účtu (ozubené kolečko) a přepočet Kč→EUR
+(`CZK_EUR_RATE=24.5`, funkce `czkToEurLabel()`) u cenových textů v EN
+i RU verzi (např. "990 Kč" → "990 крон (~40 €)"). `/privacy` a `/terms`
+appka zjistila, že NEJSOU součástí React appky (žádný `TRANSLATIONS_CS_*`
+klíč pro jejich plný text v `index.html`) — jsou to samostatné statické
+soubory (`privacy.html`, `terms.html` v kořeni Netlify site), appka jim
+proto udělala VLASTNÍ, nezávislý CZ/EN/RU přepínač (čistý JS,
+`display:none`/`active` třídy, `localStorage["apexsignal_lang"]` sdílený
+klíč s appkou, ale žádná společná logika). Před nasazením appka
+otestovala `translateText`/`formatSelection`/`czkToEurLabel` izolovaně
+v Node (mimo prohlížeč, se stubovaným `localStorage`) a ověřila syntaxi
+přes `node --check` — vizuální/browserové ověření v appce zase nešlo
+(stejné síťové omezení jako v předchozích sessions).
+
+**Nasazení a objevená chyba v tomhle souboru:** appka zjistila, že MCP
+nástroj `netlify-deploy-services-updater` z dřívějška v týhle session
+vůbec není dostupný, a uložený `NETLIFY_TOKEN` ve scratchpadu patřil
+k jinému (neplatnému) účtu — `deploy --site 8caab98f-...` padalo na
+"Project not found". Uživatel vygeneroval nový Personal Access Token
+přímo na Netlify, appka jím zavolala `GET /api/v1/sites` a zjistila
+skutečný, živý site: **jméno `apexsignalapp`, ID
+`4a1b79c9-f2ca-4a57-a5ff-df02c2c6bc57`, doména `apexsignal.cz`** — ID
+`8caab98f-dbc0-4984-921b-846eb71d0c89` zapsané v tomhle souboru z minulé
+session bylo od začátku špatně/zastaralé. Nasazeno přes
+`npx netlify-cli deploy --site 4a1b79c9-f2ca-4a57-a5ff-df02c2c6bc57 --prod`,
+živě ověřeno přes `curl` (přítomnost `TRANSLATIONS_CS_RU` na `/`,
+"Русский" na `/privacy` i `/terms`, všechny tři routy vrací 200).
