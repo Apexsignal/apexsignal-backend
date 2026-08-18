@@ -5135,18 +5135,27 @@ def public_transparency(limit: int = 100):
     return {"tickets": tickets, "stats": stats, "equity_curve": equity_curve}
 
 
-@app.get("/transparentni-ucet")
+@app.get("/transparentni-ucet", response_class=HTMLResponse)
 def transparency_html():
     """
-    Appka tenhle veřejný přehled tiketů přestala zobrazovat (rozhodnutí
-    2026-08-01, appka teď vede prodejně přes hlavní stránku) — appka ale
-    nechává starou adresu jako REDIRECT, ne 404, protože na ni pořád vede
-    odkaz z fóra, Telegramu i z profilu na Instagramu, které appka
-    zpětně nemůže opravit. /public/transparency (JSON) i appčino denní
-    generování na TRANSPARENCY_USER_ID appka nechává běžet beze změny —
-    z něj appka pořád tahá reálné vyhrané tikety do /showcase/tickets.
+    Appka tuhle stránku (s grafem equity curve, statistikami a historií
+    tiketů) mezi 2026-08-01 a 2026-08-18 přestala zobrazovat (nahrazeno
+    obyčejným redirectem na hlavní stránku — rozhodnutí "appka teď vede
+    prodejně přes hlavní stránku") — uživatel si ale 2026-08-18 vyžádal
+    zpátky přesně tuhle původní stránku ("chci tu původní..stranku kde
+    byl i graf"), takže appka redirect zrušila a stránku znovu renderuje.
+    Data appka bere ze stejné logiky jako /public/transparency (JSON),
+    jen navíc vyrenderované přes transparency_page.render_page().
     """
-    return RedirectResponse(url="https://apexsignal.cz/", status_code=302)
+    data = public_transparency(limit=100)
+    html = transparency_page.render_page(
+        tickets=data["tickets"],
+        stats=data["stats"],
+        equity_curve=data.get("equity_curve"),
+        app_equivalent_kc=_app_equivalent_monthly_kc(),
+        app_generation_enabled=CLIENT_TICKET_GENERATION_ENABLED,
+    )
+    return HTMLResponse(content=html)
 
 
 def _app_equivalent_monthly_kc() -> int:

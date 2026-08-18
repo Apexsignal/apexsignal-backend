@@ -31,7 +31,7 @@ from typing import Optional
 
 from probability_model import market_label, selection_label
 
-SITE_URL = "https://apexsignal.cz/transparentni-ucet"
+SITE_URL = "https://apexsignal.cz/"
 
 TICKET_TYPE_LABELS = {
     "kratky": "Krátký",
@@ -738,7 +738,7 @@ def render_page(
         )
 
     payment_link = os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip()
-    app_url = os.environ.get("APP_URL", "https://apexsignal.cz").strip()
+    app_url = os.environ.get("APP_URL", "https://apexsignal.cz/app/").strip()
     # Stránka běží na Netlify (apexsignal.cz), appka samotná na Renderu —
     # relativní URL by tu mířila na Netlify, kde tahle cesta neexistuje,
     # proto formulář dole musí volat backend na jeho vlastní doméně.
