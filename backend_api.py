@@ -5897,6 +5897,47 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     }
 
 
+@app.get("/admin/candidate-pool-detail")
+def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: float = 0.65):
+    """Appka na uživatelovo přání ("chci je vidět") k /admin/candidate-pool-preview
+    doplňuje verzi se skutečným seznamem zápasů — kdo hraje, jaký trh/výběr,
+    appčina pravděpodobnost i tržní kurz a edge. Čistě informativní, nic
+    neukládá ani neposílá, stejná bezpečná cache jako preview."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    pool: list[SelectionCandidate] = []
+    for m in matches:
+        pool.extend([
+            c for c in MarketEvaluator.build_candidates(m, min_prob=min_prob)
+            if c.market_type in DAILY_TICKETS_MARKETS
+        ])
+    pool.sort(key=lambda c: c.probability, reverse=True)
+
+    return {
+        "time_frame_days": time_frame_days,
+        "min_prob": min_prob,
+        "count": len(pool),
+        "candidates": [
+            {
+                "match": f"{c.home_team} - {c.away_team}",
+                "league": c.league,
+                "kickoff": f"{c.kickoff_date} {c.kickoff_time}",
+                "market": c.market_type.value,
+                "selection": c.selection,
+                "probability_pct": round(c.probability * 100, 1),
+                "model_probability_pct": round(c.model_probability * 100, 1),
+                "market_probability_pct": round(c.market_probability * 100, 1) if c.market_probability is not None else None,
+                "odds": c.odds,
+                "edge_pct": round(c.edge * 100, 1) if c.edge is not None else None,
+            }
+            for c in pool
+        ],
+    }
+
+
 @app.get("/admin/client-tickets-preview")
 def client_tickets_preview(request: Request):
     """Ukáže, co by appka DNES poslala odběratelům (bez odeslání) — ke
