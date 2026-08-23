@@ -1329,8 +1329,11 @@ class TicketGenerator:
         time_frame_days: int,
         pool_filter: Optional[Callable[[list[SelectionCandidate]], list[SelectionCandidate]]] = None,
     ) -> dict[str, Optional[Ticket]]:
-        # Podle risk_level vyber jaký tiket postavit
-        if risk_level <= 30:
+        # Podle risk_level vyber jaký tiket postavit — "stredni" appka
+        # přestala nabízet úplně (30denní vzorek: 14,3 % úspěšnost, −37 % ROI,
+        # viz historie/CLAUDE.md) — celý rozsah pod BOOSTem appka teď staví
+        # jako kratky.
+        if risk_level <= 60:
             ticket_key = "kratky"
             min_prob = 0.71  # zvednuto z 0.70 (2026-08-05) — appka na kalibračních
             # datech zjistila, že koš 70 % vychází reálně na 67,5 %, kdežto 75 % na
@@ -1340,9 +1343,6 @@ class TicketGenerator:
             # skončila na 65% dně, tedy žádná reálná změna). 71 % appka zvolila jako
             # nejpřísnější práh, co appce ještě reálně něco najde. 65% dno appka
             # NEMĚNÍ (uživatelovo explicitní rozhodnutí, viz FALLBACK_THRESHOLDS níž).
-        elif risk_level <= 60:
-            ticket_key = "stredni"
-            min_prob = 0.71  # viz stejná poznámka u kratky výš
         else:
             ticket_key = "boost"
             min_prob = 0.55

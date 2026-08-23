@@ -1137,8 +1137,8 @@ ticket_generator = TicketGenerator()
 # napojení přijde v dalším kroku; tahle appka zatím jen řídí zůstatek a
 # uplatňování kódů (viz db.py: user_tokens/token_transactions/redeem_codes).
 # =====================================================================
-TOKEN_KC_VALUE = 20  # 1 token = 20 Kč — appka to appce i frontendu drží na jednom místě
-TOKEN_COSTS = {"kratky": 10, "stredni": 15}  # 200 Kč / 300 Kč při TOKEN_KC_VALUE=20 — appka BOOST přestala nabízet úplně
+TOKEN_KC_VALUE = 30  # 1 token = 30 Kč — appka to appce i frontendu drží na jednom místě
+TOKEN_COSTS = {"kratky": 10}  # 300 Kč při TOKEN_KC_VALUE=30 — appka BOOST i STŘEDNÍ přestala nabízet úplně
 
 # Každý nový účet dostane přesně tolik tokenů, kolik appka strhne za JEDEN
 # krátký tiket (viz TOKEN_COSTS["kratky"]) — appka tak novému uživateli
@@ -1150,12 +1150,13 @@ FREE_TRIAL_TOKENS = TOKEN_COSTS["kratky"]
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
 
-# Doporučovací systém — spouštěč je POUŽITÍ tokenů na první střední tiket,
-# ne proběhlá platba za tokeny (appka tím odměňuje reálné zapojení).
-# Pojmenované konstanty, ať appka jde ladit bez zásahu do logiky.
+# Doporučovací systém — spouštěč je POUŽITÍ tokenů na první krátký tiket
+# (appka "stredni" přestala nabízet úplně), ne proběhlá platba za tokeny
+# (appka tím odměňuje reálné zapojení). Pojmenované konstanty, ať appka
+# jde ladit bez zásahu do logiky.
 REFERRAL_REFERRER_TOKENS = 25
 REFERRAL_REFERRED_BONUS_TOKENS = 10
-REFERRAL_TRIGGER_TICKET_TYPE = "stredni"
+REFERRAL_TRIGGER_TICKET_TYPE = "kratky"
 REFERRAL_MAX_REWARDS_PER_MONTH = 10
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
 
@@ -1194,11 +1195,11 @@ def _ticket_type_for_risk_level(risk_level: int) -> str:
     """Appka řídí typ tiketu jen podle risk_level, stejně jako
     TicketGenerator.generate — appka musí znát typ (a tedy cenu v
     tokenech) JEŠTĚ PŘED samotným generováním, ať zbytečně neplýtvá API
-    kvótou na tiket, který si uživatel stejně nemůže dovolit odemknout."""
-    if risk_level <= 30:
+    kvótou na tiket, který si uživatel stejně nemůže dovolit odemknout.
+    Appka "stredni" přestala nabízet úplně (30denní ROI −37 %, viz
+    historie) — celý rozsah pod BOOSTem appka teď staví jako kratky."""
+    if risk_level <= 60:
         return "kratky"
-    elif risk_level <= 60:
-        return "stredni"
     return "boost"
 
 
@@ -2984,7 +2985,7 @@ class SaveSelectionRequest(BaseModel):
 
 
 class SaveTicketRequest(BaseModel):
-    ticket_type: str = "stredni"
+    ticket_type: str = "kratky"
     selections: list[SaveSelectionRequest]
     total_odds: float = 1.0
     combined_probability: float = 0.0
@@ -4430,18 +4431,10 @@ def run_daily_tickets(request: Request):
         # DAILY_TICKETS_USER_ID je zdroj pro PLACENÝ Telegram kanál
         # (_todays_client_picks/client-tickets-send) — appka posílá JEDEN
         # tiket denně, žádnou "výkladní skříň" navíc (na tu appka má
-        # samostatný účet, viz TEST3_USER_ID níže). BOOST appka přestala
-        # nabízet úplně — jeho nízká úspěšnost (viz historie) mu
-        # neodpovídala kvalitativní laťce, co appka drží u kratky/stredni.
-        #
-        # Appka posílá hlavně kratky. Jen každý třetí den appka navíc
-        # zkusí nejdřív sestavit stredni — a pošle ho MÍSTO kratky jen
-        # tehdy, když appka pro něj najde skutečnou hodnotu (kladný edge
-        # vůči tržnímu kurzu appka vyžaduje už uvnitř
-        # TicketGenerator._build_ticket, require_positive_edge=True — bez
-        # toho appka žádný stredni tiket nevrátí, viz probability_model).
-        # Když se stredni ten den nepovede sestavit (žádná hodnota nebo
-        # málo zápasů), appka spadne na kratky stejně jako každý jiný den.
+        # samostatný účet, viz TEST3_USER_ID níže). BOOST i STŘEDNÍ appka
+        # přestala nabízet úplně — jejich nízká úspěšnost (viz historie,
+        # střední −37 % ROI na 30denním vzorku) neodpovídala kvalitativní
+        # laťce, co appka drží u kratky. Appka teď posílá výhradně kratky.
         #
         # Okno je 2 dny (dnešek/zítřek), NE 1 — appka tak nejdřív zkusí
         # sestavit tiket na 70 % z obou dní najednou, a teprve když ani tak
@@ -4456,15 +4449,11 @@ def run_daily_tickets(request: Request):
 
         results = []
         generated_today: list[tuple[Ticket, int]] = []
-        already_today = (
-            db.count_tickets_since(target_user_id, "kratky", today_start_utc_naive)
-            + db.count_tickets_since(target_user_id, "stredni", today_start_utc_naive)
-        )
+        already_today = db.count_tickets_since(target_user_id, "kratky", today_start_utc_naive)
         if already_today > 0:
             results.append({"type": "daily_pick", "status": "already_generated_today", "count": already_today})
         else:
-            is_stredni_day = today_prague.toordinal() % 3 == 0
-            candidates = (("stredni", 50), ("kratky", 20)) if is_stredni_day else (("kratky", 20),)
+            candidates = (("kratky", 20),)
 
             ticket, label = None, None
             for candidate_label, risk_level in candidates:
@@ -4504,17 +4493,7 @@ def run_daily_tickets(request: Request):
         # kopii nejlepších tiketů, nic v appce se kvůli tomu jinak nemění.
         wife_chat_id = os.environ.get("TELEGRAM_CHAT_ID_WIFE")
         if wife_chat_id and os.environ.get("TELEGRAM_BOT_TOKEN") and generated_today:
-            # Čistě podle kombinované pravděpodobnosti by "stredni" typ (víc
-            # nohou, nižší součin) skoro nikdy neprošel proti "kratky" — appka
-            # proto pro ni vždycky rezervuje aspoň 1 místo na nejlepší
-            # dostupný stredni tiket, zbytek dorovná nejlepšími ze všech typů.
-            top4 = []
-            stredni_candidates = [t for t in generated_today if t[0].ticket_type == "stredni"]
-            if stredni_candidates:
-                top4.append(max(stredni_candidates, key=lambda t: t[0].combined_probability))
-            remaining = [t for t in generated_today if t not in top4]
-            remaining.sort(key=lambda t: t[0].combined_probability, reverse=True)
-            top4.extend(remaining[:4 - len(top4)])
+            top4 = sorted(generated_today, key=lambda t: t[0].combined_probability, reverse=True)[:4]
 
             for ticket, ticket_id in top4:
                 try:
@@ -4540,7 +4519,7 @@ TRANSPARENCY_STAKE = 2000.0
 def run_transparency_daily_tickets(request: Request):
     """
     Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
-    denně vygeneruje 2 kratky + 1 stredni tiket, na každý appka
+    denně vygeneruje 2 kratky tikety, na každý appka
     automaticky vsadí pevných 2000 Kč — appka tenhle účet nikdy nemaskuje
     ani neupravuje, jde čistě o transparentní ukázku appčina výkonu (viz
     GET /public/transparency). Odděleno od DAILY_TICKETS_USER_ID (appky
@@ -4579,7 +4558,7 @@ def run_transparency_daily_tickets(request: Request):
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
         # Horizont rozšířen z 2 na 4 dny stejně jako u run_daily_tickets výš —
         # viz komentář tam.
-        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 1)]
+        plan = [("kratky", 20, 4, 2)]
 
         results = []
         for label, risk_level, days, target_count in plan:
@@ -4628,7 +4607,6 @@ DVOVES_EMAIL = "d.voves@seznam.cz"
 def run_dvoves_daily_tickets(request: Request):
     """
     Appka na testovacím účtu d.voves@seznam.cz denně vygeneruje 2 kratky +
-    1 stredni tiket, na každý appka automaticky vsadí pevných 2000 Kč —
     stejný plán jako u transparentního účtu (run_transparency_daily_tickets),
     jen na jiném účtu a bez env var (appka ho hledá přes e-mail, protože
     tohle je běžný registrovaný uživatel appky, ne appčin vlastní systémový
@@ -4661,7 +4639,7 @@ def run_dvoves_daily_tickets(request: Request):
 
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 1)]
+        plan = [("kratky", 20, 4, 2)]
 
         results = []
         for label, risk_level, days, target_count in plan:
@@ -4700,9 +4678,9 @@ TEST3_STAKE = 1000.0
 def run_test3_daily_tickets(request: Request):
     """
     Appka na účtu TEST3_USER_ID (appky vlastní testovací/kontrolní účet)
-    denně vygeneruje 2 kratky + 2 stredni tikety, na každý appka
+    denně vygeneruje 2 kratky tikety, na každý appka
     automaticky vsadí pevných 1000 Kč. Odděleno od DAILY_TICKETS_USER_ID
-    (placený Telegram kanál, přesně 1 kratky + 1 stredni, žádný boost) i od
+    (placený Telegram kanál, přesně 1 kratky, žádný boost/stredni) i od
     TRANSPARENCY_USER_ID (veřejná appka /public/transparency) — appka
     tenhle účet nemíchá s žádným z nich.
     """
@@ -4732,7 +4710,7 @@ def run_test3_daily_tickets(request: Request):
 
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        plan = [("kratky", 20, 4, 2), ("stredni", 50, 4, 2)]
+        plan = [("kratky", 20, 4, 2)]
 
         results = []
         for label, risk_level, days, target_count in plan:
@@ -4793,7 +4771,7 @@ def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
 
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
-        plan = [("kratky", 20, 2, 2), ("stredni", 50, 2, 1)]
+        plan = [("kratky", 20, 2, 2)]
 
         results = []
         saved_count = 0
@@ -4946,7 +4924,7 @@ def run_personal_tracking_daily_tickets(request: Request):
     """
     Appka na účtu PERSONAL_TRACKING_USER_ID (appkou majitele vlastní
     osobní sledovací účet, oddělený od placeného kanálu i od appky
-    vlastních test/transparency účtů) denně vygeneruje 2 kratky + 1 stredni,
+    vlastních test/transparency účtů) denně vygeneruje 2 kratky tikety,
     na každý appka vsadí pevných 1000 Kč a POŠLE MU JE i na Telegram
     (TELEGRAM_CHAT_ID) — na rozdíl od test3/transparency appka tohle posílá
     appce majiteli přímo. Když se appce nepovede vygenerovat všechny 3,
@@ -5195,9 +5173,9 @@ def _ticket_still_sendable(ticket: Ticket, buffer_minutes: int = 30) -> bool:
 
 def _todays_client_picks(target_user_id: int) -> list[dict]:
     """Vybere z dnešních uložených tiketů appkina automatického účtu
-    (target_user_id) 1 nejlepší kratky + 1 nejlepší stredni — stejný
-    výběr pro náhled i pro odeslání. Appka BOOST už negeneruje ani
-    nenabízí (viz run_daily_tickets)."""
+    (target_user_id) 1 nejlepší kratky — stejný výběr pro náhled i pro
+    odeslání. Appka BOOST i STŘEDNÍ už negeneruje ani nenabízí (viz
+    run_daily_tickets)."""
     today_prague = datetime.now(ZoneInfo("Europe/Prague"))
     today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
@@ -5218,7 +5196,7 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
         ]
         return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
 
-    return [p for p in (_best("kratky"), _best("stredni")) if p is not None]
+    return [p for p in (_best("kratky"),) if p is not None]
 
 
 _YIELD_TEST_RESULTS: dict[str, dict] = {}
@@ -5228,7 +5206,7 @@ _YIELD_TEST_LOCK = threading.Lock()
 def _run_generate_yield_test_job(job_id: str) -> None:
     try:
         results = []
-        for label, risk_level in (("kratky", 20), ("stredni", 50)):
+        for label, risk_level in (("kratky", 20),):
             for time_frame_days in (1, 2, 3):
                 matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
                 matches = _filter_future_matches(matches, buffer_minutes=5)
