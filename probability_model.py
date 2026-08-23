@@ -1405,6 +1405,16 @@ class TicketGenerator:
                 if ticket is None and len(validated_pool) < len(pool):
                     print(f"[{ticket_key}] Jen tržně ověřené výběry nestačily ({len(validated_pool)}/{len(pool)}), zkouším i neověřené")
                     ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
+            elif ticket_key == "kratky":
+                # Krátký appka staví přednostně jen z match_winner/double_chance
+                # (30denní kalibrace: 85,3 % / 50%+ úspěšnost) — over_goals appka
+                # zapojí, jen když appka bez něj vůbec nesestaví platnou kombinaci
+                # v cílovém kurzu (over_goals má na stejném vzorku jen 61-67 %).
+                SAFE_MARKETS = {MarketType.MATCH_WINNER, MarketType.DOUBLE_CHANCE}
+                safe_pool = [c for c in pool if c.market_type in SAFE_MARKETS]
+                ticket = self._build_ticket(safe_pool, odds_range, ticket_key, risk_level, require_positive_edge=True)
+                if ticket is None:
+                    ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=True)
             else:
                 # Kladný edge (model_probability oproti reálnému kurzu,
                 # viz _build_ticket) appka u kratky/stredni VYŽADUJE —
