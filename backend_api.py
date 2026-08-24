@@ -1252,14 +1252,15 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
 
 def _process_referral_reward(referred_user_id: int) -> None:
     """
-    Appka tohle volá hned po odečtení tokenů za PRVNÍ střední tiket
-    doporučeného účtu. Běží jako best-effort — chyba tady nesmí shodit
-    samotné generování tiketu, appka jen zaloguje a jde dál.
+    Appka tohle volá hned po odečtení tokenů za PRVNÍ krátký tiket
+    doporučeného účtu (REFERRAL_TRIGGER_TICKET_TYPE). Běží jako
+    best-effort — chyba tady nesmí shodit samotné generování tiketu,
+    appka jen zaloguje a jde dál.
 
     Pojistky (musí projít VŠECHNY):
       1) účet vůbec někoho doporučil (referred_by_user_id),
       2) appka ho ještě neodměnila (referral_rewards.referred_user_id UNIQUE),
-      3) tohle je jeho úplně první UNLOCK_STREDNI (ne třetí, ne desátý),
+      3) tohle je jeho úplně první UNLOCK_KRATKY (ne třetí, ne desátý),
       4) doporučitel nemá tento měsíc už vyčerpaný strop odměn,
       5) doporučený a doporučitel neplatí stejnou kartou (otisk karty).
     """
@@ -1269,7 +1270,8 @@ def _process_referral_reward(referred_user_id: int) -> None:
             return
         if db.has_referral_reward(referred_user_id):
             return
-        if db.count_token_transactions_with_reason(referred_user_id, "UNLOCK_STREDNI") != 1:
+        trigger_reason = f"UNLOCK_{REFERRAL_TRIGGER_TICKET_TYPE.upper()}"
+        if db.count_token_transactions_with_reason(referred_user_id, trigger_reason) != 1:
             return
         since = datetime.now(timezone.utc) - timedelta(days=30)
         if db.count_referral_rewards_for_referrer_since(referrer_id, since) >= REFERRAL_MAX_REWARDS_PER_MONTH:
