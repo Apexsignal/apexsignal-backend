@@ -50,6 +50,7 @@ import rate_limiter
 import ticket_telegram
 import email_service
 import transparency_page
+import sportbreak_tool
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 import stripe
@@ -234,6 +235,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Osobní appka pro Davida (ruční nahrávání SportBreak tiketů) — gated přes
+# ADMIN_TASK_KEY jako query param, viz sportbreak_tool.py. Není napojená
+# na appce vlastní autentizaci ani na klientský provoz appky.
+app.include_router(sportbreak_tool.router)
 
 # Appka na vlastní generování zákazníky zatím nemá zaplacené API kredity
 # ve verzi, co by uneslo reálný provoz (jen appce vlastní denní účet pro
