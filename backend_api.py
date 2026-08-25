@@ -2729,7 +2729,16 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
     # (ještě neuložené) sérii — jinak by druhé volání (jiný risk_level =
     # jiný typ tiketu) klidně nabídlo STEJNÝ zápas jako to první, protože
     # by o něm ještě nevědělo (uloží se, až uživatel klikne "uložit").
-    exclude_ids = set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
+    all_saved_ids = set(repo.get_all_saved_match_ids(user_id))
+    exclude_ids = all_saved_ids | set(repo.get_last_batch(user_id))
+
+    # Uživatel, co si UŽ nějaký tiket uložil, a chce další, appka pustí
+    # o trochu volnější dolní hranici kurzu u krátkého (1.80 místo 1.90,
+    # viz TicketGenerator.generate/RELAXED_MIN_ODDS_HARD) — 2026-08-25,
+    # uživatelovo přání ("kdyz uz ma clovek ulozeny tiket a chce dalsi
+    # aby to vzalo i 1,8"). PRVNÍ tiket appka pořád drží na tvrdém dnu
+    # 1.90 — appka slevuje jen na "druhý a další" příležitost.
+    allow_relaxed_min_odds = bool(all_saved_ids)
 
     try:
         # Appka nejdřív obohatí jen ZVOLENÉ (užší) okno — obohacení je
@@ -2753,6 +2762,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         result = ticket_generator.generate(
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
             pool_filter=_pool_filter_for_risk(req.risk_level),
+            allow_relaxed_min_odds=allow_relaxed_min_odds,
         )
         # Appka appce na Renderu jede na starter plánu (512 MB RAM, appka
         # na něj naráží OOM při širokém okně kandidátů) — uvolní paměť po
@@ -2781,6 +2791,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
             wider_result = ticket_generator.generate(
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days,
                 pool_filter=_pool_filter_for_risk(req.risk_level),
+                allow_relaxed_min_odds=allow_relaxed_min_odds,
             )
             gc.collect()
             if wider_result["safe"] is not None:
@@ -2802,6 +2813,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
                     markets_result = ticket_generator.generate(
                         all_wider_matches, req.risk_level, req.sports, all_markets, wider_days,
                         pool_filter=_pool_filter_for_risk(req.risk_level),
+                        allow_relaxed_min_odds=allow_relaxed_min_odds,
                     )
                     gc.collect()
                     if markets_result["safe"] is not None:
@@ -2831,6 +2843,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     combined_exclude = set(previous_ids) | set(exclude_ids)
+    allow_relaxed_min_odds = bool(exclude_ids)  # viz stejná poznámka v _run_generate_job
 
     try:
         # Viz stejná poznámka v generate_tickets — appka obohatí jen zvolené
@@ -2844,6 +2857,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
         result = ticket_generator.regenerate(
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days, list(previous_ids),
             pool_filter=_pool_filter_for_risk(req.risk_level),
+            allow_relaxed_min_odds=allow_relaxed_min_odds,
         )
         gc.collect()  # viz stejná pojistka v _run_generate_job (OOM na starter plánu)
 
@@ -2861,6 +2875,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
             wider_result = ticket_generator.regenerate(
                 all_wider_matches, req.risk_level, req.sports, req.market_types, wider_days, list(previous_ids),
                 pool_filter=_pool_filter_for_risk(req.risk_level),
+                allow_relaxed_min_odds=allow_relaxed_min_odds,
             )
             gc.collect()
             if wider_result["safe"] is not None:
@@ -2878,6 +2893,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
                     markets_result = ticket_generator.regenerate(
                         all_wider_matches, req.risk_level, req.sports, all_markets, wider_days, list(previous_ids),
                         pool_filter=_pool_filter_for_risk(req.risk_level),
+                        allow_relaxed_min_odds=allow_relaxed_min_odds,
                     )
                     gc.collect()
                     if markets_result["safe"] is not None:

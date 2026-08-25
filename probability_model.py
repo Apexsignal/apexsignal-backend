@@ -1328,7 +1328,15 @@ class TicketGenerator:
         allowed_markets: list[MarketType],
         time_frame_days: int,
         pool_filter: Optional[Callable[[list[SelectionCandidate]], list[SelectionCandidate]]] = None,
+        allow_relaxed_min_odds: bool = False,
     ) -> dict[str, Optional[Ticket]]:
+        # allow_relaxed_min_odds appka zapíná jen appka appce (viz
+        # backend_api.py) — když uživatel na dané období UŽ má uložený
+        # tiket a chce další, appka pustí krátký kurz od 1.80 místo 1.90
+        # (2026-08-25, uživatelovo přání). Pro PRVNÍ tiket appka pořád drží
+        # tvrdé dno 1.90 — appka slevuje jen na "druhý a další" příležitost.
+        RELAXED_MIN_ODDS_HARD = {"kratky": 1.80}
+
         # Podle risk_level vyber jaký tiket postavit — "stredni" appka
         # přestala nabízet úplně (30denní vzorek: 14,3 % úspěšnost, −37 % ROI,
         # viz historie/CLAUDE.md) — celý rozsah pod BOOSTem appka teď staví
@@ -1410,11 +1418,18 @@ class TicketGenerator:
                 # (30denní kalibrace: 85,3 % / 50%+ úspěšnost) — over_goals appka
                 # zapojí, jen když appka bez něj vůbec nesestaví platnou kombinaci
                 # v cílovém kurzu (over_goals má na stejném vzorku jen 61-67 %).
+                relaxed_hard = RELAXED_MIN_ODDS_HARD.get(ticket_key) if allow_relaxed_min_odds else None
+                # min_odds_hard appka může slevit, ale _search_combo navíc
+                # kontroluje i "min_odds <= running_odds" ze samotného
+                # odds_range (TICKET_RANGES) — bez posunutí i téhle dolní
+                # meze by relaxed_hard appce k ničemu nebyl (1.90 z
+                # odds_range by kombinaci pod 1.90 zahodil stejně jako dřív).
+                kratky_odds_range = (relaxed_hard, odds_range[1]) if relaxed_hard is not None else odds_range
                 SAFE_MARKETS = {MarketType.MATCH_WINNER, MarketType.DOUBLE_CHANCE}
                 safe_pool = [c for c in pool if c.market_type in SAFE_MARKETS]
-                ticket = self._build_ticket(safe_pool, odds_range, ticket_key, risk_level, require_positive_edge=True)
+                ticket = self._build_ticket(safe_pool, kratky_odds_range, ticket_key, risk_level, require_positive_edge=True, min_odds_hard_override=relaxed_hard)
                 if ticket is None:
-                    ticket = self._build_ticket(pool, odds_range, ticket_key, risk_level, require_positive_edge=True)
+                    ticket = self._build_ticket(pool, kratky_odds_range, ticket_key, risk_level, require_positive_edge=True, min_odds_hard_override=relaxed_hard)
             else:
                 # Kladný edge (model_probability oproti reálnému kurzu,
                 # viz _build_ticket) appka u kratky/stredni VYŽADUJE —
@@ -1447,6 +1462,7 @@ class TicketGenerator:
         time_frame_days: int,
         previous_match_ids: list[int],
         pool_filter: Optional[Callable[[list[SelectionCandidate]], list[SelectionCandidate]]] = None,
+        allow_relaxed_min_odds: bool = False,
     ) -> dict[str, Optional[Ticket]]:
         """AI načte nové zápasy — vyloučí dříve použité a sestaví znovu."""
         self._excluded_match_ids.update(previous_match_ids)
@@ -1455,7 +1471,8 @@ class TicketGenerator:
             self._excluded_match_ids.clear()  # pool vyčerpán, reset
             filtered_matches = matches
         return self.generate(
-            filtered_matches, risk_level, allowed_sports, allowed_markets, time_frame_days, pool_filter
+            filtered_matches, risk_level, allowed_sports, allowed_markets, time_frame_days, pool_filter,
+            allow_relaxed_min_odds=allow_relaxed_min_odds,
         )
 
     # ------------------------------------------------------------------
@@ -1497,6 +1514,7 @@ class TicketGenerator:
         ticket_type: str,
         risk_level: int,
         require_positive_edge: bool = True,
+        min_odds_hard_override: Optional[float] = None,
     ) -> Optional[Ticket]:
         min_odds, max_odds = odds_range
 
@@ -1544,7 +1562,7 @@ class TicketGenerator:
         )
 
         min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
-        min_odds_hard = self.MIN_ODDS_HARD.get(ticket_type, 2.0)
+        min_odds_hard = min_odds_hard_override if min_odds_hard_override is not None else self.MIN_ODDS_HARD.get(ticket_type, 2.0)
 
         # _search_combo hledá kombinaci jen podle KURZU (padne do odds_range).
         # To appce může vrátit kombinaci, kde jednotlivé výběry sice prošly
