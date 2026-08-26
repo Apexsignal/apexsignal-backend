@@ -424,6 +424,26 @@ def _notify_owner_new_registration(email: str, source: str) -> None:
         print(f"[register] Nepodařilo se poslat Telegram upozornění: {e}")
 
 
+def _notify_owner_new_seller_application(user_id: int, seller_code: str, display_name: str) -> None:
+    """Appka appce pošle upozornění na appčin vlastní Telegram
+    (TELEGRAM_CHAT_ID), když se přes /seller/apply zaregistruje NOVÝ
+    prodejce a čeká na schválení — appka to volá jen při první žádosti,
+    ne při opakovaném volání se stejným účtem."""
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        return
+    try:
+        user = db.get_user_by_id(user_id)
+        email = user["email"] if user else "?"
+        _send_telegram_message(
+            int(chat_id),
+            f"🧑‍💼 Nová žádost o prodejce: {display_name} ({email})\n"
+            f"Kód: {seller_code}\nSchval na apexsignal.cz/admin-prodejci",
+        )
+    except Exception as e:
+        print(f"[seller/apply] Nepodařilo se poslat Telegram upozornění: {e}")
+
+
 @app.post("/auth/register", response_model=AuthResponse)
 def register(req: RegisterRequest, request: Request):
     client_ip = _client_ip(request)
@@ -2189,6 +2209,8 @@ def seller_apply(req: SellerApplyRequest, user_id: int = Depends(get_current_use
     # jen při první registraci.
     seller_id = db.create_seller(user_id, seller_code, display_name, active=False)
     is_approved = bool(existing and existing.get("active"))
+    if not existing:
+        _notify_owner_new_seller_application(user_id, seller_code, display_name)
     return {
         "seller_id": seller_id,
         "seller_code": seller_code,
