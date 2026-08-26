@@ -1180,16 +1180,18 @@ CHANNEL_PRICE_KC = 990
 # libovolnou částku, viz debata s uživatelem). Prodejce pošle klientovi
 # ten, na kterém se domluvili, i se svým seller_code v client_reference_id.
 # Klíč je celá Kč částka, hodnota (appčin podíl, podíl prodejce) — obojí
-# v Kč, appka pro všechny tarify drží pevných 30 % prodejci. Přeceněno
-# z původních 500-3000 Kč (appka je nabízela jako "různé cenové hladiny",
-# všechny ale byly technicky měsíční — uživatel 2026-08-25 chtěl skutečné
-# odlišné fakturační období, viz SELLER_TIER_WEEKS níž) na 1500/2600/4000 Kč
-# (týden/2 týdny/měsíc), stejná struktura jako appčin vlastní kanál.
+# v Kč. Přeceněno z původních 500-3000 Kč (appka je nabízela jako "různé
+# cenové hladiny", všechny ale byly technicky měsíční — uživatel
+# 2026-08-25 chtěl skutečné odlišné fakturační období, viz SELLER_TIER_WEEKS
+# níž) na 1500/2600/4000 Kč (týden/2 týdny/měsíc), stejná struktura jako
+# appčin vlastní kanál. Provize NENÍ napříč tarify stejná — týden/2 týdny
+# appka drží na 30 %, ale měsíc na 50 % (uživatel chce prodejce víc
+# motivovat prodávat rovnou delší, hodnotnější předplatné).
 # =====================================================================
 SELLER_COMMISSION_TIERS: dict[int, tuple[int, int]] = {
     1500: (1050, 450),   # 1 týden — 30 % prodejci
-    2600: (1820, 780),   # 2 týdny
-    4000: (2800, 1200),  # měsíc (4 týdny)
+    2600: (1820, 780),   # 2 týdny — 30 % prodejci
+    4000: (2000, 2000),  # měsíc (4 týdny) — 50 % prodejci
 }
 # Kolik týdnů appka strhává za daný tarif — appka na to při vytváření
 # Stripe Price appka nastaví recurring.interval="week"/interval_count
