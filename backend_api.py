@@ -1184,13 +1184,13 @@ CHANNEL_PRICE_KC = 990
 # cenové hladiny", všechny ale byly technicky měsíční — uživatel
 # 2026-08-25 chtěl skutečné odlišné fakturační období, viz SELLER_TIER_WEEKS
 # níž) na 1500/2600/4000 Kč (týden/2 týdny/měsíc), stejná struktura jako
-# appčin vlastní kanál. Provize NENÍ napříč tarify stejná — týden/2 týdny
-# appka drží na 30 %, ale měsíc na 50 % (uživatel chce prodejce víc
-# motivovat prodávat rovnou delší, hodnotnější předplatné).
+# appčin vlastní kanál. Provize je 50 % napříč VŠEMI tarify (uživatel
+# 2026-08-26: "nech 50% vzdycky agentovi provizi" — dřív bylo 30 % u
+# týdne/2 týdnů a jen měsíc měl 50 %, teď sjednoceno na 50 % všude).
 # =====================================================================
 SELLER_COMMISSION_TIERS: dict[int, tuple[int, int]] = {
-    1500: (1050, 450),   # 1 týden — 30 % prodejci
-    2600: (1820, 780),   # 2 týdny — 30 % prodejci
+    1500: (750, 750),    # 1 týden — 50 % prodejci
+    2600: (1300, 1300),  # 2 týdny — 50 % prodejci
     4000: (2000, 2000),  # měsíc (4 týdny) — 50 % prodejci
 }
 # Kolik týdnů appka strhává za daný tarif — appka na to při vytváření
