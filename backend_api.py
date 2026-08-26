@@ -2148,6 +2148,7 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
         "display_name": seller["display_name"],
         "payment_links": my_links,
         "tier_weeks": SELLER_TIER_WEEKS,
+        "tier_commission_kc": {tier_kc: seller_cut for tier_kc, (_, seller_cut) in SELLER_COMMISSION_TIERS.items()},
         "telegram_linked": bool(seller.get("telegram_chat_id")),
         "telegram_link_url": telegram_link_url,
         # "Obohacení" appčina základního modelu (tikety + provize) — když
