@@ -97,7 +97,7 @@ def wrap(draw, text, font, max_width):
     return lines
 
 
-def render_ticket(ticket: dict) -> Image.Image:
+def render_ticket(ticket: dict, watermark: bool = True) -> Image.Image:
     f_title = ImageFont.truetype(FONT_BOLD, 34)
     f_h2 = ImageFont.truetype(FONT_BOLD, 22)
     f_body = ImageFont.truetype(FONT_REGULAR, 20)
@@ -170,8 +170,9 @@ def render_ticket(ticket: dict) -> Image.Image:
         font=f_body, fill=TEXT,
     )
 
-    watermark_text = f"ApexSignal · #{ticket.get('ticket_id')}" if ticket.get("ticket_id") else "ApexSignal"
-    img = add_watermark(img, watermark_text)
+    if watermark:
+        watermark_text = f"ApexSignal · #{ticket.get('ticket_id')}" if ticket.get("ticket_id") else "ApexSignal"
+        img = add_watermark(img, watermark_text)
 
     return img
 
@@ -193,14 +194,16 @@ def add_watermark(base_img: Image.Image, text: str) -> Image.Image:
     return Image.alpha_composite(base_img.convert("RGBA"), overlay).convert("RGB")
 
 
-def send_ticket_to_telegram(ticket: dict, bot_token: str = None, chat_id: str = None) -> dict:
+def send_ticket_to_telegram(ticket: dict, bot_token: str = None, chat_id: str = None, watermark: bool = True) -> dict:
     """Vyrenderuje tiket a rovnou ho pošle do Telegramu. Token/chat_id appka
     vezme z argumentů, jinak z proměnných prostředí TELEGRAM_BOT_TOKEN /
-    TELEGRAM_CHAT_ID."""
+    TELEGRAM_CHAT_ID. watermark=False appka použije pro prodejce — jejich
+    klienti dostávají tiket přeposlaný POD PRODEJCOVÝM jménem, appčin
+    vodoznak by tam prozrazoval původ (uživatelovo přání 2026-08-26)."""
     token = bot_token or os.environ["TELEGRAM_BOT_TOKEN"]
     chat = chat_id or os.environ["TELEGRAM_CHAT_ID"]
 
-    img = render_ticket(ticket)
+    img = render_ticket(ticket, watermark=watermark)
     import io
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=92)

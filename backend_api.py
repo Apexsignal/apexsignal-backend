@@ -6025,7 +6025,12 @@ def client_tickets_send(request: Request):
         chat_id = seller["telegram_chat_id"]
         for r in picks:
             try:
-                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id)
+                # watermark=False — prodejce tenhle obrázek přeposílá dál pod
+                # svým vlastním jménem, appčin vodoznak by tam prozrazoval
+                # appku jako zdroj (uživatelovo přání 2026-08-26).
+                ticket_telegram.send_ticket_to_telegram(
+                    _ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id, watermark=False,
+                )
                 results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": "sent"})
             except Exception as e:
                 results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": f"error: {e}"})
