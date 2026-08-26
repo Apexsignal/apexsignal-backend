@@ -147,6 +147,23 @@ def send_channel_welcome_email(to_email: str, telegram_deep_link: str) -> bool:
     return send_email(to_email, "Kanál je aktivní — propoj si Telegram", _wrap_html(inner))
 
 
+def send_seller_approved_email(to_email: str, dashboard_url: str) -> bool:
+    """Appka tohle posílá hned po ručním schválení nového prodejce
+    (POST /admin/sellers/approve) — bez toho by se dotyčný o schválení
+    dozvěděl, jen kdyby si sám znovu otevřel /prodejce."""
+    inner = f"""
+    <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Tvůj prodejecký profil je schválený!</p>
+    <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
+      Můžeš si otevřít svůj dashboard — najdeš tam odkazy na sdílení, propojení
+      Telegramu a přehled klientů i provize.
+    </p>
+    <p style="margin:24px 0;">
+      <a href="{dashboard_url}" style="background:#19E0C4;color:#0B0E14;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:700;font-size:14px;display:inline-block;">Otevřít dashboard</a>
+    </p>
+    """
+    return send_email(to_email, "Tvůj prodejecký profil je schválený", _wrap_html(inner))
+
+
 def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     inner = f"""
     <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Někdo (doufejme, že ty) požádal o obnovení hesla k účtu ApexSignal.</p>

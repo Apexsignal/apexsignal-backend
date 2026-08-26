@@ -2391,10 +2391,20 @@ def admin_sellers_approve(req: SellerApproveRequest, request: Request):
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    ok = db.set_seller_active(req.seller_code.strip(), req.approve)
+    seller_code = req.seller_code.strip()
+    ok = db.set_seller_active(seller_code, req.approve)
     if not ok:
         raise HTTPException(status_code=404, detail="Prodejce s tímhle kódem appka nenašla.")
-    return {"seller_code": req.seller_code.strip(), "approved": req.approve}
+
+    if req.approve:
+        try:
+            seller = db.get_seller_by_code_any(seller_code)
+            if seller and seller.get("user_email"):
+                email_service.send_seller_approved_email(seller["user_email"], "https://apexsignal.cz/prodejce")
+        except Exception as e:
+            print(f"[sellers/approve] Nepodařilo se poslat e-mail o schválení: {e}")
+
+    return {"seller_code": seller_code, "approved": req.approve}
 
 
 class SellerLeadRequest(BaseModel):

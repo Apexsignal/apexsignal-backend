@@ -1420,6 +1420,23 @@ def list_pending_sellers() -> list[dict]:
         return cur.fetchall()
 
 
+def get_seller_by_code_any(seller_code: str) -> Optional[dict]:
+    """Jako get_seller_by_code, ale i neschválené (active=false) a s
+    appčiným e-mailem rovnou přibaleným — appka to potřebuje po schválení,
+    aby appce věděla, kam poslat potvrzovací e-mail."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.*, u.email AS user_email
+              FROM sellers s
+              JOIN users u ON u.id = s.user_id
+             WHERE s.seller_code = %s
+            """,
+            (seller_code,),
+        )
+        return cur.fetchone()
+
+
 def set_seller_active(seller_code: str, active: bool) -> bool:
     with get_cursor() as cur:
         cur.execute(
