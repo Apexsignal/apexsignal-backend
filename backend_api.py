@@ -2182,10 +2182,19 @@ def seller_apply(req: SellerApplyRequest, user_id: int = Depends(get_current_use
     if len(display_name) > 120:
         raise HTTPException(status_code=400, detail="Jméno je moc dlouhé.")
 
-    existing = db.get_seller_by_user_id(user_id)
+    existing = db.get_seller_by_user_id_any(user_id)
     seller_code = existing["seller_code"] if existing else secrets.token_hex(4)
-    seller_id = db.create_seller(user_id, seller_code, display_name)
-    return {"seller_id": seller_id, "seller_code": seller_code, "display_name": display_name}
+    # Nový prodejce čeká na ruční schválení appkou (viz db.create_seller);
+    # ON CONFLICT appka nemění active, takže tenhle default appka platí
+    # jen při první registraci.
+    seller_id = db.create_seller(user_id, seller_code, display_name, active=False)
+    is_approved = bool(existing and existing.get("active"))
+    return {
+        "seller_id": seller_id,
+        "seller_code": seller_code,
+        "display_name": display_name,
+        "approved": is_approved,
+    }
 
 
 @app.get("/seller/dashboard")
@@ -2194,9 +2203,17 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
     zapsané v sellers — jinak 403. Appka appce vrátí jeho osobní odkazy
     (appčiny sdílené Payment Linky + jeho vlastní client_reference_id)
     a celou historii jeho zaznamenaných plateb i součet provize."""
-    seller = db.get_seller_by_user_id(user_id)
+    seller = db.get_seller_by_user_id_any(user_id)
     if not seller:
         raise HTTPException(status_code=403, detail="Tenhle účet není appce registrovaný jako prodejce.")
+    if not seller.get("active"):
+        # Čeká na ruční schválení (viz /admin/sellers/approve) — appka
+        # zatím nedává odkazy ani provizní data, jen stav čekání.
+        return {
+            "approved": False,
+            "display_name": seller["display_name"],
+            "seller_code": seller["seller_code"],
+        }
 
     raw_links = db.get_setting(SELLER_PAYMENT_LINKS_SETTING_KEY)
     base_links = json.loads(raw_links) if raw_links else {}
@@ -2219,6 +2236,7 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
     telegram_link_url = f"https://t.me/{bot_username}?start=seller_{seller['seller_code']}" if bot_username else None
 
     return {
+        "approved": True,
         "seller_code": seller["seller_code"],
         "display_name": seller["display_name"],
         "payment_links": my_links,
@@ -2310,7 +2328,36 @@ def admin_sellers_overview(request: Request):
             }
             for c in subs
         ],
+        "pending": [
+            {
+                "seller_code": p["seller_code"],
+                "display_name": p["display_name"],
+                "email": p["email"],
+                "created_at": p["created_at"].isoformat() if p["created_at"] else None,
+            }
+            for p in db.list_pending_sellers()
+        ],
     }
+
+
+class SellerApproveRequest(BaseModel):
+    seller_code: str
+    approve: bool
+
+
+@app.post("/admin/sellers/approve")
+def admin_sellers_approve(req: SellerApproveRequest, request: Request):
+    """Zapíná/vypíná prodejce — schvaluje nové registrace z /seller/apply
+    (viz db.create_seller — nový prodejce tam vzniká s active=False,
+    dokud ho tenhle endpoint neschválí)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    ok = db.set_seller_active(req.seller_code.strip(), req.approve)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Prodejce s tímhle kódem appka nenašla.")
+    return {"seller_code": req.seller_code.strip(), "approved": req.approve}
 
 
 # =====================================================================

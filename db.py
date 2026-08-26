@@ -1342,16 +1342,21 @@ def get_card_fingerprints(user_id: int) -> set[str]:
 # =====================================================================
 # Prodejci (provizní systém) — viz sellers/seller_earnings v ensure_schema.
 # =====================================================================
-def create_seller(user_id: int, seller_code: str, display_name: str) -> int:
+def create_seller(user_id: int, seller_code: str, display_name: str, active: bool = True) -> int:
+    """`active` slouží jako schvalovací příznak — self-serve /seller/apply
+    zakládá nového prodejce s active=False (čeká na ruční schválení),
+    admin /admin/sellers/create ho zakládá rovnou jako active=True.
+    ON CONFLICT sloupec active nikdy nemění, aby opakovaná registrace
+    už schváleného prodejce nezresetovala jeho stav zpátky na čekající."""
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO sellers (user_id, seller_code, display_name)
-            VALUES (%s, %s, %s)
+            INSERT INTO sellers (user_id, seller_code, display_name, active)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET seller_code = EXCLUDED.seller_code, display_name = EXCLUDED.display_name
             RETURNING id
             """,
-            (user_id, seller_code, display_name),
+            (user_id, seller_code, display_name, active),
         )
         return cur.fetchone()["id"]
 
@@ -1360,6 +1365,38 @@ def get_seller_by_user_id(user_id: int) -> Optional[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM sellers WHERE user_id = %s AND active = true", (user_id,))
         return cur.fetchone()
+
+
+def get_seller_by_user_id_any(user_id: int) -> Optional[dict]:
+    """Jako get_seller_by_user_id, ale i neschválené (active=false) —
+    /seller/apply a /seller/dashboard tohle potřebují, aby uměly
+    rozlišit "neregistrovaný" od "čeká na schválení"."""
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM sellers WHERE user_id = %s", (user_id,))
+        return cur.fetchone()
+
+
+def list_pending_sellers() -> list[dict]:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.seller_code, s.display_name, s.created_at, u.email
+              FROM sellers s
+              JOIN users u ON u.id = s.user_id
+             WHERE s.active = false
+             ORDER BY s.created_at ASC
+            """
+        )
+        return cur.fetchall()
+
+
+def set_seller_active(seller_code: str, active: bool) -> bool:
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE sellers SET active = %s WHERE seller_code = %s RETURNING id",
+            (active, seller_code),
+        )
+        return cur.fetchone() is not None
 
 
 def get_seller_by_code(seller_code: str) -> Optional[dict]:
