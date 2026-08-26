@@ -50,10 +50,19 @@ jobs:
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/dvoves-daily-tickets \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
 
-      - name: Rozeslat dnesni vyber platicim predplatitelum na Telegram
+      - name: Upozornit na Telegram, ze dnesni tiket ceka na schvaleni
         run: |
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/client-tickets-send \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"📋 Dnešní tiket je vygenerovaný a čeká na schválení. Zkontroluj a odešli na apexsignal.cz/admin-prodejci\"}"
+
+      # Rozesílka klientům/prodejcům je od 2026-08-26 na uživatelovo výslovné
+      # přání RUČNÍ — appka nejdřív ukáže dnešní tiket na /admin-prodejci,
+      # uživatel ho tam schválí, a teprve to (ne tenhle cron) spustí
+      # /admin/client-tickets-send. Backend to i vynucuje (viz kontrola
+      # schválení v client_tickets_send), takže tenhle krok appka schválně
+      # z automatiky odstranila, ne jen zakomentovala.
 
       - name: Odpojit a upozornit predplatitele, kterym doběhlo predplatne
         if: always()  # appka tohle chce pustit, i kdyz predchozi krok selze

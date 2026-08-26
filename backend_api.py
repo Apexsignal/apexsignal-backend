@@ -6291,10 +6291,37 @@ def client_tickets_preview(request: Request):
     }
 
 
+DAILY_TICKET_APPROVAL_SETTING_KEY = "daily_ticket_approved"
+
+
+class ApproveDailyTicketRequest(BaseModel):
+    ticket_id: int
+
+
+@app.post("/admin/daily-ticket/approve")
+def approve_daily_ticket(req: ApproveDailyTicketRequest, request: Request):
+    """Ruční schválení dnešního tiketu — bez tohohle appka /admin/
+    client-tickets-send odmítne poslat (viz kontrola tam). Appka
+    schválení váže na KONKRÉTNÍ ticket_id a na dnešní datum, takže
+    platí jen pro tenhle jeden den a tenhle jeden tiket, ne napořád
+    (uživatel 2026-08-26 chtěl vidět a schvalovat KAŽDÝ den zvlášť)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    db.set_setting(DAILY_TICKET_APPROVAL_SETTING_KEY, json.dumps({"date": today_prague, "ticket_id": req.ticket_id}))
+    return {"approved_date": today_prague, "ticket_id": req.ticket_id}
+
+
 @app.post("/admin/client-tickets-send")
 def client_tickets_send(request: Request):
     """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle
-    dnešní výběr všem aktivním odběratelům z Telegram webhooku."""
+    dnešní výběr všem aktivním odběratelům z Telegram webhooku. appka
+    tenhle krok odmítne provést bez předchozího /admin/daily-ticket/
+    approve na dnešní datum a stejný ticket_id — appka to VYNUCUJE
+    (uživatel 2026-08-26 výslovně chtěl vidět každý tiket dřív, než se
+    pošle, ne jen mít tlačítko, co by šlo obejít)."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
@@ -6304,6 +6331,16 @@ def client_tickets_send(request: Request):
         raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
 
     picks = _todays_client_picks(int(target_user_id_raw))
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ticket_ids = {p["ticket_id"] for p in picks}
+    if not approval or approval.get("date") != today_prague or approval.get("ticket_id") not in approved_ticket_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Dnešní tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
+        )
 
     # Rozesílka se ptá VÝHRADNĚ na platící (get_paid_telegram_subscribers
     # dělá JOIN na subscriptions). get_active_telegram_subscribers() by
