@@ -6347,6 +6347,49 @@ def client_tickets_send(request: Request):
     }
 
 
+class SellerSendTicketRequest(BaseModel):
+    seller_code: str
+
+
+@app.post("/admin/sellers/send-test-ticket")
+def admin_sellers_send_test_ticket(req: SellerSendTicketRequest, request: Request):
+    """Pošle dnešní tiket(y) jednomu konkrétnímu prodejci — na test,
+    jestli mu propojení Telegramu funguje, bez nutnosti pouštět celou
+    hromadnou rozesílku /admin/client-tickets-send znovu."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    seller = db.get_seller_by_code_any(req.seller_code.strip())
+    if not seller:
+        raise HTTPException(status_code=404, detail="Prodejce s tímhle kódem appka nenašla.")
+    if not seller.get("active"):
+        raise HTTPException(status_code=400, detail="Tenhle prodejce ještě není schválený.")
+    if not seller.get("telegram_chat_id"):
+        raise HTTPException(status_code=400, detail="Tenhle prodejce nemá propojený Telegram.")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+
+    picks = _todays_client_picks(int(target_user_id_raw))
+    if not picks:
+        raise HTTPException(status_code=404, detail="Dnešní tikety appka ještě nevygenerovala.")
+
+    chat_id = seller["telegram_chat_id"]
+    results = []
+    for r in picks:
+        try:
+            ticket_telegram.send_ticket_to_telegram(
+                _ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id, watermark=False,
+            )
+            results.append({"ticket_id": r["ticket_id"], "status": "sent"})
+        except Exception as e:
+            results.append({"ticket_id": r["ticket_id"], "status": f"error: {e}"})
+
+    return {"seller_code": seller["seller_code"], "display_name": seller["display_name"], "results": results}
+
+
 @app.post("/admin/telegram-sync")
 def admin_telegram_sync(request: Request):
     """
