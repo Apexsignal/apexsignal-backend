@@ -1422,19 +1422,17 @@ def create_checkout_session(req: CreateCheckoutSessionRequest, user_id: int = De
 
 UNLIMITED_GENERATION_DAILY_CAP = 10
 
-# Neomezené generování — self-serve tarif pro běžné uživatele (appka
-# přestala "Founder"/byznys framing na landing page nabízet, viz
-# CLAUDE.md), delší závazek = nižší cena/měsíc. Klíč = počet měsíců
-# v jednom fakturačním cyklu, hodnota = celková cena v Kč za CELÉ
-# období (ne za měsíc). Přeceněno z 9900 Kč/měsíc na 4990 Kč/měsíc
-# (2026-08-24) — appka si na 9900 Kč cílila na byznys/prodejce, 4990 Kč
-# míří na běžného hráče (zlom rentability ~17 tiketů/měsíc v tokenech,
-# místo ~33 u staré ceny).
+# Neomezené generování — self-serve tarif pro běžné uživatele. Klíč =
+# počet měsíců v jednom fakturačním cyklu, hodnota = celková cena v Kč
+# za CELÉ období (ne za měsíc). Přeceněno zpátky z 4990 Kč/měsíc na
+# 9900 Kč/měsíc (2026-08-26, uživatel to chtěl výslovně) — delší
+# závazek appka odměňuje stejnou slevou jako dřív (10 %/20 %/30 % z
+# měsíční ceny za 3/6/12 měsíců).
 UNLIMITED_GENERATION_PLANS: dict[int, int] = {
-    1: 4990,
-    3: 13470,
-    6: 23940,
-    12: 41880,
+    1: 9900,
+    3: 26730,
+    6: 47520,
+    12: 83160,
 }
 
 
@@ -1700,7 +1698,8 @@ async def stripe_webhook(request: Request):
     #   1) Telegram kanál (490 Kč) — přes samostatný Stripe Payment Link,
     #      žádný účet appky, appka zákazníka pozná jen podle e-mailu,
     #      appka drží stav v tabulce subscriptions.
-    #   2) Neomezené generování (4990 Kč) — přes /payments/create-
+    #   2) Neomezené generování (9900 Kč/měsíc, viz UNLIMITED_GENERATION_
+    #      PLANS pro 3/6/12měsíční tarify) — přes /payments/create-
     #      unlimited-checkout-session, vázané na přihlášený user_id
     #      appky (metadata.unlimited_generation == "1"), appka drží
     #      stav přímo na users.unlimited_until.
