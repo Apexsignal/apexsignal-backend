@@ -205,11 +205,18 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
 - Komunikace vždy česky.
 - Piš jen commentáře, kde je fakt potřeba vysvětlit PROČ (skrytá invariant,
   workaround), ne CO kód dělá.
-- **GitHub Actions denní cron (`daily-tickets.yml`) zůstává PLNĚ
-  automatizovaný, bez manuálního schválení mezi generováním a odesláním
-  reálným odběratelům.** Uživatel to výslovně zvážil a potvrdil: "Nech to
-  plně automatizované." — appka na to explicitně nemá přidávat gate,
-  pokud znovu neřekne jinak.
+- **ZRUŠENO 2026-08-26 — GitHub Actions denní cron (`daily-tickets.yml`)
+  už NENÍ plně automatizovaný.** Uživatel dřív výslovně chtěl "nech to
+  plně automatizované", ale 2026-08-26 to obrátil: "Ano pridej schvalovani
+  mnou! Kazdy tiket! Chci videt driv nez se posle." Cron teď dnešní tiket
+  jen vygeneruje a pošle appce Telegram upozornění, že čeká na schválení
+  — samotné odeslání (`/admin/client-tickets-send`) appka VYNUCUJE jen po
+  ručním schválení na `/admin-prodejci` (nová karta "Dnešní tiket",
+  tlačítko "Schválit a odeslat"; backend to hlídá přes
+  `/admin/daily-ticket/approve` vázané na konkrétní `ticket_id` a dnešní
+  datum — schválení platí jen pro ten jeden den, ne napořád). Pokud
+  uživatel řekne "vrať to zpátky na automatiku", jde jen o smazání kroku
+  z `client_tickets_send` a přidání zpátky kroku do workflow.
 
 ## Přístupy a klíče (BEZ hodnot — jen kde je hledat)
 
