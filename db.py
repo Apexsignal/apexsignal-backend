@@ -1381,6 +1381,30 @@ def get_seller_earnings(seller_id: int) -> list[dict]:
         return cur.fetchall()
 
 
+def list_sellers_overview() -> list[dict]:
+    """Appka appce vrátí VŠECHNY aktivní prodejce najednou se souhrnnou
+    provizí — appka na to dřív neměla nic, jen dashboard jednotlivého
+    prodejce (/seller/dashboard), který appce (uživateli) nic neukáže
+    napříč všemi najednou (viz /admin/sellers/overview)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.seller_code, s.display_name, s.telegram_chat_id, s.created_at, u.email,
+                   COUNT(e.id) AS total_clients,
+                   COALESCE(SUM(e.seller_cut_kc), 0) AS total_seller_kc,
+                   COALESCE(SUM(e.our_cut_kc), 0) AS total_our_kc,
+                   MAX(e.paid_at) AS last_paid_at
+              FROM sellers s
+              JOIN users u ON u.id = s.user_id
+              LEFT JOIN seller_earnings e ON e.seller_id = s.id
+             WHERE s.active = true
+             GROUP BY s.id, u.email
+             ORDER BY total_seller_kc DESC, s.created_at ASC
+            """
+        )
+        return cur.fetchall()
+
+
 # =====================================================================
 # Neomezené generování (9900 Kč/měsíc, strop 10 generování/den)
 # =====================================================================

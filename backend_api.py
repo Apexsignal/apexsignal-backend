@@ -2169,6 +2169,46 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
     }
 
 
+@app.get("/admin/sellers/overview")
+def admin_sellers_overview(request: Request):
+    """Appka appce (uživateli) ukáže VŠECHNY aktivní prodejce najednou —
+    kolik jich appka má, kdo je aktivní (propojený Telegram), kolik
+    klientů kdo přivedl a kolik appka komu dluží — na rozdíl od
+    /seller/dashboard, co ukáže jen appce přihlášenému JEDNOMU prodejci
+    jeho vlastní čísla. Vzniklo 2026-08-26 na uživatelovo přání, appka to
+    potřebuje dřív, než nábor agentů poroste nad pár lidí sledovaných
+    ručně."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    sellers = db.list_sellers_overview()
+    total_sellers_kc = sum(s["total_seller_kc"] for s in sellers)
+    total_our_kc = sum(s["total_our_kc"] for s in sellers)
+    total_clients = sum(s["total_clients"] for s in sellers)
+
+    return {
+        "seller_count": len(sellers),
+        "total_clients": total_clients,
+        "total_seller_kc": total_sellers_kc,
+        "total_our_kc": total_our_kc,
+        "sellers": [
+            {
+                "seller_code": s["seller_code"],
+                "display_name": s["display_name"],
+                "email": s["email"],
+                "telegram_linked": s["telegram_chat_id"] is not None,
+                "total_clients": s["total_clients"],
+                "total_seller_kc": s["total_seller_kc"],
+                "total_our_kc": s["total_our_kc"],
+                "created_at": s["created_at"].isoformat() if s["created_at"] else None,
+                "last_paid_at": s["last_paid_at"].isoformat() if s["last_paid_at"] else None,
+            }
+            for s in sellers
+        ],
+    }
+
+
 # =====================================================================
 # Pomocné funkce — stahují zápasy pro každý sport a skládají MatchInput
 # =====================================================================
