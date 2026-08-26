@@ -554,6 +554,45 @@ def ensure_schema() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_seller_earnings_seller_id ON seller_earnings (seller_id)")
     except Exception:
         pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE seller_earnings ADD COLUMN IF NOT EXISTS stripe_invoice_id VARCHAR(120) UNIQUE")
+    except Exception:
+        pass
+    # Appka dřív provizi zapisovala JEN při první platbě (checkout.session.
+    # completed) — každé další automatické obnovení (týden/2 týdny/měsíc)
+    # appka appce nezapočítala vůbec, protože obnovení appce chodí přes
+    # invoice.payment_succeeded, ne přes novou checkout session. Tahle
+    # tabulka appce drží ŽIVÝ stav předplatného ke KAŽDÉMU odkazu na
+    # Stripe subscription (kdy končí, jestli je pořád aktivní) — appka to
+    # potřebuje, aby uměla webhooku na invoice.payment_succeeded/
+    # customer.subscription.* říct, čí prodejcovo předplatné se právě
+    # obnovilo nebo zrušilo (nahlásil uživatel 2026-08-26).
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seller_client_subscriptions (
+                    stripe_subscription_id VARCHAR(120) PRIMARY KEY,
+                    seller_id INTEGER NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+                    client_email VARCHAR(255),
+                    tier_price_kc INTEGER NOT NULL,
+                    our_cut_kc INTEGER NOT NULL,
+                    seller_cut_kc INTEGER NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    current_period_end TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_seller_client_subs_seller_id ON seller_client_subscriptions (seller_id)")
+    except Exception:
+        pass
 
 
 def cache_get(key: str) -> Optional[list]:
@@ -1361,6 +1400,89 @@ def record_seller_earning(
         return cur.rowcount > 0
 
 
+def record_seller_renewal_earning(
+    seller_id: int, stripe_invoice_id: str, client_email: Optional[str],
+    tier_price_kc: int, our_cut_kc: int, seller_cut_kc: int,
+) -> bool:
+    """Appka appce zapíše provizi za KAŽDÉ automatické obnovení (invoice.
+    payment_succeeded, appka to appce vyžádala 2026-08-26) — appka na to
+    použije stejnou tabulku jako u první platby, jen appka idempotenci
+    hlídá přes stripe_invoice_id (checkout_session_id appka nemá — appka
+    obnovení nikdy neprochází přes novou checkout session)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seller_earnings
+                (seller_id, stripe_checkout_session_id, stripe_invoice_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (stripe_invoice_id) DO NOTHING
+            """,
+            (seller_id, f"invoice_{stripe_invoice_id}", stripe_invoice_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc),
+        )
+        return cur.rowcount > 0
+
+
+def upsert_seller_subscription(
+    stripe_subscription_id: str, seller_id: int, client_email: Optional[str],
+    tier_price_kc: int, our_cut_kc: int, seller_cut_kc: int,
+    status: str, current_period_end: Optional[datetime],
+) -> None:
+    """Appka appce drží ŽIVÝ stav prodejcova klientova předplatného —
+    appka ho zapíše/aktualizuje při KAŽDÉ relevantní Stripe události
+    (nová platba, obnovení, zrušení), ať appka umí kdykoli odpovědět
+    'kdy tomuhle klientovi končí předplatné' bez dotazu na Stripe."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seller_client_subscriptions
+                (stripe_subscription_id, seller_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc, status, current_period_end, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (stripe_subscription_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                current_period_end = COALESCE(EXCLUDED.current_period_end, seller_client_subscriptions.current_period_end),
+                client_email = COALESCE(EXCLUDED.client_email, seller_client_subscriptions.client_email),
+                updated_at = now()
+            """,
+            (stripe_subscription_id, seller_id, client_email, tier_price_kc, our_cut_kc, seller_cut_kc, status, current_period_end),
+        )
+
+
+def get_seller_subscription(stripe_subscription_id: str) -> Optional[dict]:
+    """Appka sem sahá ve webhooku appce zjistit, jestli daná Stripe
+    subscription patří appce NĚJAKÉHO prodejce — appka to appce použije
+    dřív, než appka pro appku vůbec zkusí sáhnout do appčiných branchí
+    pro appčin vlastní kanál/neomezené generování."""
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM seller_client_subscriptions WHERE stripe_subscription_id = %s", (stripe_subscription_id,))
+        return cur.fetchone()
+
+
+def list_seller_subscriptions(seller_id: int) -> list[dict]:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM seller_client_subscriptions WHERE seller_id = %s ORDER BY current_period_end ASC NULLS LAST",
+            (seller_id,),
+        )
+        return cur.fetchall()
+
+
+def list_all_seller_client_subscriptions() -> list[dict]:
+    """Appka appce (adminovi) ukáže klienty VŠECH prodejců najednou,
+    seřazené podle toho, komu appka nejdřív skončí předplatné — appka to
+    potřebuje na /admin-prodejci, ať appka vidí blížící se konce bez
+    nutnosti proklikávat každého prodejce zvlášť."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT sub.*, s.seller_code, s.display_name AS seller_name
+              FROM seller_client_subscriptions sub
+              JOIN sellers s ON s.id = sub.seller_id
+             ORDER BY sub.current_period_end ASC NULLS LAST
+            """
+        )
+        return cur.fetchall()
+
+
 def get_active_sellers_with_telegram() -> list[dict]:
     """Appka sem sahá při denní rozesílce (viz /admin/client-tickets-send)
     — appka posílá appčin denní tiket i prodejcům, ne jen platícím
@@ -1390,16 +1512,27 @@ def list_sellers_overview() -> list[dict]:
         cur.execute(
             """
             SELECT s.id, s.seller_code, s.display_name, s.telegram_chat_id, s.created_at, u.email,
-                   COUNT(e.id) AS total_clients,
-                   COALESCE(SUM(e.seller_cut_kc), 0) AS total_seller_kc,
-                   COALESCE(SUM(e.our_cut_kc), 0) AS total_our_kc,
-                   MAX(e.paid_at) AS last_paid_at
+                   COALESCE(subs.total_clients, 0) AS total_clients,
+                   COALESCE(subs.active_clients, 0) AS active_clients,
+                   COALESCE(earn.total_seller_kc, 0) AS total_seller_kc,
+                   COALESCE(earn.total_our_kc, 0) AS total_our_kc,
+                   earn.last_paid_at AS last_paid_at
               FROM sellers s
               JOIN users u ON u.id = s.user_id
-              LEFT JOIN seller_earnings e ON e.seller_id = s.id
+              LEFT JOIN (
+                    SELECT seller_id, COUNT(*) AS total_clients,
+                           COUNT(*) FILTER (WHERE status IN ('active', 'trialing')) AS active_clients
+                      FROM seller_client_subscriptions
+                     GROUP BY seller_id
+                   ) subs ON subs.seller_id = s.id
+              LEFT JOIN (
+                    SELECT seller_id, SUM(seller_cut_kc) AS total_seller_kc,
+                           SUM(our_cut_kc) AS total_our_kc, MAX(paid_at) AS last_paid_at
+                      FROM seller_earnings
+                     GROUP BY seller_id
+                   ) earn ON earn.seller_id = s.id
              WHERE s.active = true
-             GROUP BY s.id, u.email
-             ORDER BY total_seller_kc DESC, s.created_at ASC
+             ORDER BY total_seller_kc DESC NULLS LAST, s.created_at ASC
             """
         )
         return cur.fetchall()

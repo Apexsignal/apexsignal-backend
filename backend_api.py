@@ -1706,6 +1706,25 @@ async def stripe_webhook(request: Request):
                 is_new = db.record_seller_earning(
                     seller["id"], obj["id"], email, amount_total_kc, our_cut_kc, seller_cut_kc,
                 )
+                # Appka appce hned zapíše i ŽIVÝ stav předplatného (kdy
+                # končí, čí je) — appka to appce potřebuje, aby uměla na
+                # invoice.payment_succeeded/customer.subscription.* níž
+                # poznat, že jde o prodejcova klienta, a zapsat mu i
+                # provizi za každé DALŠÍ obnovení, ne jen za tuhle první
+                # platbu (nahlásil uživatel 2026-08-26 — appka dřív
+                # obnovení vůbec neřešila).
+                stripe_subscription_id = obj.get("subscription")
+                if stripe_subscription_id:
+                    period_end = None
+                    try:
+                        sub = stripe.Subscription.retrieve(stripe_subscription_id)
+                        period_end = _period_end_from_subscription(sub)
+                    except Exception as e:
+                        print(f"[stripe] nepodařilo se načíst prodejcovo předplatné {stripe_subscription_id}: {e}")
+                    db.upsert_seller_subscription(
+                        stripe_subscription_id, seller["id"], email, amount_total_kc,
+                        our_cut_kc, seller_cut_kc, "active", period_end,
+                    )
                 if is_new and seller.get("telegram_chat_id"):
                     try:
                         _send_telegram_message(
@@ -1773,7 +1792,20 @@ async def stripe_webhook(request: Request):
 
     elif event_type.startswith("customer.subscription."):
         sub_metadata = obj.get("metadata") or {}
-        if sub_metadata.get("unlimited_generation") == "1":
+        seller_sub = db.get_seller_subscription(obj["id"])
+        if seller_sub is not None:
+            # Prodejcův klient appka MUSÍ odchytit dřív než větve pro
+            # appčino vlastní neomezené generování/kanál níž — appka na
+            # 'deleted' appce zapíše status 'canceled', ať appka umí
+            # klientovi na dashboardu ukázat, že už neplatí, ale appka mu
+            # (stejně jako u neomezeného appky) přístup neutne uprostřed
+            # zaplaceného období.
+            db.upsert_seller_subscription(
+                obj["id"], seller_sub["seller_id"], seller_sub["client_email"],
+                seller_sub["tier_price_kc"], seller_sub["our_cut_kc"], seller_sub["seller_cut_kc"],
+                obj.get("status", "canceled"), _period_end_from_subscription(obj),
+            )
+        elif sub_metadata.get("unlimited_generation") == "1":
             # Obnovení appka řeší přes invoice.payment_succeeded níž (tam
             # appka ví jistě, že platba prošla) — tady appka jen zrcadlí
             # aktivní stav, kdyby přišel dřív. Zrušení appka neřeší
@@ -1800,7 +1832,44 @@ async def stripe_webhook(request: Request):
             except Exception as e:
                 print(f"[stripe] nepodařilo se načíst předplatné {subscription_id}: {e}")
                 sub = None
-            if sub is not None:
+            seller_sub = db.get_seller_subscription(subscription_id) if subscription_id else None
+            if seller_sub is not None:
+                # Prodejcův klient appka MUSÍ odchytit dřív než appčiny
+                # vlastní branche níž. billing_reason appka appce
+                # rozliší, jestli je tahle faktura ta úplně PRVNÍ (appka
+                # ji už zapsala výš v checkout.session.completed —
+                # dvakrát appka stejnou platbu nezapíše, ale radši se
+                # tomu appka vyhne rovnou) nebo skutečné automatické
+                # OBNOVENÍ (subscription_cycle) — jen za to appka appce
+                # zapíše novou provizi (uživatelovo přání 2026-08-26,
+                # appka dřív žádnou provizi za obnovení nezapisovala).
+                billing_reason = obj.get("billing_reason")
+                if event_type == "invoice.payment_succeeded" and billing_reason != "subscription_create":
+                    invoice_id = obj.get("id")
+                    is_new = db.record_seller_renewal_earning(
+                        seller_sub["seller_id"], invoice_id, seller_sub["client_email"],
+                        seller_sub["tier_price_kc"], seller_sub["our_cut_kc"], seller_sub["seller_cut_kc"],
+                    )
+                    if is_new:
+                        try:
+                            with db.get_cursor() as cur:
+                                cur.execute("SELECT telegram_chat_id FROM sellers WHERE id = %s", (seller_sub["seller_id"],))
+                                row = cur.fetchone()
+                            if row and row.get("telegram_chat_id"):
+                                _send_telegram_message(
+                                    row["telegram_chat_id"],
+                                    f"✅ Obnovené předplatné!\n{seller_sub['client_email'] or 'e-mail neznámý'} "
+                                    f"zaplatil {seller_sub['tier_price_kc']} Kč.\nTvůj podíl: {seller_sub['seller_cut_kc']} Kč.",
+                                )
+                        except Exception as e:
+                            print(f"[stripe] Nepodařilo se poslat Telegram notifikaci o obnovení prodejci {seller_sub['seller_id']}: {e}")
+                db.upsert_seller_subscription(
+                    subscription_id, seller_sub["seller_id"], seller_sub["client_email"],
+                    seller_sub["tier_price_kc"], seller_sub["our_cut_kc"], seller_sub["seller_cut_kc"],
+                    sub.get("status", "active") if sub is not None else "active",
+                    _period_end_from_subscription(sub) if sub is not None else None,
+                )
+            elif sub is not None:
                 sub_metadata = sub.get("metadata") or {}
                 if sub_metadata.get("unlimited_generation") == "1":
                     # Tohle je ten skutečný měsíční obnovovací moment —
@@ -2138,7 +2207,13 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
 
     earnings = db.get_seller_earnings(seller["id"])
     total_seller_kc = sum(e["seller_cut_kc"] for e in earnings)
-    total_clients = len(earnings)
+    # total_clients appka počítá z PŘEDPLATNÝCH, ne z jednotlivých plateb —
+    # jeden klient appce teď může vygenerovat víc řádků v earnings (první
+    # platba + každé obnovení), takže len(earnings) by appce klienty
+    # zdvojoval, jakmile appka někomu obnovilo předplatné (viz oprava
+    # 2026-08-26).
+    subscriptions = db.list_seller_subscriptions(seller["id"])
+    total_clients = len(subscriptions)
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
     telegram_link_url = f"https://t.me/{bot_username}?start=seller_{seller['seller_code']}" if bot_username else None
@@ -2157,6 +2232,15 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
         "can_self_generate": _has_active_unlimited(user_id),
         "total_clients": total_clients,
         "total_earned_kc": total_seller_kc,
+        "clients": [
+            {
+                "client_email": s["client_email"],
+                "tier_price_kc": s["tier_price_kc"],
+                "status": s["status"],
+                "current_period_end": s["current_period_end"].isoformat() if s["current_period_end"] else None,
+            }
+            for s in subscriptions
+        ],
         "earnings": [
             {
                 "client_email": e["client_email"],
@@ -2186,10 +2270,14 @@ def admin_sellers_overview(request: Request):
     total_sellers_kc = sum(s["total_seller_kc"] for s in sellers)
     total_our_kc = sum(s["total_our_kc"] for s in sellers)
     total_clients = sum(s["total_clients"] for s in sellers)
+    active_clients = sum(s["active_clients"] for s in sellers)
+
+    subs = db.list_all_seller_client_subscriptions()
 
     return {
         "seller_count": len(sellers),
         "total_clients": total_clients,
+        "active_clients": active_clients,
         "total_seller_kc": total_sellers_kc,
         "total_our_kc": total_our_kc,
         "sellers": [
@@ -2199,12 +2287,28 @@ def admin_sellers_overview(request: Request):
                 "email": s["email"],
                 "telegram_linked": s["telegram_chat_id"] is not None,
                 "total_clients": s["total_clients"],
+                "active_clients": s["active_clients"],
                 "total_seller_kc": s["total_seller_kc"],
                 "total_our_kc": s["total_our_kc"],
                 "created_at": s["created_at"].isoformat() if s["created_at"] else None,
                 "last_paid_at": s["last_paid_at"].isoformat() if s["last_paid_at"] else None,
             }
             for s in sellers
+        ],
+        # Appka appce (adminovi) rovnou ukáže, komu nejdřív skončí
+        # předplatné — seřazeno appkou už v db.list_all_seller_client_
+        # subscriptions (nejbližší konec první), appka na frontendu nic
+        # netřídí znovu.
+        "clients": [
+            {
+                "seller_code": c["seller_code"],
+                "seller_name": c["seller_name"],
+                "client_email": c["client_email"],
+                "tier_price_kc": c["tier_price_kc"],
+                "status": c["status"],
+                "current_period_end": c["current_period_end"].isoformat() if c["current_period_end"] else None,
+            }
+            for c in subs
         ],
     }
 
