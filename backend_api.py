@@ -1175,19 +1175,27 @@ TELEGRAM_LINK_CODE_TTL_MINUTES = 60
 CHANNEL_PRICE_KC = 990
 
 # =====================================================================
-# Provizní systém pro prodejce — appka jim dá 5 pevných Stripe Payment
-# Linků (appce nejde přednastavit libovolnou částku, viz debata s
-# uživatelem). Prodejce si podle domluvy s klientem vybere jeden z pěti
-# a pošle mu ho i se svým seller_code v client_reference_id. Klíč je
-# celá Kč částka, hodnota (appčin podíl, podíl prodejce) — obojí v Kč.
+# Provizní systém pro prodejce — appka jim dá 3 pevné Stripe Payment
+# Linky, jeden za tarif (týden/2 týdny/měsíc — appce nejde přednastavit
+# libovolnou částku, viz debata s uživatelem). Prodejce pošle klientovi
+# ten, na kterém se domluvili, i se svým seller_code v client_reference_id.
+# Klíč je celá Kč částka, hodnota (appčin podíl, podíl prodejce) — obojí
+# v Kč, appka pro všechny tarify drží pevných 30 % prodejci. Přeceněno
+# z původních 500-3000 Kč (appka je nabízela jako "různé cenové hladiny",
+# všechny ale byly technicky měsíční — uživatel 2026-08-25 chtěl skutečné
+# odlišné fakturační období, viz SELLER_TIER_WEEKS níž) na 1500/2600/4000 Kč
+# (týden/2 týdny/měsíc), stejná struktura jako appčin vlastní kanál.
 # =====================================================================
 SELLER_COMMISSION_TIERS: dict[int, tuple[int, int]] = {
-    500: (200, 300),
-    1000: (250, 750),
-    2000: (300, 1700),
-    2500: (500, 2000),
-    3000: (600, 2400),
+    1500: (1050, 450),   # 1 týden — 30 % prodejci
+    2600: (1820, 780),   # 2 týdny
+    4000: (2800, 1200),  # měsíc (4 týdny)
 }
+# Kolik týdnů appka strhává za daný tarif — appka na to při vytváření
+# Stripe Price appka nastaví recurring.interval="week"/interval_count
+# podle tohohle čísla (měsíc appka appce zjednodušila na "4 týdny", ať
+# appka drží jeden jednotný fakturační rytmus, ne měsíc+týden zvlášť).
+SELLER_TIER_WEEKS: dict[int, int] = {1500: 1, 2600: 2, 4000: 4}
 SELLER_PAYMENT_LINKS_SETTING_KEY = "seller_payment_links_v1"
 
 
@@ -2025,12 +2033,14 @@ def admin_create_channel_payment_link(request: Request):
 @app.post("/admin/sellers/create-payment-links")
 def admin_create_seller_payment_links(request: Request):
     """
-    Appka JEDNORÁZOVĚ vytvoří 5 pevných Stripe Payment Linků (podle
-    SELLER_COMMISSION_TIERS) sdílených VŠEMI prodejci — appka je
-    nerozlišuje samostatnými odkazy na prodejce, ale přes
-    client_reference_id, který si každý prodejce připojí do URL sám
-    (viz GET /seller/dashboard). Appka výsledné URL uloží do
-    app_settings, ať tohle nemusí volat podruhé.
+    Appka JEDNORÁZOVĚ vytvoří 3 pevné Stripe Payment Linky (podle
+    SELLER_COMMISSION_TIERS — týden/2 týdny/měsíc) sdílené VŠEMI
+    prodejci — appka je nerozlišuje samostatnými odkazy na prodejce,
+    ale přes client_reference_id, který si každý prodejce připojí do
+    URL sám (viz GET /seller/dashboard). Appka výsledné URL uloží do
+    app_settings, ať tohle nemusí volat podruhé — volání appku
+    PŘEPÍŠE staré odkazy novými (SELLER_PAYMENT_LINKS_SETTING_KEY drží
+    jen poslední sadu).
     """
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
@@ -2042,11 +2052,13 @@ def admin_create_seller_payment_links(request: Request):
     links: dict[str, str] = {}
     try:
         for tier_kc in SELLER_COMMISSION_TIERS:
+            weeks = SELLER_TIER_WEEKS.get(tier_kc, 4)
+            label = "týden" if weeks == 1 else ("měsíc" if weeks == 4 else f"{weeks} týdny")
             price = stripe.Price.create(
                 currency="czk",
                 unit_amount=tier_kc * 100,
-                recurring={"interval": "month"},
-                product_data={"name": f"ApexSignal — prodejcem doporučený přístup ({tier_kc} Kč/měsíc)"},
+                recurring={"interval": "week", "interval_count": weeks},
+                product_data={"name": f"ApexSignal — prodejcem doporučený přístup ({tier_kc} Kč / {label})"},
             )
             payment_link = stripe.PaymentLink.create(
                 line_items=[{"price": price.id, "quantity": 1}],
@@ -2133,6 +2145,7 @@ def seller_dashboard(user_id: int = Depends(get_current_user_id)):
         "seller_code": seller["seller_code"],
         "display_name": seller["display_name"],
         "payment_links": my_links,
+        "tier_weeks": SELLER_TIER_WEEKS,
         "telegram_linked": bool(seller.get("telegram_chat_id")),
         "telegram_link_url": telegram_link_url,
         # "Obohacení" appčina základního modelu (tikety + provize) — když
