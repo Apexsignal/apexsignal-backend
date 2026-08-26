@@ -2358,6 +2358,21 @@ def admin_sellers_overview(request: Request):
             }
             for p in db.list_pending_sellers()
         ],
+        "leads": [
+            {
+                "id": l["id"],
+                "full_name": l["full_name"],
+                "age": l["age"],
+                "city": l["city"],
+                "experience": l["experience"],
+                "start_when": l["start_when"],
+                "income_goal": l["income_goal"],
+                "can_work_online": l["can_work_online"],
+                "contact": l["contact"],
+                "created_at": l["created_at"].isoformat() if l["created_at"] else None,
+            }
+            for l in db.list_seller_leads()
+        ],
     }
 
 
@@ -2379,6 +2394,66 @@ def admin_sellers_approve(req: SellerApproveRequest, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail="Prodejce s tímhle kódem appka nenašla.")
     return {"seller_code": req.seller_code.strip(), "approved": req.approve}
+
+
+class SellerLeadRequest(BaseModel):
+    full_name: str
+    age: Optional[int] = None
+    city: Optional[str] = None
+    experience: Optional[str] = None
+    start_when: Optional[str] = None
+    income_goal: Optional[str] = None
+    can_work_online: Optional[bool] = None
+    contact: str
+
+
+@app.post("/leads/seller-application")
+def submit_seller_lead(req: SellerLeadRequest):
+    """Veřejný náborový formulář (/prihlaska) — schválně nepožaduje
+    přihlášení, zájemce ještě nemusí mít účet appky vůbec. Appka jen
+    uloží žádost a pošle admin Telegramu upozornění; appka se pak sama
+    zájemci ozve, žádný self-serve krok navíc."""
+    full_name = req.full_name.strip()
+    contact = req.contact.strip()
+    if not full_name:
+        raise HTTPException(status_code=400, detail="Chybí jméno.")
+    if not contact:
+        raise HTTPException(status_code=400, detail="Chybí kontakt (e-mail nebo Telegram).")
+    if len(full_name) > 160 or len(contact) > 255:
+        raise HTTPException(status_code=400, detail="Jméno nebo kontakt je moc dlouhý.")
+
+    lead_id = db.create_seller_lead(
+        full_name=full_name,
+        age=req.age,
+        city=(req.city or "").strip() or None,
+        experience=(req.experience or "").strip() or None,
+        start_when=(req.start_when or "").strip() or None,
+        income_goal=(req.income_goal or "").strip() or None,
+        can_work_online=req.can_work_online,
+        contact=contact,
+    )
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if chat_id:
+        try:
+            online_txt = "ano" if req.can_work_online else ("ne" if req.can_work_online is False else "?")
+            _send_telegram_message(
+                int(chat_id),
+                "🧑‍💼 Nová přihláška do náboru obchodníků\n"
+                f"Jméno: {full_name}\n"
+                f"Věk: {req.age or '?'}\n"
+                f"Město: {req.city or '?'}\n"
+                f"Zkušenosti: {req.experience or '?'}\n"
+                f"Kdy může začít: {req.start_when or '?'}\n"
+                f"Chce vydělávat: {req.income_goal or '?'}\n"
+                f"Umí online/oslovovat lidi: {online_txt}\n"
+                f"Kontakt: {contact}\n"
+                "Přehled: apexsignal.cz/admin-prodejci",
+            )
+        except Exception as e:
+            print(f"[leads] Nepodařilo se poslat Telegram upozornění: {e}")
+
+    return {"status": "received", "lead_id": lead_id}
 
 
 # =====================================================================

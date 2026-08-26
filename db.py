@@ -594,6 +594,30 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Přihlášky z veřejného náborového formuláře (/prihlaska) — appka
+    # tudy sbírá zájemce PŘED tím, než si vůbec založí účet appky, proto
+    # je to samostatná tabulka bez vazby na users/sellers.
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seller_leads (
+                    id SERIAL PRIMARY KEY,
+                    full_name VARCHAR(160) NOT NULL,
+                    age INTEGER,
+                    city VARCHAR(120),
+                    experience TEXT,
+                    start_when VARCHAR(60),
+                    income_goal VARCHAR(60),
+                    can_work_online BOOLEAN,
+                    contact VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+
 
 def cache_get(key: str) -> Optional[list]:
     """Vrátí cachovaný payload z DB, pokud ještě nevypršel."""
@@ -1397,6 +1421,34 @@ def set_seller_active(seller_code: str, active: bool) -> bool:
             (active, seller_code),
         )
         return cur.fetchone() is not None
+
+
+def create_seller_lead(
+    full_name: str,
+    age: Optional[int],
+    city: Optional[str],
+    experience: Optional[str],
+    start_when: Optional[str],
+    income_goal: Optional[str],
+    can_work_online: Optional[bool],
+    contact: str,
+) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seller_leads (full_name, age, city, experience, start_when, income_goal, can_work_online, contact)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (full_name, age, city, experience, start_when, income_goal, can_work_online, contact),
+        )
+        return cur.fetchone()["id"]
+
+
+def list_seller_leads() -> list[dict]:
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM seller_leads ORDER BY created_at DESC")
+        return cur.fetchall()
 
 
 def get_seller_by_code(seller_code: str) -> Optional[dict]:
