@@ -2369,6 +2369,7 @@ def admin_sellers_overview(request: Request):
                 "income_goal": l["income_goal"],
                 "can_work_online": l["can_work_online"],
                 "contact": l["contact"],
+                "phone": l["phone"],
                 "created_at": l["created_at"].isoformat() if l["created_at"] else None,
             }
             for l in db.list_seller_leads()
@@ -2405,22 +2406,26 @@ class SellerLeadRequest(BaseModel):
     income_goal: Optional[str] = None
     can_work_online: Optional[bool] = None
     contact: str
+    phone: Optional[str] = None
 
 
 @app.post("/leads/seller-application")
 def submit_seller_lead(req: SellerLeadRequest):
-    """Veřejný náborový formulář (/prihlaska) — schválně nepožaduje
+    """Veřejný náborový formulář (/kariera) — schválně nepožaduje
     přihlášení, zájemce ještě nemusí mít účet appky vůbec. Appka jen
     uloží žádost a pošle admin Telegramu upozornění; appka se pak sama
     zájemci ozve, žádný self-serve krok navíc."""
     full_name = req.full_name.strip()
     contact = req.contact.strip()
+    phone = (req.phone or "").strip() or None
     if not full_name:
         raise HTTPException(status_code=400, detail="Chybí jméno.")
     if not contact:
         raise HTTPException(status_code=400, detail="Chybí kontakt (e-mail nebo Telegram).")
-    if len(full_name) > 160 or len(contact) > 255:
-        raise HTTPException(status_code=400, detail="Jméno nebo kontakt je moc dlouhý.")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Chybí telefonní číslo.")
+    if len(full_name) > 160 or len(contact) > 255 or len(phone) > 40:
+        raise HTTPException(status_code=400, detail="Jméno, kontakt nebo telefon je moc dlouhý.")
 
     lead_id = db.create_seller_lead(
         full_name=full_name,
@@ -2431,6 +2436,7 @@ def submit_seller_lead(req: SellerLeadRequest):
         income_goal=(req.income_goal or "").strip() or None,
         can_work_online=req.can_work_online,
         contact=contact,
+        phone=phone,
     )
 
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -2447,6 +2453,7 @@ def submit_seller_lead(req: SellerLeadRequest):
                 f"Kdy může začít: {req.start_when or '?'}\n"
                 f"Chce vydělávat: {req.income_goal or '?'}\n"
                 f"Umí online/oslovovat lidi: {online_txt}\n"
+                f"Telefon: {phone}\n"
                 f"Kontakt: {contact}\n"
                 "Přehled: apexsignal.cz/admin-prodejci",
             )

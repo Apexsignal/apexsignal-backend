@@ -611,10 +611,16 @@ def ensure_schema() -> None:
                     income_goal VARCHAR(60),
                     can_work_online BOOLEAN,
                     contact VARCHAR(255) NOT NULL,
+                    phone VARCHAR(40),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
+    except Exception:
+        pass
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE seller_leads ADD COLUMN IF NOT EXISTS phone VARCHAR(40)")
     except Exception:
         pass
 
@@ -1432,15 +1438,16 @@ def create_seller_lead(
     income_goal: Optional[str],
     can_work_online: Optional[bool],
     contact: str,
+    phone: Optional[str] = None,
 ) -> int:
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO seller_leads (full_name, age, city, experience, start_when, income_goal, can_work_online, contact)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO seller_leads (full_name, age, city, experience, start_when, income_goal, can_work_online, contact, phone)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (full_name, age, city, experience, start_when, income_goal, can_work_online, contact),
+            (full_name, age, city, experience, start_when, income_goal, can_work_online, contact, phone),
         )
         return cur.fetchone()["id"]
 
