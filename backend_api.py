@@ -6323,6 +6323,9 @@ def client_tickets_preview(request: Request):
 
     picks = _todays_client_picks(int(target_user_id_raw))
     subscriber_count = len(db.get_active_telegram_subscribers())
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
     return {
         "subscriber_count": subscriber_count,
         "picks": [
@@ -6338,6 +6341,9 @@ def client_tickets_preview(request: Request):
                     f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds}) @ {s.kickoff_date} {s.kickoff_time} UTC"
                     for s in r["ticket"].selections
                 ],
+                "already_sent": bool(
+                    sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == r["ticket_id"]
+                ),
             }
             for r in picks
         ],
@@ -6345,6 +6351,7 @@ def client_tickets_preview(request: Request):
 
 
 DAILY_TICKET_APPROVAL_SETTING_KEY = "daily_ticket_approved"
+DAILY_TICKET_SENT_SETTING_KEY = "daily_ticket_sent"
 
 
 class ApproveDailyTicketRequest(BaseModel):
@@ -6395,6 +6402,15 @@ def client_tickets_send(request: Request):
             detail="Dnešní tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
         )
 
+    # Appka bez tohohle nemá žádnou pojistku proti dvojímu odeslání — druhé
+    # kliknutí na "Schválit a odeslat" (např. po refreshi stránky, kde appka
+    # dřív pořád ukazovala stejnou kartu, i když už byl tiket odeslaný) by
+    # poslalo tiket stejným lidem znovu.
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    if sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == approval.get("ticket_id"):
+        raise HTTPException(status_code=409, detail="Tenhle tiket appka dnes už jednou odeslala.")
+
     # Rozesílka se ptá VÝHRADNĚ na platící (get_paid_telegram_subscribers
     # dělá JOIN na subscriptions). get_active_telegram_subscribers() by
     # vrátilo i všechny, kdo si kdy jen napsali /start — tedy i lidi bez
@@ -6429,6 +6445,8 @@ def client_tickets_send(request: Request):
             except Exception as e:
                 results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": f"error: {e}"})
 
+    db.set_setting(DAILY_TICKET_SENT_SETTING_KEY, json.dumps({"date": today_prague, "ticket_id": approval.get("ticket_id")}))
+
     return {
         "picks_sent": [r["ticket_id"] for r in picks],
         "recipients": len(recipients),
@@ -6451,6 +6469,7 @@ def client_tickets_send(request: Request):
 # ------------------------------------------------------------
 EXTERNAL_TICKET_SETTING_PREFIX = "external_ticket_"
 EXTERNAL_TICKET_APPROVAL_PREFIX = "external_ticket_approved_"
+EXTERNAL_TICKET_SENT_PREFIX = "external_ticket_sent_"
 
 
 class ExternalTicketLeg(BaseModel):
@@ -6498,6 +6517,11 @@ def external_tickets_preview(sport: str, request: Request):
     today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
     if data.get("date") != today_prague:
         return {"ticket": None}
+    raw_sent = db.get_setting(f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}")
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    data["already_sent"] = bool(
+        sent_record and sent_record.get("date") == today_prague and sent_record.get("external_ticket_id") == data.get("external_ticket_id")
+    )
     return {"ticket": data}
 
 
@@ -6542,6 +6566,11 @@ def send_external_ticket(sport: str, request: Request):
             detail="Dnešní tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
         )
 
+    raw_sent = db.get_setting(f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}")
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    if sent_record and sent_record.get("date") == today_prague and sent_record.get("external_ticket_id") == data.get("external_ticket_id"):
+        raise HTTPException(status_code=409, detail="Tenhle tiket appka dnes už jednou odeslala.")
+
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not bot_token:
         raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN není nastavené")
@@ -6570,6 +6599,11 @@ def send_external_ticket(sport: str, request: Request):
         chat_id = seller["telegram_chat_id"]
         resp = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
         results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent" if resp.ok else f"error: {resp.text}"})
+
+    db.set_setting(
+        f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}",
+        json.dumps({"date": today_prague, "external_ticket_id": data.get("external_ticket_id")}),
+    )
 
     return {
         "sport": sport,
