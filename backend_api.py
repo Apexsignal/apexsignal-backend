@@ -2177,13 +2177,23 @@ def admin_check_seller_payment_links(request: Request):
     raw_links = db.get_setting(SELLER_PAYMENT_LINKS_SETTING_KEY)
     stored_links = json.loads(raw_links) if raw_links else {}
 
+    # Stripe.PaymentLink.retrieve() bere API ID (plink_...), ne veřejný
+    # URL slug (co appka ukládá appce do payment_links) — appka proto
+    # musí projít celý appčin seznam Payment Linků a spárovat podle URL.
+    try:
+        all_links = stripe.PaymentLink.list(limit=100, expand=["data.line_items.data.price"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba: {e}")
+
+    by_url = {pl["url"]: pl for pl in all_links["data"]}
+
     results = []
     for tier_kc, url in stored_links.items():
-        link_id = url.rstrip("/").split("/")[-1]
-        entry = {"expected_tier_kc": tier_kc, "url": url, "payment_link_id": link_id}
-        try:
-            pl = stripe.PaymentLink.retrieve(link_id, expand=["line_items.data.price"])
-            items = pl["line_items"]["data"]
+        entry = {"expected_tier_kc": tier_kc, "url": url}
+        pl = by_url.get(url)
+        if pl is None:
+            entry["error"] = "Tenhle odkaz appka v appčině Stripe účtu nenašla vůbec (smazaný/jiný účet?)."
+        else:
             entry["active"] = pl.get("active")
             entry["line_items"] = [
                 {
@@ -2193,10 +2203,8 @@ def admin_check_seller_payment_links(request: Request):
                     "recurring": it["price"].get("recurring"),
                     "product": it["price"].get("product"),
                 }
-                for it in items
+                for it in pl["line_items"]["data"]
             ]
-        except Exception as e:
-            entry["error"] = str(e)
         results.append(entry)
 
     return {"links": results}
