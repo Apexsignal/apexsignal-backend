@@ -1014,6 +1014,7 @@ def _row_to_dict(ticket_row: dict, selection_rows: list[dict]) -> dict:
     )
     return {
         "ticket_id": ticket_row["id"],
+        "user_id": ticket_row["user_id"],
         "ticket": ticket_obj,
         "status": ticket_row["status"],
         "live_alert": ticket_row["live_alert"],

@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 import os
 import random
 import secrets
+import io
 import json
 import requests
 import aiohttp
@@ -34,7 +35,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
@@ -6904,6 +6905,7 @@ def showcase_tickets(limit: int = 20):
         ticket = r["ticket"]
         created_at = r.get("created_at")
         tickets.append({
+            "ticket_id": r["ticket_id"],
             "ticket_type": ticket.ticket_type,
             "total_odds": ticket.total_odds,
             "stake": r.get("actual_stake_amount"),
@@ -6920,6 +6922,35 @@ def showcase_tickets(limit: int = 20):
             ],
         })
     return {"tickets": tickets}
+
+
+@app.get("/showcase/ticket-image/{ticket_id}")
+def showcase_ticket_image(ticket_id: int):
+    """Vyrenderuje jeden vyhraný appčin showcase tiket (viz /showcase/tickets)
+    jako JPG obrázek — BEZ appčina diagonálního vodoznaku, ať si ho
+    prodejci mohou stáhnout a poslat klientům pod svým vlastním jménem
+    (stejné pravidlo appka už má u denní rozesílky prodejcům). Veřejné
+    stejně jako /showcase/tickets — appka jen ověří, že ticket_id patří
+    appčinu vlastnímu showcase účtu a je 'won', jinak appka nevrátí nic
+    z tiketu běžného uživatele."""
+    target_ids = {
+        int(v) for v in (
+            os.environ.get("DAILY_TICKETS_USER_ID"),
+            os.environ.get("TRANSPARENCY_USER_ID"),
+        )
+        if v
+    }
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    row = rows[0]
+    if row["user_id"] not in target_ids or row["status"] != "won":
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+
+    img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(row["ticket"], row["ticket_id"]), watermark=False)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
 
 
 class TicketAnalysisResponse(BaseModel):
