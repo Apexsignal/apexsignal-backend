@@ -6374,6 +6374,21 @@ def approve_daily_ticket(req: ApproveDailyTicketRequest, request: Request):
     return {"approved_date": today_prague, "ticket_id": req.ticket_id}
 
 
+@app.post("/admin/_debug-mark-sent-external")
+def _debug_mark_sent_external(sport: str, external_ticket_id: int, request: Request):
+    """DOČASNÉ — appka tímhle ověří appku prodejce pro tenis bez skutečného
+    odeslání na Telegram, appka to po testu zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    db.set_setting(
+        f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}",
+        json.dumps({"date": today_prague, "external_ticket_id": external_ticket_id}),
+    )
+    return {"marked": True}
+
+
 @app.post("/admin/client-tickets-send")
 def client_tickets_send(request: Request):
     """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle
