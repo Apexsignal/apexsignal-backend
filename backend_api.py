@@ -4776,14 +4776,18 @@ def run_daily_tickets(request: Request):
         # střední −37 % ROI na 30denním vzorku) neodpovídala kvalitativní
         # laťce, co appka drží u kratky. Appka teď posílá výhradně kratky.
         #
-        # Okno je 2 dny (dnešek/zítřek), NE 1 — appka tak nejdřív zkusí
-        # sestavit tiket na 70 % z obou dní najednou, a teprve když ani tak
-        # 70 % nenajde, spadne v rámci TicketGenerator.generate() na 65% dno
-        # (viz FALLBACK_THRESHOLDS). Při úzkém 1denním okně appka dřív
-        # spadla na 65 % hned, i když by 70 % bylo k mání zítra — appka to
-        # bez rozšíření okna nikdy nezjistila. max_widen_days zůstává 0 —
-        # 2 dny je appce nastavený strop, dál appka couvat nesmí (odběratel
-        # má dostat tip na dnešek/zítřek, ne na zápas za týden).
+        # Okno rozšířeno z 2 na 4 dny (2026-08-27, uživatelovo přání) —
+        # appka narazila na den, kdy 2denní okno dalo jen kandidáty nalepené
+        # na MODEL_HIGH_CONFIDENCE_CAP (75 %) a/nebo ze stejné ligy/dne
+        # (korelační sleva), takže žádná kombinace nedala kladný kombinovaný
+        # edge (viz /admin/candidate-pool-detail diagnostika). Širší okno
+        # appce dá víc různorodých zápasů (jiné ligy, jiné dny), což snižuje
+        # šanci na tenhle kolaps, aniž by appka slevovala ze samotné edge
+        # kontroly. Appka schválně NEsahá na MAX_MODEL_MARKET_GAP ani na
+        # MIN_ODDS_HARD — ty appka nechává, appka je přidala po reálných
+        # problémech (viz probability_model.py). max_widen_days zůstává 0 —
+        # 4 dny je appce nastavený strop, dál appka couvat nesmí (odběratel
+        # má dostat tip na příštích pár dní, ne na zápas za týden).
         today_prague = datetime.now(ZoneInfo("Europe/Prague"))
         today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
 
@@ -4799,7 +4803,7 @@ def run_daily_tickets(request: Request):
             for candidate_label, risk_level in candidates:
                 try:
                     ticket = _generate_one_ticket_for_cron(
-                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 2,
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
                         max_widen_days=0,
                     )
                 except Exception as e:
