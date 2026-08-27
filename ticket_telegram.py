@@ -177,6 +177,117 @@ def render_ticket(ticket: dict, watermark: bool = True) -> Image.Image:
     return img
 
 
+EXTERNAL_SPORT_LABELS = {"tenis": "TENISOVÝ TIKET"}
+EXTERNAL_SPORT_CAPTION_LABELS = {"tenis": "🎾 Tenisový tiket"}
+
+
+def render_external_ticket(data: dict, watermark: bool = True) -> Image.Image:
+    """Vyrenderuje tiket stejným vizuálem jako fotbal (viz render_ticket
+    výš), ale pro tikety ze SESTERSKÝCH appek (zatím jen courtedge/tenis,
+    viz /admin/external-tickets/ingest v backend_api.py) — appka pro tenhle
+    typ tiketu nemá vlastní model_probability na noze, takže vpravo
+    nekreslí procenta, jen text výběru a kurz. legs mají tvar
+    {match, tourney, kickoff, selection, odds}."""
+    f_title = ImageFont.truetype(FONT_BOLD, 34)
+    f_h2 = ImageFont.truetype(FONT_BOLD, 22)
+    f_body = ImageFont.truetype(FONT_REGULAR, 20)
+    f_small = ImageFont.truetype(FONT_REGULAR, 16)
+    f_odds = ImageFont.truetype(FONT_BOLD, 22)
+
+    legs = data.get("legs", [])
+    row_h = 92
+    header_h = 120
+    footer_h = 90
+    height = header_h + len(legs) * row_h + footer_h
+
+    img = Image.new("RGB", (WIDTH, height), BG)
+    draw = ImageDraw.Draw(img)
+
+    label = EXTERNAL_SPORT_LABELS.get(data.get("sport"), "TIKET")
+    draw.text((PADDING, PADDING), "ApexSignal", font=f_title, fill=ACCENT)
+    draw.text((PADDING, PADDING + 44), label, font=f_h2, fill=TEXT)
+
+    total_odds = data.get("total_odds", 0)
+    draw.text(
+        (WIDTH - PADDING, PADDING + 10), f"kurz {total_odds:.2f}",
+        font=f_title, fill=GREEN, anchor="ra",
+    )
+
+    y = header_h
+    draw.line([(PADDING, y - 10), (WIDTH - PADDING, y - 10)], fill=LINE, width=2)
+
+    for i, leg in enumerate(legs):
+        row_top = y + i * row_h
+        card_rect = [PADDING, row_top + 6, WIDTH - PADDING, row_top + row_h - 6]
+        draw.rounded_rectangle(card_rect, radius=12, fill=CARD_BG)
+
+        match_lines = wrap(draw, leg.get("match", ""), f_body, WIDTH - 2 * PADDING - 180)
+        ty = row_top + 14
+        for line in match_lines[:2]:
+            draw.text((PADDING + 20, ty), line, font=f_body, fill=TEXT)
+            ty += 26
+
+        sub = leg.get("tourney") or ""
+        if leg.get("kickoff"):
+            sub = f"{sub} · {leg['kickoff']}".strip(" ·")
+        draw.text((PADDING + 20, row_top + row_h - 32), sub, font=f_small, fill=SUBTEXT)
+
+        leg_odds = leg.get("odds")
+        if leg_odds is not None:
+            draw.text(
+                (WIDTH - PADDING - 20, row_top + 14), f"{leg_odds:.2f}",
+                font=f_odds, fill=GREEN, anchor="ra",
+            )
+        draw.text(
+            (WIDTH - PADDING - 20, row_top + 44), leg.get("selection", ""),
+            font=f_small, fill=SUBTEXT, anchor="ra",
+        )
+
+    footer_y = height - footer_h + 20
+    draw.line([(PADDING, footer_y - 14), (WIDTH - PADDING, footer_y - 14)], fill=LINE, width=2)
+    draw.text(
+        (PADDING, footer_y), f"{len(legs)} výběrů · vygenerováno {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        font=f_body, fill=TEXT,
+    )
+
+    if watermark:
+        watermark_text = f"ApexSignal · #{data.get('external_ticket_id')}" if data.get("external_ticket_id") else "ApexSignal"
+        img = add_watermark(img, watermark_text)
+
+    return img
+
+
+def build_external_ticket_caption(data: dict) -> str:
+    label = EXTERNAL_SPORT_CAPTION_LABELS.get(data.get("sport"), "Tiket")
+    total_odds = data.get("total_odds", 0)
+    return (
+        f"{label} · kurz {total_odds:.2f}\n\n"
+        "Appka jen doporučuje — sázku si klikáš sám, kde chceš (Tipsport, Fortuna...).\n\n"
+        "Není to jistota. 18+, sázej jen to, co si můžeš dovolit prohrát."
+    )
+
+
+def send_external_ticket_to_telegram(data: dict, bot_token: str = None, chat_id: str = None, watermark: bool = True) -> dict:
+    token = bot_token or os.environ["TELEGRAM_BOT_TOKEN"]
+    chat = chat_id or os.environ["TELEGRAM_CHAT_ID"]
+
+    img = render_external_ticket(data, watermark=watermark)
+    import io
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=92)
+    buf.seek(0)
+
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    resp = requests.post(
+        url,
+        data={"chat_id": chat, "caption": build_external_ticket_caption(data)},
+        files={"photo": ("ticket.jpg", buf, "image/jpeg")},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def add_watermark(base_img: Image.Image, text: str) -> Image.Image:
     """Jemný opakující se diagonální vodoznak — nezabrání sdílení, ale
     kdo obrázek přeposílá dál, je z něj dohledatelný."""

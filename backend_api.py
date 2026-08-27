@@ -6475,6 +6475,7 @@ EXTERNAL_TICKET_SENT_PREFIX = "external_ticket_sent_"
 class ExternalTicketLeg(BaseModel):
     match: str
     tourney: Optional[str] = None
+    kickoff: Optional[str] = None
     selection: str
     odds: Optional[float] = None
 
@@ -6571,21 +6572,8 @@ def send_external_ticket(sport: str, request: Request):
     if sent_record and sent_record.get("date") == today_prague and sent_record.get("external_ticket_id") == data.get("external_ticket_id"):
         raise HTTPException(status_code=409, detail="Tenhle tiket appka dnes už jednou odeslala.")
 
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not bot_token:
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
         raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN není nastavené")
-
-    SPORT_LABELS = {"tenis": "🎾 Tenisový tiket"}
-    sport_label = SPORT_LABELS.get(sport, sport)
-    lines = [f"{sport_label} · kurz {data['total_odds']:.2f}", ""]
-    for i, leg in enumerate(data["legs"], 1):
-        tourney = f" ({leg['tourney']})" if leg.get("tourney") else ""
-        odds_txt = f" @ {leg['odds']:.2f}" if leg.get("odds") is not None else ""
-        lines.append(f"{i}) {leg['match']}{tourney}\n   {leg['selection']}{odds_txt}")
-    lines.append("")
-    lines.append("Appka jen doporučuje — sázku si klikáš sám, kde chceš (Tipsport, Fortuna...).")
-    lines.append("Není to jistota. 18+, sázej jen to, co si můžeš dovolit prohrát.")
-    text = "\n".join(lines)
 
     recipients = db.get_paid_telegram_subscribers()
     seller_recipients = db.get_active_sellers_with_telegram()
@@ -6593,12 +6581,20 @@ def send_external_ticket(sport: str, request: Request):
     results = []
     for recipient in recipients:
         chat_id = recipient["chat_id"]
-        resp = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
-        results.append({"chat_id": chat_id, "status": "sent" if resp.ok else f"error: {resp.text}"})
+        try:
+            ticket_telegram.send_external_ticket_to_telegram(data, chat_id=chat_id, watermark=True)
+            results.append({"chat_id": chat_id, "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "status": f"error: {e}"})
     for seller in seller_recipients:
         chat_id = seller["telegram_chat_id"]
-        resp = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
-        results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent" if resp.ok else f"error: {resp.text}"})
+        try:
+            # watermark=False — stejné pravidlo jako u fotbalu, prodejce
+            # tenhle obrázek přeposílá dál pod svým vlastním jménem.
+            ticket_telegram.send_external_ticket_to_telegram(data, chat_id=chat_id, watermark=False)
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": f"error: {e}"})
 
     db.set_setting(
         f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}",
@@ -7124,6 +7120,107 @@ def showcase_ticket_image(ticket_id: int):
         raise HTTPException(status_code=404, detail="Tiket nenalezen")
 
     img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(row["ticket"], row["ticket_id"]), watermark=False)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
+def _require_active_seller(user_id: int) -> dict:
+    seller = db.get_seller_by_user_id_any(user_id)
+    if not seller or not seller.get("active"):
+        raise HTTPException(status_code=403, detail="Tenhle účet není aktivní jako schválený prodejce.")
+    return seller
+
+
+@app.get("/seller/today-tickets")
+def seller_today_tickets(user_id: int = Depends(get_current_user_id)):
+    """Seznam DNES už odeslaných tiketů (napříč sporty), co si prodejce
+    může stáhnout bez vodoznaku a poslat dál klientům — schválně jen
+    JIŽ ODESLANÉ (viz already_sent níže), appka nechce prodejci ukázat
+    tip dřív, než appka sama schválí a rozešle na /admin-prodejci."""
+    _require_active_seller(user_id)
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    tickets = []
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if target_user_id_raw:
+        raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+        sent_record = json.loads(raw_sent) if raw_sent else None
+        if sent_record and sent_record.get("date") == today_prague:
+            picks = _todays_client_picks(int(target_user_id_raw))
+            pick = next((p for p in picks if p["ticket_id"] == sent_record.get("ticket_id")), None)
+            if pick is not None:
+                tickets.append({
+                    "sport": "fotbal",
+                    "label": "Fotbal",
+                    "total_odds": pick["ticket"].total_odds,
+                    "image_url": f"/seller/today-ticket-image?ticket_id={pick['ticket_id']}",
+                })
+
+    for sport, label in (("tenis", "Tenis"),):
+        raw = db.get_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{sport}")
+        if not raw:
+            continue
+        data = json.loads(raw)
+        if data.get("date") != today_prague:
+            continue
+        raw_sent = db.get_setting(f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}")
+        sent_record = json.loads(raw_sent) if raw_sent else None
+        if not (sent_record and sent_record.get("date") == today_prague and sent_record.get("external_ticket_id") == data.get("external_ticket_id")):
+            continue
+        tickets.append({
+            "sport": sport,
+            "label": label,
+            "total_odds": data["total_odds"],
+            "image_url": f"/seller/external-ticket-image?sport={sport}",
+        })
+
+    return {"tickets": tickets}
+
+
+@app.get("/seller/today-ticket-image")
+def seller_today_ticket_image(ticket_id: int, user_id: int = Depends(get_current_user_id)):
+    _require_active_seller(user_id)
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    picks = _todays_client_picks(int(target_user_id_raw))
+    pick = next((p for p in picks if p["ticket_id"] == ticket_id), None)
+    if pick is None:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    if not (sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == ticket_id):
+        raise HTTPException(status_code=404, detail="Tenhle tiket ještě nebyl odeslaný.")
+
+    img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), watermark=False)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
+@app.get("/seller/external-ticket-image")
+def seller_external_ticket_image(sport: str, user_id: int = Depends(get_current_user_id)):
+    _require_active_seller(user_id)
+
+    raw = db.get_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{sport}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    data = json.loads(raw)
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    if data.get("date") != today_prague:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+
+    raw_sent = db.get_setting(f"{EXTERNAL_TICKET_SENT_PREFIX}{sport}")
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    if not (sent_record and sent_record.get("date") == today_prague and sent_record.get("external_ticket_id") == data.get("external_ticket_id")):
+        raise HTTPException(status_code=404, detail="Tenhle tiket ještě nebyl odeslaný.")
+
+    img = ticket_telegram.render_external_ticket(data, watermark=False)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     return Response(content=buf.getvalue(), media_type="image/jpeg")
