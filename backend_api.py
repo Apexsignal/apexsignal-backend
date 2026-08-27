@@ -2162,6 +2162,46 @@ def admin_create_seller_payment_links(request: Request):
     return {"links": links}
 
 
+@app.get("/admin/sellers/check-payment-links")
+def admin_check_seller_payment_links(request: Request):
+    """Diagnostika appka appce se přímo zeptá Stripe, jakou cenu má
+    KAŽDÝ uložený prodejecký odkaz reálně nastavenou — appka appce to
+    potřebuje po hlášení appky (uživatel), že klik na 1500 Kč appce
+    otevřel platbu na 4000 Kč. Read-only, nic nemění."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    raw_links = db.get_setting(SELLER_PAYMENT_LINKS_SETTING_KEY)
+    stored_links = json.loads(raw_links) if raw_links else {}
+
+    results = []
+    for tier_kc, url in stored_links.items():
+        link_id = url.rstrip("/").split("/")[-1]
+        entry = {"expected_tier_kc": tier_kc, "url": url, "payment_link_id": link_id}
+        try:
+            pl = stripe.PaymentLink.retrieve(link_id, expand=["line_items.data.price"])
+            items = pl["line_items"]["data"]
+            entry["active"] = pl.get("active")
+            entry["line_items"] = [
+                {
+                    "price_id": it["price"]["id"],
+                    "unit_amount_kc": it["price"]["unit_amount"] / 100 if it["price"].get("unit_amount") else None,
+                    "currency": it["price"]["currency"],
+                    "recurring": it["price"].get("recurring"),
+                    "product": it["price"].get("product"),
+                }
+                for it in items
+            ]
+        except Exception as e:
+            entry["error"] = str(e)
+        results.append(entry)
+
+    return {"links": results}
+
+
 class CreateSellerRequest(BaseModel):
     email: str
     display_name: str
