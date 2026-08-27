@@ -6437,6 +6437,148 @@ def client_tickets_send(request: Request):
     }
 
 
+# ------------------------------------------------------------
+# Externí tikety (2026-08-27) — appka sem přijímá denní tiket ze SESTERSKÉ
+# appky (zatím courtedge-backend, tenis), appka ho jen uloží a ukáže ke
+# schválení na /admin-prodejci vedle appčina vlastního fotbalového tiketu.
+# Appka schválně nemá pro tohle vlastní DB tabulku — je to jeden tiket
+# denně na sport, appka si vystačí s app_settings (stejný vzor appka už
+# má u DAILY_TICKET_APPROVAL_SETTING_KEY výš). Engine appka NECHÁVÁ
+# oddělený (courtedge si generuje tenisové tikety sám, svým vlastním Elo
+# modelem) — appka spojuje jen DORUČENÍ: stejný seznam příjemců
+# (get_paid_telegram_subscribers + get_active_sellers_with_telegram),
+# stejné pravidlo "appka nepošle nic bez ručního schválení".
+# ------------------------------------------------------------
+EXTERNAL_TICKET_SETTING_PREFIX = "external_ticket_"
+EXTERNAL_TICKET_APPROVAL_PREFIX = "external_ticket_approved_"
+
+
+class ExternalTicketLeg(BaseModel):
+    match: str
+    tourney: Optional[str] = None
+    selection: str
+    odds: Optional[float] = None
+
+
+class ExternalTicketIngestRequest(BaseModel):
+    sport: str
+    external_ticket_id: int
+    total_odds: float
+    legs: list[ExternalTicketLeg]
+
+
+@app.post("/admin/external-tickets/ingest")
+def external_tickets_ingest(req: ExternalTicketIngestRequest, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    payload = {
+        "date": today_prague,
+        "sport": req.sport,
+        "external_ticket_id": req.external_ticket_id,
+        "total_odds": req.total_odds,
+        "legs": [leg.dict() for leg in req.legs],
+    }
+    db.set_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{req.sport}", json.dumps(payload))
+    return {"stored": True, "sport": req.sport, "external_ticket_id": req.external_ticket_id}
+
+
+@app.get("/admin/external-tickets/preview")
+def external_tickets_preview(sport: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    raw = db.get_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{sport}")
+    if not raw:
+        return {"ticket": None}
+    data = json.loads(raw)
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    if data.get("date") != today_prague:
+        return {"ticket": None}
+    return {"ticket": data}
+
+
+class ApproveExternalTicketRequest(BaseModel):
+    sport: str
+    external_ticket_id: int
+
+
+@app.post("/admin/external-tickets/approve")
+def approve_external_ticket(req: ApproveExternalTicketRequest, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    db.set_setting(
+        f"{EXTERNAL_TICKET_APPROVAL_PREFIX}{req.sport}",
+        json.dumps({"date": today_prague, "external_ticket_id": req.external_ticket_id}),
+    )
+    return {"approved_date": today_prague, "sport": req.sport, "external_ticket_id": req.external_ticket_id}
+
+
+@app.post("/admin/external-tickets/send")
+def send_external_ticket(sport: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    raw = db.get_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{sport}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Dnešní tiket pro tenhle sport appka nemá.")
+    data = json.loads(raw)
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    if data.get("date") != today_prague:
+        raise HTTPException(status_code=404, detail="Dnešní tiket pro tenhle sport appka nemá.")
+
+    raw_approval = db.get_setting(f"{EXTERNAL_TICKET_APPROVAL_PREFIX}{sport}")
+    approval = json.loads(raw_approval) if raw_approval else None
+    if not approval or approval.get("date") != today_prague or approval.get("external_ticket_id") != data.get("external_ticket_id"):
+        raise HTTPException(
+            status_code=403,
+            detail="Dnešní tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
+        )
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN není nastavené")
+
+    SPORT_LABELS = {"tenis": "🎾 Tenisový tiket"}
+    sport_label = SPORT_LABELS.get(sport, sport)
+    lines = [f"{sport_label} · kurz {data['total_odds']:.2f}", ""]
+    for i, leg in enumerate(data["legs"], 1):
+        tourney = f" ({leg['tourney']})" if leg.get("tourney") else ""
+        odds_txt = f" @ {leg['odds']:.2f}" if leg.get("odds") is not None else ""
+        lines.append(f"{i}) {leg['match']}{tourney}\n   {leg['selection']}{odds_txt}")
+    lines.append("")
+    lines.append("Appka jen doporučuje — sázku si klikáš sám, kde chceš (Tipsport, Fortuna...).")
+    lines.append("Není to jistota. 18+, sázej jen to, co si můžeš dovolit prohrát.")
+    text = "\n".join(lines)
+
+    recipients = db.get_paid_telegram_subscribers()
+    seller_recipients = db.get_active_sellers_with_telegram()
+
+    results = []
+    for recipient in recipients:
+        chat_id = recipient["chat_id"]
+        resp = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
+        results.append({"chat_id": chat_id, "status": "sent" if resp.ok else f"error: {resp.text}"})
+    for seller in seller_recipients:
+        chat_id = seller["telegram_chat_id"]
+        resp = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=15)
+        results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent" if resp.ok else f"error: {resp.text}"})
+
+    return {
+        "sport": sport,
+        "recipients": len(recipients),
+        "seller_recipients": len(seller_recipients),
+        "results": results,
+    }
+
+
 class SellerSendTicketRequest(BaseModel):
     seller_code: str
 
