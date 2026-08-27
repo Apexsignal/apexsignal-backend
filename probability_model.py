@@ -1447,6 +1447,30 @@ class TicketGenerator:
                     print(f"[{ticket_key}] Tiket sestaven s prahem {int(threshold*100)}%")
                 break  # Tiket se povedl! Skončit.
 
+        # Poslední záchranná síť pro kratky (2026-08-27, uživatelovo přání):
+        # když appka nesestaví ani jeden platný tiket s ověřeným KOMBINOVANÝM
+        # (Kelly) edge napříč nohama, zkusí appka jednodušší skládání — vezme
+        # jen kandidáty s appky vlastní i tržní pravděpodobností >= 70 % A
+        # s kladným INDIVIDUÁLNÍM edge (žádnou nohu appka pořád nevybírá bez
+        # výhody nad kurzem), a poskládá je do kurzu 1.90-3.0 BEZ kontroly na
+        # kombinovaný Kelly edge (ten appku u vícenohých kombinací nejčastěji
+        # shazoval kvůli korelační slevě/MAX_MODEL_MARKET_GAP capu, i když
+        # každá noha samostatně měla výhodu). Appka pořád raději nic
+        # nevygeneruje, než nabídne nohu bez prokázané výhody — tenhle
+        # fallback je jen míň přísný na SOUČET, ne na jednotlivé nohy.
+        if ticket is None and ticket_key == "kratky":
+            fallback_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.70)
+            if pool_filter is not None:
+                fallback_pool = pool_filter(fallback_pool)
+            fallback_pool = [
+                c for c in fallback_pool
+                if c.probability >= 0.70 and c.edge is not None and c.edge > 0
+            ]
+            if fallback_pool:
+                ticket = self._build_ticket(fallback_pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
+                if ticket is not None:
+                    print(f"[{ticket_key}] Tiket sestaven záchrannou sítí (70%+, kladný individuální edge, bez kombinovaného Kelly)")
+
         if ticket is None:
             counts_str = ", ".join(f"{pct}%={n}" for pct, n in sorted(candidate_counts.items(), reverse=True))
             print(f"[{ticket_key}] Tiket se nepovedl. Kandidáti: {counts_str}")
