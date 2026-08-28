@@ -5592,6 +5592,22 @@ def _todays_client_picks(target_user_id: int) -> list[dict]:
     return [p for p in (_best("kratky"),) if p is not None]
 
 
+def _todays_all_sendable_tickets(target_user_id: int) -> list[dict]:
+    """Na rozdíl od _todays_client_picks (jen NEJLEPŠÍ jeden kratky) appka
+    vrátí VŠECHNY dnešní uložené tikety daného účtu, co jsou ještě
+    poslatelné — appka to potřebuje pro účty s VÍCE tikety denně (viz
+    PERSONAL_TRACKING_USER_ID, 2× kratky + 1× střední)."""
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    rows = [r for r in repo.get_saved_tickets(target_user_id) if _created_at_utc(r) >= today_start_utc]
+    return [r for r in rows if _ticket_still_sendable(r["ticket"])]
+
+
 _YIELD_TEST_RESULTS: dict[str, dict] = {}
 _YIELD_TEST_LOCK = threading.Lock()
 
@@ -6309,29 +6325,75 @@ def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: 
     }
 
 
+DAILY_TICKET_APPROVAL_SETTING_KEY = "daily_ticket_approved"
+DAILY_TICKET_SENT_SETTING_KEY = "daily_ticket_sent"
+
+
+def _todays_agent_candidate_tickets() -> list[dict]:
+    """Sesbírá VŠECHNY dnešní tikety, co appka může nabídnout ke schválení
+    pro agenty/odběratele — appčin vlastní kanál (DAILY_TICKETS_USER_ID,
+    jeden nejlepší kratky) PLUS appky osobní sledovací účet
+    (PERSONAL_TRACKING_USER_ID, 2× kratky + 1× střední), co appka dřív
+    posílala jen appce majiteli soukromě a agenti/odběratelé je vůbec
+    neviděli (uživatelovo přání 2026-08-28 — chce je mít na výběr taky).
+    Duplicity (stejná sada zápasů+tipů z obou zdrojů) appka vynechá."""
+    picks = []
+    seen_signatures = set()
+
+    def _signature(ticket):
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket.selections))
+
+    channel_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if channel_user_id_raw:
+        for r in _todays_client_picks(int(channel_user_id_raw)):
+            sig = _signature(r["ticket"])
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            picks.append({**r, "source": "kanál"})
+
+    tracking_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
+    if tracking_user_id_raw:
+        for r in _todays_all_sendable_tickets(int(tracking_user_id_raw)):
+            sig = _signature(r["ticket"])
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            picks.append({**r, "source": "osobní sledovací"})
+
+    return picks
+
+
 @app.get("/admin/client-tickets-preview")
 def client_tickets_preview(request: Request):
-    """Ukáže, co by appka DNES poslala odběratelům (bez odeslání) — ke
-    kontrole před /admin/client-tickets-send."""
+    """Ukáže, co by appka DNES mohla poslat odběratelům/agentům (bez
+    odeslání) — ke kontrole před schválením. Může jich být VÍC než jeden
+    (viz _todays_agent_candidate_tickets), každý appka schvaluje a odesílá
+    ZVLÁŠŤ (viz /admin/daily-ticket/approve a /admin/client-tickets-send,
+    obojí teď bere ticket_id)."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if not target_user_id_raw:
-        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
-
-    picks = _todays_client_picks(int(target_user_id_raw))
+    picks = _todays_agent_candidate_tickets()
     subscriber_count = len(db.get_active_telegram_subscribers())
     today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+
     raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
     sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+
     return {
         "subscriber_count": subscriber_count,
         "picks": [
             {
                 "ticket_id": r["ticket_id"],
                 "ticket_type": r["ticket"].ticket_type,
+                "source": r["source"],
                 "total_odds": r["ticket"].total_odds,
                 "combined_probability": r["ticket"].combined_probability,
                 # Výkop appka do náhledu přidala schválně (viz
@@ -6341,17 +6403,12 @@ def client_tickets_preview(request: Request):
                     f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds}) @ {s.kickoff_date} {s.kickoff_time} UTC"
                     for s in r["ticket"].selections
                 ],
-                "already_sent": bool(
-                    sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == r["ticket_id"]
-                ),
+                "already_approved": r["ticket_id"] in approved_ids,
+                "already_sent": r["ticket_id"] in sent_ids,
             }
             for r in picks
         ],
     }
-
-
-DAILY_TICKET_APPROVAL_SETTING_KEY = "daily_ticket_approved"
-DAILY_TICKET_SENT_SETTING_KEY = "daily_ticket_sent"
 
 
 class ApproveDailyTicketRequest(BaseModel):
@@ -6360,46 +6417,54 @@ class ApproveDailyTicketRequest(BaseModel):
 
 @app.post("/admin/daily-ticket/approve")
 def approve_daily_ticket(req: ApproveDailyTicketRequest, request: Request):
-    """Ruční schválení dnešního tiketu — bez tohohle appka /admin/
-    client-tickets-send odmítne poslat (viz kontrola tam). Appka
-    schválení váže na KONKRÉTNÍ ticket_id a na dnešní datum, takže
-    platí jen pro tenhle jeden den a tenhle jeden tiket, ne napořád
-    (uživatel 2026-08-26 chtěl vidět a schvalovat KAŽDÝ den zvlášť)."""
+    """Ruční schválení JEDNOHO konkrétního dnešního tiketu — appka ho
+    PŘIDÁ do seznamu dnes schválených (může jich být víc, viz
+    _todays_agent_candidate_tickets), ne že by přepsala předchozí
+    schválení. Bez tohohle appka /admin/client-tickets-send odmítne
+    tenhle konkrétní tiket poslat. Váže se na dnešní datum, takže platí
+    jen pro tenhle den (uživatel 2026-08-26 chtěl schvalovat KAŽDÝ den
+    zvlášť)."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
-    db.set_setting(DAILY_TICKET_APPROVAL_SETTING_KEY, json.dumps({"date": today_prague, "ticket_id": req.ticket_id}))
-    return {"approved_date": today_prague, "ticket_id": req.ticket_id}
-
-
-@app.post("/admin/client-tickets-send")
-def client_tickets_send(request: Request):
-    """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle
-    dnešní výběr všem aktivním odběratelům z Telegram webhooku. appka
-    tenhle krok odmítne provést bez předchozího /admin/daily-ticket/
-    approve na dnešní datum a stejný ticket_id — appka to VYNUCUJE
-    (uživatel 2026-08-26 výslovně chtěl vidět každý tiket dřív, než se
-    pošle, ne jen mít tlačítko, co by šlo obejít)."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if not target_user_id_raw:
-        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
-
-    picks = _todays_client_picks(int(target_user_id_raw))
 
     today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
     raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
     approval = json.loads(raw_approval) if raw_approval else None
-    approved_ticket_ids = {p["ticket_id"] for p in picks}
-    if not approval or approval.get("date") != today_prague or approval.get("ticket_id") not in approved_ticket_ids:
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+    approved_ids.add(req.ticket_id)
+    db.set_setting(DAILY_TICKET_APPROVAL_SETTING_KEY, json.dumps({"date": today_prague, "ticket_ids": sorted(approved_ids)}))
+    return {"approved_date": today_prague, "ticket_id": req.ticket_id}
+
+
+@app.post("/admin/client-tickets-send")
+def client_tickets_send(ticket_id: int, request: Request):
+    """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle JEDEN
+    konkrétní schválený tiket všem aktivním odběratelům + prodejcům.
+    appka tenhle krok odmítne provést bez předchozího /admin/daily-ticket/
+    approve na dnešní datum a stejný ticket_id — appka to VYNUCUJE
+    (uživatel 2026-08-26 výslovně chtěl vidět každý tiket dřív, než se
+    pošle, ne jen mít tlačítko, co by šlo obejít). Může se to zavolat víckrát
+    denně pro RŮZNÉ ticket_id (kanál i appky osobní sledovací účet, viz
+    _todays_agent_candidate_tickets) — uživatel 2026-08-28 chtěl mít na
+    výběr víc než jeden tiket denně, ne jen ten jeden appčin kanálový."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    picks = _todays_agent_candidate_tickets()
+    pick = next((p for p in picks if p["ticket_id"] == ticket_id), None)
+    if pick is None:
+        raise HTTPException(status_code=404, detail="Tenhle tiket appka dnes nemá k odeslání.")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+    if ticket_id not in approved_ids:
         raise HTTPException(
             status_code=403,
-            detail="Dnešní tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
+            detail="Tenhle tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
         )
 
     # Appka bez tohohle nemá žádnou pojistku proti dvojímu odeslání — druhé
@@ -6408,7 +6473,8 @@ def client_tickets_send(request: Request):
     # poslalo tiket stejným lidem znovu.
     raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
     sent_record = json.loads(raw_sent) if raw_sent else None
-    if sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == approval.get("ticket_id"):
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if ticket_id in sent_ids:
         raise HTTPException(status_code=409, detail="Tenhle tiket appka dnes už jednou odeslala.")
 
     # Rozesílka se ptá VÝHRADNĚ na platící (get_paid_telegram_subscribers
@@ -6424,31 +6490,30 @@ def client_tickets_send(request: Request):
     results = []
     for recipient in recipients:
         chat_id = recipient["chat_id"]
-        for r in picks:
-            try:
-                ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id)
-                results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": "sent"})
-            except Exception as e:
-                results.append({"chat_id": chat_id, "ticket_id": r["ticket_id"], "status": f"error: {e}"})
+        try:
+            ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), chat_id=chat_id)
+            results.append({"chat_id": chat_id, "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "status": f"error: {e}"})
 
     for seller in seller_recipients:
         chat_id = seller["telegram_chat_id"]
-        for r in picks:
-            try:
-                # watermark=False — prodejce tenhle obrázek přeposílá dál pod
-                # svým vlastním jménem, appčin vodoznak by tam prozrazoval
-                # appku jako zdroj (uživatelovo přání 2026-08-26).
-                ticket_telegram.send_ticket_to_telegram(
-                    _ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id, watermark=False,
-                )
-                results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": "sent"})
-            except Exception as e:
-                results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "ticket_id": r["ticket_id"], "status": f"error: {e}"})
+        try:
+            # watermark=False — prodejce tenhle obrázek přeposílá dál pod
+            # svým vlastním jménem, appčin vodoznak by tam prozrazoval
+            # appku jako zdroj (uživatelovo přání 2026-08-26).
+            ticket_telegram.send_ticket_to_telegram(
+                _ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), chat_id=chat_id, watermark=False,
+            )
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": f"error: {e}"})
 
-    db.set_setting(DAILY_TICKET_SENT_SETTING_KEY, json.dumps({"date": today_prague, "ticket_id": approval.get("ticket_id")}))
+    sent_ids.add(ticket_id)
+    db.set_setting(DAILY_TICKET_SENT_SETTING_KEY, json.dumps({"date": today_prague, "ticket_ids": sorted(sent_ids)}))
 
     return {
-        "picks_sent": [r["ticket_id"] for r in picks],
+        "ticket_id": ticket_id,
         "recipients": len(recipients),
         "seller_recipients": len(seller_recipients),
         "results": results,
@@ -7143,20 +7208,19 @@ def seller_today_tickets(user_id: int = Depends(get_current_user_id)):
     today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
     tickets = []
 
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if target_user_id_raw:
-        raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
-        sent_record = json.loads(raw_sent) if raw_sent else None
-        if sent_record and sent_record.get("date") == today_prague:
-            picks = _todays_client_picks(int(target_user_id_raw))
-            pick = next((p for p in picks if p["ticket_id"] == sent_record.get("ticket_id")), None)
-            if pick is not None:
-                tickets.append({
-                    "sport": "fotbal",
-                    "label": "Fotbal",
-                    "total_odds": pick["ticket"].total_odds,
-                    "image_url": f"/seller/today-ticket-image?ticket_id={pick['ticket_id']}",
-                })
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if sent_ids:
+        for pick in _todays_agent_candidate_tickets():
+            if pick["ticket_id"] not in sent_ids:
+                continue
+            tickets.append({
+                "sport": "fotbal",
+                "label": f"Fotbal ({pick['source']})",
+                "total_odds": pick["ticket"].total_odds,
+                "image_url": f"/seller/today-ticket-image?ticket_id={pick['ticket_id']}",
+            })
 
     for sport, label in (("tenis", "Tenis"),):
         raw = db.get_setting(f"{EXTERNAL_TICKET_SETTING_PREFIX}{sport}")
@@ -7183,10 +7247,7 @@ def seller_today_tickets(user_id: int = Depends(get_current_user_id)):
 def seller_today_ticket_image(ticket_id: int, user_id: int = Depends(get_current_user_id)):
     _require_active_seller(user_id)
 
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    if not target_user_id_raw:
-        raise HTTPException(status_code=404, detail="Tiket nenalezen")
-    picks = _todays_client_picks(int(target_user_id_raw))
+    picks = _todays_agent_candidate_tickets()
     pick = next((p for p in picks if p["ticket_id"] == ticket_id), None)
     if pick is None:
         raise HTTPException(status_code=404, detail="Tiket nenalezen")
@@ -7194,7 +7255,8 @@ def seller_today_ticket_image(ticket_id: int, user_id: int = Depends(get_current
     today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
     raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
     sent_record = json.loads(raw_sent) if raw_sent else None
-    if not (sent_record and sent_record.get("date") == today_prague and sent_record.get("ticket_id") == ticket_id):
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if ticket_id not in sent_ids:
         raise HTTPException(status_code=404, detail="Tenhle tiket ještě nebyl odeslaný.")
 
     img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), watermark=False)
