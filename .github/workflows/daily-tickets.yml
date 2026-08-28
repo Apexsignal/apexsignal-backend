@@ -55,18 +55,30 @@ jobs:
         # (uživatel 2026-08-27 nahlásil zprávu bez existujícího tiketu) —
         # teď appka nejdřív ověří přes /admin/client-tickets-preview, jestli
         # tam fakt něco je, a pošle jinou zprávu, když appka dnes nic nemá.
+        #
+        # 2026-08-28 — appka doplnila kontrolu already_sent: cron může
+        # doběhnout ve stejný den, kdy byl tiket už dřív ručně schválený a
+        # odeslaný (např. ranní ruční test), a bez týhle kontroly appka
+        # posílala zavádějící "čeká na schválení" i na už vyřízený tiket.
         run: |
-          picks=$(curl -sf https://apexsignal-backend.onrender.com/admin/client-tickets-preview \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" | grep -o '"ticket_id"' | wc -l)
+          preview=$(curl -sf https://apexsignal-backend.onrender.com/admin/client-tickets-preview \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}")
+          picks=$(echo "$preview" | jq '[.picks[] | select(.already_sent != true)] | length')
           if [ "$picks" -gt 0 ]; then
             msg="📋 Dnešní tiket je vygenerovaný a čeká na schválení. Zkontroluj a odešli na apexsignal.cz/admin-prodejci"
-          else
+            curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+              -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"$msg\"}"
+          elif [ "$(echo "$preview" | jq '.picks | length')" -eq 0 ]; then
             msg="⚠️ Dnešní tiket se nepodařilo vygenerovat (nenašel se kandidát nad práh jistoty) — dnes appka nemá co poslat."
+            curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+              -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"$msg\"}"
           fi
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"message\": \"$msg\"}"
+          # else: appka dnešní tiket už má schválený a odeslaný — appka nic
+          # dalšího neposílá, ať zbytečně neopakuje starou zprávu.
 
       # Rozesílka klientům/prodejcům je od 2026-08-26 na uživatelovo výslovné
       # přání RUČNÍ — appka nejdřív ukáže dnešní tiket na /admin-prodejci,
