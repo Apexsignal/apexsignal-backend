@@ -6415,6 +6415,23 @@ class ApproveDailyTicketRequest(BaseModel):
     ticket_id: int
 
 
+@app.post("/admin/_debug-migrate-sent")
+def _debug_migrate_sent(request: Request):
+    """DOČASNÉ — appka převede starý formát daily_ticket_sent
+    ({"ticket_id": X}) na nový ({"ticket_ids": [X]}), ať appka nezapomene,
+    že tiket už dnes reálně odeslala, a nepošle ho podruhé. appka to po
+    použití zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    if sent_record and "ticket_id" in sent_record and "ticket_ids" not in sent_record:
+        db.set_setting(DAILY_TICKET_SENT_SETTING_KEY, json.dumps({"date": sent_record["date"], "ticket_ids": [sent_record["ticket_id"]]}))
+        return {"migrated": True, "old": sent_record}
+    return {"migrated": False, "current": sent_record}
+
+
 @app.post("/admin/daily-ticket/approve")
 def approve_daily_ticket(req: ApproveDailyTicketRequest, request: Request):
     """Ruční schválení JEDNOHO konkrétního dnešního tiketu — appka ho
