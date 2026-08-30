@@ -6309,9 +6309,15 @@ def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: 
         "count": len(pool),
         "candidates": [
             {
+                "match_id": c.match_id,
                 "match": f"{c.home_team} - {c.away_team}",
+                "home_team": c.home_team,
+                "away_team": c.away_team,
                 "league": c.league,
+                "country": c.country,
                 "kickoff": f"{c.kickoff_date} {c.kickoff_time}",
+                "kickoff_date": c.kickoff_date,
+                "kickoff_time": c.kickoff_time,
                 "market": c.market_type.value,
                 "selection": c.selection,
                 "probability_pct": round(c.probability * 100, 1),
