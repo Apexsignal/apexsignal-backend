@@ -1962,7 +1962,9 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     144,  # Jupiler Pro League
     # Turecko
     203,  # Süper Lig
-    204,  # 1. Lig
+    # 204 (1. Lig, 2. turecká liga) VYŘAZENO 2026-08-31 — uživatel živě
+    # potvrdil, že appka nabídla zápas (Sarıyer – Pendikspor), co na
+    # Tipsportu vůbec není. Süper Lig zůstává, tam problém nenahlásil.
     # Skotsko
     179,  # Scottish Premiership
     # Švýcarsko
