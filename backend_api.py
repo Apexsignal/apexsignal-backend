@@ -6231,6 +6231,29 @@ def odds_coverage_sample(request: Request, sample_size: int = 15):
     }
 
 
+@app.get("/admin/_debug-api-football-status")
+def _debug_api_football_status(request: Request):
+    """DOČASNÉ — zeptá se přímo API-Football na /status (kvóta, plán,
+    počet dnešních requestů), ať vidíme přesný důvod suspendace/limitu,
+    ne jen holé RuntimeError."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    api_key = os.environ.get("APISPORTS_KEY")
+    if not api_key:
+        return {"ok": False, "error": "APISPORTS_KEY není nastavené"}
+    resp = requests.get(
+        "https://v3.football.api-sports.io/status",
+        headers={"x-apisports-key": api_key},
+        timeout=10,
+    )
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"raw_text": resp.text[:500]}
+    return {"http_status": resp.status_code, "body": body}
+
+
 @app.get("/admin/candidate-pool-preview")
 def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
