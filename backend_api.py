@@ -6284,6 +6284,22 @@ def candidate_pool_preview(request: Request, time_frame_days: int = 2):
     }
 
 
+@app.get("/admin/_debug-raw-fetch")
+def _debug_raw_fetch(request: Request, time_frame_days: int = 2):
+    """DOČASNÉ — appka zavolá data_provider PŘÍMO, bez _fetch_candidate_matches
+    polykání výjimek, ať appka vidí skutečnou chybovou zprávu (typicky
+    vyčerpaná denní kvóta API-Football)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    try:
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        raw = provider.get_upcoming_matches(Sport.FOOTBALL, time_frame_days)
+        return {"ok": True, "count": len(raw)}
+    except Exception as e:
+        return {"ok": False, "error_type": type(e).__name__, "error": str(e)}
+
+
 @app.get("/admin/candidate-pool-detail")
 def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: float = 0.65):
     """Appka na uživatelovo přání ("chci je vidět") k /admin/candidate-pool-preview
