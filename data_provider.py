@@ -2354,14 +2354,24 @@ class APIFootballProvider(SportsDataProvider):
             fixtures.extend(day_fixtures[:remaining])
             time.sleep(0.3)
 
-        # Ulož do obou cache — in-memory pro tuto session, DB pro příští restart
-        self._cache.set(cache_key, fixtures)
-        try:
-            import db as _db
-            _db.cache_set(cache_key, fixtures, ttl_seconds=30 * 60)  # 30 minut — zápasy průběžně začínají
-            print(f"[cache] Zápasy uloženy do DB cache ({len(fixtures)} zápasů, TTL 4h)")
-        except Exception as e:
-            print(f"[cache] Uložení do DB cache selhalo: {e}")
+        # Ulož do obou cache — in-memory pro tuto session, DB pro příští restart.
+        # PRÁZDNÝ výsledek appka schválně NEUKLÁDÁ (2026-08-31) — appka zjistila,
+        # že jeden transientní/prázdný výtah z API-Football (výpadek, timeout...)
+        # se takhle nakešoval na 30 minut a appka pak celou tu dobu tvrdila
+        # "0 zápasů" i pro okna, co by fresh dotaz normálně naplnil (ověřeno
+        # živě — 1denní okno uspělo, 2/4/7denní vracela 0 z prázdné cache).
+        # Prázdný výsledek appka příště zkusí znovu, ne že by ho appka
+        # brala jako definitivní "dnes fakt nic není".
+        if fixtures:
+            self._cache.set(cache_key, fixtures)
+            try:
+                import db as _db
+                _db.cache_set(cache_key, fixtures, ttl_seconds=30 * 60)  # 30 minut — zápasy průběžně začínají
+                print(f"[cache] Zápasy uloženy do DB cache ({len(fixtures)} zápasů, TTL 4h)")
+            except Exception as e:
+                print(f"[cache] Uložení do DB cache selhalo: {e}")
+        else:
+            print(f"[cache] Appka nic nenašla ({cache_key}) — appka to schválně NEcachuje, ať to příště zkusí znovu.")
 
         return fixtures
 
