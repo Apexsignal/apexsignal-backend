@@ -4085,18 +4085,6 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
-@app.post("/admin/_debug-delete-ticket")
-def admin_debug_delete_ticket(ticket_id: int, request: Request):
-    """Dočasný endpoint — appka jím smaže konkrétní tiket appčina
-    vlastního účtu (kde appka nemá přihlašovací token), po použití
-    appka tenhle endpoint zase odstraní."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    db.delete_ticket(ticket_id)
-    return {"status": "deleted", "ticket_id": ticket_id}
-
-
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
