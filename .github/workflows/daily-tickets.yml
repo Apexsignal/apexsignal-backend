@@ -30,10 +30,25 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      # 2026-09-02: appce tenhle krok jednou spadl na HTTP timeoutu po 4,5
+      # minutách (Render dočasně přetížený, ne skutečná chyba appky) —
+      # appka to tenkrát musela appce (uživateli) hlásit jako selhání a
+      # čekat na ruční opakování. Teď appka sama zkusí ještě jednou po
+      # 3 minutách, dřív než appka cokoliv appce nahlásí jako selhání.
       - name: Vygenerovat dnešní tikety (kratky/stredni, okno 2 dny na 70%)
         run: |
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/daily-tickets \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+          for pokus in 1 2; do
+            if curl -sf -X POST https://apexsignal-backend.onrender.com/admin/daily-tickets \
+              -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"; then
+              exit 0
+            fi
+            echo "Pokus $pokus selhal."
+            if [ "$pokus" -eq 1 ]; then
+              echo "appka počká 3 minuty a zkusí to znovu..."
+              sleep 180
+            fi
+          done
+          exit 1
 
       - name: Vygenerovat dnesni tikety na test3 (2x kratky, 2x stredni, sazka 1000 Kc)
         run: |
