@@ -6959,6 +6959,27 @@ class AdminSeedShowcaseRequest(BaseModel):
     target_user_id: Optional[int] = None  # výchozí DAILY_TICKETS_USER_ID, appka umožní i jiný cílový účet
     status: str = "won"  # appka defaultně "won" kvůli zpětné kompatibilitě (výkladní skříň ukazuje jen výhry)
     selection_results: Optional[list[str]] = None  # per-výběr výsledek (won/lost/pending), stejné pořadí jako selections
+    confirm_special_account: bool = False  # musí být True, když target_user_id je appčin vlastní účet (viz _special_account_label)
+
+
+def _special_account_label(user_id: int) -> Optional[str]:
+    """Appka takhle pozná, že cílové user_id NENÍ obyčejný testovací
+    účet, ale appčin vlastní provozní účet (např. ten, ze kterého appka
+    bere data pro veřejnou stránku /vysledky) — bez tyhle kontroly appka
+    2026-09-01 omylem zapsala testovací tikety přímo na živý veřejný
+    transparentní účet, protože ho appka zvenku nešlo od obyčejného
+    testovacího účtu vůbec rozeznat."""
+    special_accounts = {
+        "DAILY_TICKETS_USER_ID": "appčin kanálový účet (denní tiket do placeného kanálu)",
+        "TRANSPARENCY_USER_ID": "appčin VEŘEJNÝ transparentní účet (zdroj dat pro apexsignal.cz/vysledky)",
+        "PERSONAL_TRACKING_USER_ID": "appčin osobní sledovací účet",
+        "TEST3_USER_ID": "appčin interní testovací účet (test3)",
+    }
+    for env_name, label in special_accounts.items():
+        raw = os.environ.get(env_name)
+        if raw and raw.strip().isdigit() and int(raw) == user_id:
+            return label
+    return None
 
 
 @app.post("/admin/showcase/seed")
@@ -6978,6 +6999,21 @@ def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
 
     if req.target_user_id is not None:
         target_user_id = req.target_user_id
+        # Appka tuhle kontrolu schválně dělá jen když je target_user_id
+        # zadané VÝSLOVNĚ (ne default) — appčino vlastní zapsání na
+        # DAILY_TICKETS_USER_ID beze změny je běžný, zamýšlený případ
+        # (appčina vlastní výkladní skříň), tam appka varování nechce.
+        label = _special_account_label(target_user_id)
+        if label and not req.confirm_special_account:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"target_user_id={target_user_id} je {label} — ne obyčejný "
+                    "testovací účet. Cokoli sem appka zapíše, se může objevit "
+                    "i navenek (např. veřejně na apexsignal.cz/vysledky). "
+                    "Pokud to fakt chceš, pošli confirm_special_account: true."
+                ),
+            )
     else:
         target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
         if not target_user_id_raw:
