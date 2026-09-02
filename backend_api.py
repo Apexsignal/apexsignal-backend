@@ -2426,6 +2426,31 @@ def admin_sellers_overview(request: Request):
     }
 
 
+@app.get("/admin/channel-subscribers")
+def admin_channel_subscribers(request: Request):
+    """Appka appce (adminovi) ukáže VŠECHNY přímé předplatitele Telegram
+    kanálu (990 Kč/měsíc), seřazené podle toho, komu nejdřív skončí
+    předplatné — dřív appka tohle měla jen pro klienty přivedené přes
+    prodejce (/admin/sellers/overview), pro přímé odběratele appka
+    žádný takový přehled neměla."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    subs = db.list_channel_subscriptions()
+    return {
+        "subscribers": [
+            {
+                "email": s["email"],
+                "status": s["status"],
+                "current_period_end": s["current_period_end"].isoformat() if s["current_period_end"] else None,
+                "created_at": s["created_at"].isoformat() if s["created_at"] else None,
+            }
+            for s in subs
+        ],
+    }
+
+
 class SellerApproveRequest(BaseModel):
     seller_code: str
     approve: bool

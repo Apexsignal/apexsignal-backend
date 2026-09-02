@@ -1597,6 +1597,20 @@ def list_all_seller_client_subscriptions() -> list[dict]:
         return cur.fetchall()
 
 
+def list_channel_subscriptions() -> list[dict]:
+    """Appka appce (adminovi) ukáže VŠECHNY přímé předplatitele appčina
+    Telegram kanálu (990 Kč/měsíc, tabulka subscriptions) seřazené podle
+    toho, komu appka nejdřív skončí předplatné — obdoba
+    list_all_seller_client_subscriptions, jen appka pro tenhle přímý
+    kanál dřív žádný takový přehled neměla vůbec."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT email, status, current_period_end, created_at "
+            "FROM subscriptions ORDER BY current_period_end ASC NULLS LAST"
+        )
+        return cur.fetchall()
+
+
 def get_active_sellers_with_telegram() -> list[dict]:
     """Appka sem sahá při denní rozesílce (viz /admin/client-tickets-send)
     — appka posílá appčin denní tiket i prodejcům, ne jen platícím
