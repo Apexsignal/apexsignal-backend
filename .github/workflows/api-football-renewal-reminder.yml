@@ -1,0 +1,27 @@
+# Připomínka na obnovu API-Football předplatného (Mega plán). Appka na
+# tohle už jednou doplatila výpadkem appky — předplatné vypršelo
+# 2026-08-30 bez auto-renewal, appka mlčky spadla na Free plán a hned
+# narazila na jeho nízký limit. Appka teď každý měsíc 29. pošle
+# připomínku na Telegram, ať uživatel stihne obnovit dřív, než appka
+# zase přijde o přístup.
+#
+# Vyžaduje stejný repozitářový secret ADMIN_TASK_KEY jako ostatní
+# workflows (Settings → Secrets and variables → Actions).
+
+name: Připomínka obnovy API-Football
+
+on:
+  schedule:
+    - cron: "0 8 29 * *"
+  workflow_dispatch: {}
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poslat připomínku na Telegram
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"📅 Připomínka: API-Football (Mega plán) nemá automatickou obnovu. Zkontroluj a obnov předplatné na https://dashboard.api-football.com, ať appka nezůstane bez fotbalových dat jako 30. 8.\"}"
