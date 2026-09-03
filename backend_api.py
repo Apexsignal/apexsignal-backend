@@ -4126,6 +4126,41 @@ def admin_debug_fixtures_by_date(date: str, team_contains: str, request: Request
     return {"count": len(matches), "matches": matches}
 
 
+@app.post("/admin/_debug-fix-copenhagen-leg")
+def admin_debug_fix_copenhagen_leg(request: Request):
+    """Dočasné — appka opraví noze se špatně uloženým match_id (1608001,
+    ve skutečnosti Allerheiligen-Gleisdorf) skutečný výsledek zápasu
+    FC Copenhagen - Sonderjyske z 31.8. (3:1, appka měla tip na výhru
+    domácích, tedy výhra) — napříč VŠEMI účty, kde appka tenhle tiket má
+    zkopírovaný."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    rows = db.fetch_ticket_rows()
+    fixed_tickets = []
+    for row in rows:
+        selections = row.get("selections", [])
+        touched = False
+        for s in selections:
+            if s.get("match_id") == 1608001 and s.get("result") not in ("won", "lost"):
+                db.update_selection_result(s["id"], "won")
+                s["result"] = "won"
+                touched = True
+        if touched:
+            results = [s.get("result") for s in selections]
+            if all(r == "won" for r in results):
+                new_status = "won"
+            elif any(r == "lost" for r in results):
+                new_status = "lost"
+            else:
+                new_status = "pending"
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            fixed_tickets.append({"ticket_id": row["ticket_id"], "new_status": new_status})
+
+    return {"fixed_tickets": fixed_tickets}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
