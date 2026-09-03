@@ -7142,14 +7142,24 @@ ALL_DB_TABLES = [
     "token_transactions", "redeem_codes", "redeem_code_uses",
     "stripe_events", "password_reset_tokens", "email_verification_tokens", "telegram_subscribers",
     "referral_rewards", "user_card_fingerprints",
+    # 2026-09-03 doplněno — appka do exportu dřív VŮBEC nezahrnovala
+    # předplatná, prodejce/agenty ani appčino interní nastavení (kde jsou
+    # mj. schválené/odeslané denní tikety), takže záloha nebyla "všechno",
+    # jak appka slibovala.
+    "subscriptions", "sellers", "seller_client_subscriptions", "seller_earnings",
+    "seller_leads", "app_settings", "telegram_link_codes", "user_events",
 ]
-# api_cache (nacachované odpovědi z the-odds-api/API-Football) a
+# api_cache (nacachované odpovědi z the-odds-api/API-Football),
 # password_reset_tokens/email_verification_tokens (krátkodobé, časově
-# omezené) appka do výchozí zálohy nezahrnuje — nejsou to reálná
-# uživatelská data a jde o jedinou tabulku appky, co bývá dost velká na
-# to, aby export shodil web service na Renderově free 512MB RAM limitu
-# (OOM restart).
-DEFAULT_BACKUP_TABLES = [t for t in ALL_DB_TABLES if t not in ("api_cache", "password_reset_tokens", "email_verification_tokens")]
+# omezené) a telegram_link_codes/user_events (jednorázové/analytické, ne
+# appka trvalá byznysová data) appka do výchozí zálohy nezahrnuje —
+# api_cache je navíc jediná tabulka appky, co bývá dost velká na to, aby
+# export shodil web service na Renderově free 512MB RAM limitu (OOM
+# restart).
+DEFAULT_BACKUP_TABLES = [
+    t for t in ALL_DB_TABLES
+    if t not in ("api_cache", "password_reset_tokens", "email_verification_tokens", "telegram_link_codes", "user_events")
+]
 
 
 @app.get("/admin/db-stats")
