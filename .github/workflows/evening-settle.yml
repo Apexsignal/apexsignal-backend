@@ -1,0 +1,24 @@
+# Ranní cron appka dosettluje pending tikety jen jako svůj poslední krok
+# (viz daily-tickets.yml), ale drtivá většina zápasů se kope až
+# odpoledne/večer — appka na ně tak čekala vždycky až do dalšího rána,
+# i když byly dávno dohrané. Tenhle workflow appka jen dovyhodnotí, nic
+# negeneruje.
+#
+# Vyžaduje stejný repozitářový secret ADMIN_TASK_KEY jako ostatní
+# workflows.
+
+name: Večerní dovyhodnocení tiketů
+
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dosettlovat pending tikety napříč VŠEMI účty appky
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/settle-all-pending \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
