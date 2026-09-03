@@ -4109,6 +4109,22 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
+@app.get("/admin/_debug-fixture-result")
+def admin_debug_fixture_result(match_id: str, request: Request):
+    """Dočasné — appka zjistí, proč appka konkrétní zápas nejde
+    dosettlovat (surové API-Football data bez žádné appčiny interpretace)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    try:
+        raw = provider.get_fixture_result(match_id)
+    except Exception as e:
+        return {"error": str(e)}
+    adapted = data_provider.adapt_fixture_result(raw)
+    return {"raw": raw, "adapted": adapted}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
