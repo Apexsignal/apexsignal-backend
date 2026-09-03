@@ -4052,6 +4052,30 @@ def admin_settle_all_pending(request: Request):
     return {"checked": checked, "updated": updated}
 
 
+class AdminPageAuthRequest(BaseModel):
+    password: str
+
+
+@app.post("/admin/page-auth")
+def admin_page_auth(req: AdminPageAuthRequest):
+    """
+    Appka appce dřív dala X-Admin-Key přímo natvrdo do zdrojáku
+    admin-prodejci.html, aby appka nemusela nic zadávat — uživatel na to
+    upozornil, že to znamená, že KDOKOLI si klíč přečte ve zdrojovém kódu
+    stránky, i beze zadání hesla. Tenhle endpoint appka místo toho ověří
+    heslo appka na appčině serveru — skutečné heslo ANI admin klíč se tak
+    nikde ve statickém kódu appky stránky neobjeví, appka klíč pošle zpět
+    jen tomu, kdo appce pošle správné heslo.
+    """
+    expected_password = os.environ.get("ADMIN_PRODEJCI_PASSWORD")
+    admin_key = os.environ.get("ADMIN_TASK_KEY")
+    if not expected_password or not admin_key:
+        raise HTTPException(status_code=500, detail="ADMIN_PRODEJCI_PASSWORD nebo ADMIN_TASK_KEY není nastavené")
+    if req.password != expected_password:
+        raise HTTPException(status_code=403, detail="Špatné heslo.")
+    return {"admin_key": admin_key}
+
+
 class AdminAlertRequest(BaseModel):
     message: str
 
