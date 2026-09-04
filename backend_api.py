@@ -4109,6 +4109,31 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
+@app.get("/admin/_debug-pinnacle-coverage")
+def admin_debug_pinnacle_coverage(request: Request):
+    """Dočasné — appka appce zjistí, jestli appka aktuálně otevřené
+    zápasy (ještě neodehrané) mají živě nabídku od Pinnacle, přes stejný
+    the-odds-api zdroj, co appka používá při generování."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    try:
+        odds_provider = data_provider.OddsAPIProvider()
+    except RuntimeError as e:
+        return {"error": str(e)}
+    events = odds_provider.get_odds(Sport.FOOTBALL)
+    result = []
+    for e in events:
+        bms = [bm.get("key") for bm in e.get("bookmakers", [])]
+        result.append({
+            "home_team": e.get("home_team"), "away_team": e.get("away_team"),
+            "commence_time": e.get("commence_time"),
+            "has_pinnacle": "pinnacle" in bms,
+            "bookmaker_keys": bms,
+        })
+    return {"count": len(result), "events": result}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
