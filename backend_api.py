@@ -4109,6 +4109,24 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
+@app.get("/admin/_debug-fixtures-by-date")
+def admin_debug_fixtures_by_date(date: str, team_contains: str, request: Request):
+    """Dočasné — appka appce dohledá skutečný zápas podle data a části
+    jména týmu, když appka potřebuje match_id pro tiket sestavený ručně
+    z jiného zdroje (Tipsport apod.)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    day_fixtures = provider._get("/fixtures", {"date": date})
+    matches = [
+        f for f in day_fixtures
+        if team_contains.lower() in f.get("teams", {}).get("home", {}).get("name", "").lower()
+        or team_contains.lower() in f.get("teams", {}).get("away", {}).get("name", "").lower()
+    ]
+    return {"count": len(matches), "matches": matches}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
