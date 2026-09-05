@@ -4109,17 +4109,6 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
-@app.get("/admin/_debug-live-score")
-def admin_debug_live_score(match_id: str, request: Request):
-    """Dočasné — rychlá kontrola živého skóre konkrétního zápasu."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    raw = provider.get_fixture_result(match_id)
-    return raw
-
-
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
