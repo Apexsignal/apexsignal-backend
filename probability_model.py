@@ -1191,7 +1191,7 @@ class MarketEvaluator:
             )
         elif market_type == MarketType.DOUBLE_CHANCE:
             dc_desc = {
-                "1X": f"{match.home_team} nevyhraje", "X2": f"{match.away_team} nevyhraje", "12": "nebude remíza",
+                "1X": f"{match.home_team} neprohraje", "X2": f"{match.away_team} neprohraje", "12": "nebude remíza",
             }.get(selection, selection)
             base = f"Dvojtip {selection} ({dc_desc}) appka podle modelu odhaduje na {model_pct} %."
         elif market_type in (MarketType.HT_OVER_GOALS, MarketType.HT_UNDER_GOALS):
