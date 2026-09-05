@@ -428,11 +428,20 @@ def market_label(code: Optional[str]) -> str:
     return MARKET_LABELS.get(code, code.replace("_", " "))
 
 
-def selection_label(code: Optional[str]) -> str:
+def selection_label(code: Optional[str], home_team: Optional[str] = None, away_team: Optional[str] = None) -> str:
     """'over_1.5' → 'Přes 1,5', 'under_2.5' → 'Pod 2,5', 'home' → 'Domácí'.
+    U dvojtipu (1X/X2) appka appce jméno týmu ukáže rovnou ve stejném
+    tvaru jako appka Tipsport ("Neprohra Hasselt") — uživatel nahlásil, že
+    appčino generické appka "1X (domácí nebo remíza)" appce nedávalo
+    jasně najevo, KTERÝ konkrétní tým se sázky týká. Bez předaných jmen
+    týmů appka spadne na starý generický text.
     Neznámý kód appka vrátí, jak přišel — radši srozumitelné torzo než prázdno."""
     if not code:
         return ""
+    if code == "1X" and home_team:
+        return f"Neprohra {home_team}"
+    if code == "X2" and away_team:
+        return f"Neprohra {away_team}"
     if code in SELECTION_LABELS:
         return SELECTION_LABELS[code]
     for prefix, word in (("over_", "Přes"), ("under_", "Pod")):

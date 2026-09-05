@@ -246,7 +246,7 @@ def _selection_row(sel: dict) -> str:
         result_span = f'<span class="sel-result {result}" role="img" aria-label="{label}" title="{label}">{icon}</span>'
         pick_html = (
             f'<span class="sel-market">{escape(_market_label(sel.get("market_type")))}</span>'
-            f'<span class="sel-choice">{escape(_selection_label(sel.get("selection")))}</span>'
+            f'<span class="sel-choice">{escape(_selection_label(sel.get("selection"), sel.get("home_team"), sel.get("away_team")))}</span>'
         )
         odds_html = _fmt_num(sel.get("odds"))
 

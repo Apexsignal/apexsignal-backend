@@ -152,7 +152,7 @@ def render_ticket(ticket: dict, watermark: bool = True) -> Image.Image:
         # nesrozumitelný text místo "Počet gólů / Pod 2,5". Popisky bere
         # ze stejného zdroje jako transparentní účet (probability_model).
         market_txt = market_label(s.get("market_type"))
-        pick_txt = selection_label(s.get("selection"))
+        pick_txt = selection_label(s.get("selection"), s.get("home_team"), s.get("away_team"))
         if market_txt:
             draw.text(
                 (WIDTH - PADDING - 20, row_top + 38), market_txt,
