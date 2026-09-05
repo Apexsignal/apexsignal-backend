@@ -2495,6 +2495,33 @@ class APIFootballProvider(SportsDataProvider):
             pass
         return data
 
+    def get_h2h_max_margin(self, team1_id: int, team2_id: int, last: int = 6) -> Optional[int]:
+        """
+        Nejvyšší rozdíl gólů v posledních `last` vzájemných zápasech dvou
+        týmů. Přidáno 2026-09-05 — uživatel živě narazil na doporučenou
+        dvojtip sázku (Waldhof Mannheim 1X), co model spočítal na 75 %
+        čistě z formy/xG, bez ohledu na to, že mezi týmy padaly i vysoké
+        výsledky (5:2) — appka tohle používá jako dodatečný varovný
+        signál pro MATCH_WINNER/DOUBLE_CHANCE (viz backend_api.py).
+        """
+        cache_key = f"h2h_margin:{team1_id}-{team2_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            response = self._get("/fixtures/headtohead", {"h2h": f"{team1_id}-{team2_id}", "last": last})
+        except Exception:
+            return None
+        margins = []
+        for fixture in response:
+            goals = fixture.get("goals", {})
+            home_goals, away_goals = goals.get("home"), goals.get("away")
+            if home_goals is not None and away_goals is not None:
+                margins.append(abs(home_goals - away_goals))
+        result = max(margins) if margins else None
+        self._cache.set(cache_key, result)
+        return result
+
     def get_fixture_statistics(self, match_id: str) -> list[dict]:
         """
         Statistiky (mj. počet karet) k jednomu odehranému zápasu — appka

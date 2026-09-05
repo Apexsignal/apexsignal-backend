@@ -1234,6 +1234,44 @@ def _ticket_type_for_risk_level(risk_level: int) -> str:
     return "boost"
 
 
+H2H_BLOWOUT_MARGIN = 3  # rozdíl gólů, od kterého appka vzájemný zápas počítá jako "blowout"
+
+
+def _filter_h2h_volatile_candidates(pool: list[SelectionCandidate]) -> list[SelectionCandidate]:
+    """
+    Vyřadí MATCH_WINNER/DOUBLE_CHANCE kandidáty, jejichž poslední vzájemné
+    zápasy obsahují výrazný "blowout" (rozdíl gólů >= H2H_BLOWOUT_MARGIN) —
+    přidáno 2026-09-05 po živém případu (Waldhof Mannheim 1X, model 75 %,
+    ve skutečnosti prohráli): appka model počítá jen z aktuální formy/xG,
+    ne z toho, jak nevyrovnaně tihle dva konkrétní týmy proti sobě
+    historicky hráli (5:2, 1:3 vedle řady remíz) — takový zápas je
+    nepředvídatelnější, než číslo samo ukazuje. Over góly/BTTS appka
+    schválně nezahrnuje, tam volatilita skóre není na škodu.
+    """
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    volatile_match_ids: dict[int, bool] = {}
+    filtered = []
+    for c in pool:
+        if c.market_type not in (MarketType.MATCH_WINNER, MarketType.DOUBLE_CHANCE):
+            filtered.append(c)
+            continue
+        if c.match_id not in volatile_match_ids:
+            is_volatile = False
+            try:
+                fixture = provider.get_fixture_result(str(c.match_id))
+                teams = fixture.get("teams", {})
+                home_id, away_id = teams.get("home", {}).get("id"), teams.get("away", {}).get("id")
+                if home_id and away_id:
+                    margin = provider.get_h2h_max_margin(home_id, away_id)
+                    is_volatile = margin is not None and margin >= H2H_BLOWOUT_MARGIN
+            except Exception:
+                is_volatile = False  # appka radši propustí kandidáta, než aby kvůli tomu selhalo celé generování
+            volatile_match_ids[c.match_id] = is_volatile
+        if not volatile_match_ids[c.match_id]:
+            filtered.append(c)
+    return filtered
+
+
 def _pool_filter_for_risk(risk_level: int):
     """
     AI kontrola čerstvých zpráv (viz ai_reviewer.review_candidates) je
@@ -1243,10 +1281,16 @@ def _pool_filter_for_risk(risk_level: int):
     se jen na statistický model — u BOOSTu (dlouhá kombinace, appka na
     ni neuplatňuje kontrolu kladného edge) je to naopak jediná pojistka
     proti zastaralým datům, tam kontrola zůstává.
+
+    H2H volatilita (viz _filter_h2h_volatile_candidates) běží pro VŠECHNY
+    risk_level — je levná (jen pro pár kandidátů, co už prošly prahem) a
+    řeší jiný problém než AI kontrola zpráv.
     """
     if risk_level > 60:
-        return ai_reviewer.review_candidates
-    return None
+        def combined(pool: list[SelectionCandidate]) -> list[SelectionCandidate]:
+            return ai_reviewer.review_candidates(_filter_h2h_volatile_candidates(pool))
+        return combined
+    return _filter_h2h_volatile_candidates
 
 
 def _check_token_balance(user_id: int, risk_level: int) -> None:
