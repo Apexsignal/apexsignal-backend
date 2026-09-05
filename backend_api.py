@@ -4153,6 +4153,20 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
+@app.get("/admin/_debug-h2h-for-match")
+def admin_debug_h2h_for_match(match_id: str, request: Request):
+    """Dočasné — appka appce ukáže vzájemné zápasy pro konkrétní match_id."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    fixture = provider.get_fixture_result(match_id)
+    teams = fixture.get("teams", {})
+    home_id, away_id = teams.get("home", {}).get("id"), teams.get("away", {}).get("id")
+    h2h = provider._get("/fixtures/headtohead", {"h2h": f"{home_id}-{away_id}", "last": 8})
+    return {"home_id": home_id, "away_id": away_id, "h2h": h2h}
+
+
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
