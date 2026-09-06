@@ -4826,6 +4826,15 @@ def _generate_one_ticket_for_cron(
     return result["safe"]
 
 
+@app.get("/admin/_debug-fixture-result")
+def _debug_fixture_result(request: Request, match_id: str):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    return provider.get_fixture_result(match_id)
+
+
 @app.post("/admin/send-ticket-to-telegram")
 def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     """Appka appce pošle KONKRÉTNÍ uložený tiket appce na appčin vlastní
