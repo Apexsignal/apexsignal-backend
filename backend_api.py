@@ -1575,28 +1575,6 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     return {"checkout_url": session.url}
 
 
-@app.get("/admin/_debug-stripe-webhooks")
-def _debug_stripe_webhooks(request: Request):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené (STRIPE_SECRET_KEY chybí)")
-    endpoints = stripe.WebhookEndpoint.list(limit=10)
-    return {
-        "webhook_secret_env_set": bool(os.environ.get("STRIPE_WEBHOOK_SECRET")),
-        "endpoints": [
-            {
-                "url": e.get("url"),
-                "status": e.get("status"),
-                "enabled_events": e.get("enabled_events"),
-                "id": e.get("id"),
-            }
-            for e in endpoints.get("data", [])
-        ],
-    }
-
-
 @app.post("/payments/unlimited-billing-portal")
 def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
     """Billing portál appka pro neomezený tarif drží zvlášť od
