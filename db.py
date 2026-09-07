@@ -1676,21 +1676,31 @@ def get_unlimited_until(user_id: int) -> Optional[datetime]:
         return row["unlimited_until"] if row else None
 
 
-def set_unlimited_until(user_id: int, until: datetime, stripe_customer_id: Optional[str] = None) -> None:
+def set_unlimited_until(
+    user_id: int, until: datetime, stripe_customer_id: Optional[str] = None,
+    daily_cap_override: Optional[int] = None,
+) -> None:
     """Appka tudy pouští jen placené (Stripe webhook) nebo administrátorem
     schválené (/admin/set-unlimited, /admin/provision-account) aktivace —
-    proto appka při každém volání zároveň vynuluje daily_generation_cap_override:
-    jinak by dřív uplatněný zkušební kód s nižším stropem navždy omezoval
-    i zákazníka, co si pak koupí plný tarif. Nižší strop appka nastavuje
-    JEN uvnitř redeem_code, pro konkrétní zkušební kódy."""
+    proto appka při každém volání bez daily_cap_override vynuluje
+    daily_generation_cap_override: jinak by dřív uplatněný zkušební kód
+    s nižším stropem navždy omezoval i zákazníka, co si pak koupí plný
+    tarif. daily_cap_override appka předá jen u týdenního tarifu (viz
+    UNLIMITED_WEEKLY_DAILY_CAP) — appka ho musí zopakovat při KAŽDÉM
+    obnovení (webhook volá tuhle funkci znovu na každou fakturu), jinak
+    by se týdenní zákazníkovi po prvním obnovení strop tiše zvýšil na
+    plný měsíční."""
     with get_cursor() as cur:
         if stripe_customer_id is not None:
             cur.execute(
-                "UPDATE users SET unlimited_until = %s, unlimited_stripe_customer_id = %s, daily_generation_cap_override = NULL WHERE id = %s",
-                (until, stripe_customer_id, user_id),
+                "UPDATE users SET unlimited_until = %s, unlimited_stripe_customer_id = %s, daily_generation_cap_override = %s WHERE id = %s",
+                (until, stripe_customer_id, daily_cap_override, user_id),
             )
         else:
-            cur.execute("UPDATE users SET unlimited_until = %s, daily_generation_cap_override = NULL WHERE id = %s", (until, user_id))
+            cur.execute(
+                "UPDATE users SET unlimited_until = %s, daily_generation_cap_override = %s WHERE id = %s",
+                (until, daily_cap_override, user_id),
+            )
 
 
 def get_daily_generation_cap_override(user_id: int) -> Optional[int]:

@@ -1423,6 +1423,8 @@ def get_token_prices():
         "channel_price_kc": CHANNEL_PRICE_KC,
         "channel_payment_link_url": os.environ.get("STRIPE_CHANNEL_PAYMENT_LINK_URL", "").strip(),
         "unlimited_plans_kc": UNLIMITED_GENERATION_PLANS,
+        "unlimited_weekly_plans_kc": UNLIMITED_WEEKLY_PLANS,
+        "unlimited_weekly_daily_cap": UNLIMITED_WEEKLY_DAILY_CAP,
     }
 
 
@@ -1480,15 +1482,36 @@ UNLIMITED_GENERATION_PLANS: dict[int, int] = {
     12: 83160,
 }
 
+# Týdenní varianta (2026-09-07, uživatelovo přání) — appka ji schválně
+# cení NAD poměrnou týdenní cenou měsíčního tarifu (9900/4,33 ≈ 2287 Kč),
+# ať se 4 týdny za sebou (4×2490 = 9960 Kč) nikdy nevyplatí víc než rovnou
+# měsíc — týdenní má appku jen "ochutnat", ne nahradit měsíční závazek.
+# Nižší denní strop (5 místo 10) je druhá záměrná brzda ze stejného
+# důvodu — uživatel: "ten den ani víc jak 5 generování nejde asi appka
+# víc tiketů nenajde", takže appka tím nikoho reálně neomezuje, jen
+# jasně odlišuje tarify.
+UNLIMITED_WEEKLY_PLANS: dict[int, int] = {
+    1: 2490,
+}
+UNLIMITED_WEEKLY_DAILY_CAP = 5
+
 
 class UnlimitedCheckoutRequest(BaseModel):
     months: int = 1
+    weeks: Optional[int] = None
 
     @field_validator("months")
     @classmethod
     def validate_months(cls, v: int) -> int:
         if v not in UNLIMITED_GENERATION_PLANS:
             raise ValueError(f"Neplatná délka předplatného, appka umí jen: {sorted(UNLIMITED_GENERATION_PLANS)}")
+        return v
+
+    @field_validator("weeks")
+    @classmethod
+    def validate_weeks(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v not in UNLIMITED_WEEKLY_PLANS:
+            raise ValueError(f"Neplatná délka týdenního předplatného, appka umí jen: {sorted(UNLIMITED_WEEKLY_PLANS)}")
         return v
 
 
@@ -1508,15 +1531,30 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
 
-    months = req.months
-    total_price_kc = UNLIMITED_GENERATION_PLANS[months]
-    product_name = (
-        "Neomezené generování na měsíc — ApexSignal" if months == 1
-        else f"Founder — neomezené generování na {months} měsíců — ApexSignal"
-    )
+    if req.weeks:
+        weeks = req.weeks
+        total_price_kc = UNLIMITED_WEEKLY_PLANS[weeks]
+        product_name = "Neomezené generování na týden — ApexSignal"
+        interval, interval_count = "week", weeks
+        metadata = {
+            "user_id": str(user_id), "unlimited_generation": "1", "weeks": str(weeks),
+            # Webhook (checkout.session.completed i každé pozdější
+            # invoice.payment_succeeded) tohle musí zopakovat appce zpátky
+            # do set_unlimited_until — jinak by po prvním obnovení strop
+            # tiše spadl na plný měsíční (viz db.set_unlimited_until).
+            "daily_cap_override": str(UNLIMITED_WEEKLY_DAILY_CAP),
+        }
+    else:
+        months = req.months
+        total_price_kc = UNLIMITED_GENERATION_PLANS[months]
+        product_name = (
+            "Neomezené generování na měsíc — ApexSignal" if months == 1
+            else f"Founder — neomezené generování na {months} měsíců — ApexSignal"
+        )
+        interval, interval_count = "month", months
+        metadata = {"user_id": str(user_id), "unlimited_generation": "1", "months": str(months)}
 
     frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal-tickets.netlify.app")
-    metadata = {"user_id": str(user_id), "unlimited_generation": "1", "months": str(months)}
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",
@@ -1526,7 +1564,7 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
                     "currency": "czk",
                     "product_data": {"name": product_name},
                     "unit_amount": total_price_kc * 100,
-                    "recurring": {"interval": "month", "interval_count": months},
+                    "recurring": {"interval": interval, "interval_count": interval_count},
                 },
                 "quantity": 1,
             }],
@@ -1807,10 +1845,12 @@ async def stripe_webhook(request: Request):
                     period_end = _period_end_from_subscription(sub)
                 except Exception as e:
                     print(f"[stripe] nepodařilo se načíst nové neomezené předplatné {stripe_subscription_id}: {e}")
+            raw_cap = metadata.get("daily_cap_override")
             db.set_unlimited_until(
                 user_id,
                 period_end or datetime.now(timezone.utc) + timedelta(days=30),
                 stripe_customer_id=obj.get("customer"),
+                daily_cap_override=int(raw_cap) if raw_cap else None,
             )
         elif obj.get("mode") == "subscription":
             # Platba přes samostatný Stripe Payment Link (kanál) — appka
@@ -1878,8 +1918,12 @@ async def stripe_webhook(request: Request):
             sub_user_id = int(sub_metadata.get("user_id", 0)) or None
             if sub_user_id and obj.get("status") in ("active", "trialing"):
                 period_end = _period_end_from_subscription(obj)
+                raw_cap = sub_metadata.get("daily_cap_override")
                 if period_end:
-                    db.set_unlimited_until(sub_user_id, period_end, stripe_customer_id=obj.get("customer"))
+                    db.set_unlimited_until(
+                        sub_user_id, period_end, stripe_customer_id=obj.get("customer"),
+                        daily_cap_override=int(raw_cap) if raw_cap else None,
+                    )
         else:
             # created / updated / deleted (kanál) — u deleted pošle Stripe
             # status 'canceled', appka nepotřebuje větvit, stačí zrcadlit.
@@ -1942,8 +1986,12 @@ async def stripe_webhook(request: Request):
                     if event_type == "invoice.payment_succeeded":
                         inv_user_id = int(sub_metadata.get("user_id", 0)) or None
                         period_end = _period_end_from_subscription(sub)
+                        raw_cap = sub_metadata.get("daily_cap_override")
                         if inv_user_id and period_end:
-                            db.set_unlimited_until(inv_user_id, period_end, stripe_customer_id=sub.get("customer"))
+                            db.set_unlimited_until(
+                                inv_user_id, period_end, stripe_customer_id=sub.get("customer"),
+                                daily_cap_override=int(raw_cap) if raw_cap else None,
+                            )
                     # payment_failed appka nijak aktivně neřeší — přístup
                     # doběhne do konce už zaplaceného období, opakované
                     # pokusy o strhnutí řeší Stripe sám podle svého plánu.
