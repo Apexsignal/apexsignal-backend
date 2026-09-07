@@ -4826,6 +4826,17 @@ def _generate_one_ticket_for_cron(
     return result["safe"]
 
 
+@app.get("/admin/_debug-ticket-by-id")
+def _debug_ticket_by_id(request: Request, ticket_id: int):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    return rows[0]
+
+
 @app.post("/admin/send-ticket-to-telegram")
 def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     """Appka appce pošle KONKRÉTNÍ uložený tiket appce na appčin vlastní
