@@ -1471,15 +1471,11 @@ UNLIMITED_GENERATION_DAILY_CAP = 10
 
 # Neomezené generování — self-serve tarif pro běžné uživatele. Klíč =
 # počet měsíců v jednom fakturačním cyklu, hodnota = celková cena v Kč
-# za CELÉ období (ne za měsíc). Přeceněno zpátky z 4990 Kč/měsíc na
-# 9900 Kč/měsíc (2026-08-26, uživatel to chtěl výslovně) — delší
-# závazek appka odměňuje stejnou slevou jako dřív (10 %/20 %/30 % z
-# měsíční ceny za 3/6/12 měsíců).
+# za CELÉ období (ne za měsíc). Delší cykly (3/6/12 měsíců) appka
+# 2026-09-07 na uživatelovo přání úplně zrušila — appka teď nabízí jen
+# 1 týden (viz UNLIMITED_WEEKLY_PLANS) a 1 měsíc.
 UNLIMITED_GENERATION_PLANS: dict[int, int] = {
     1: 9900,
-    3: 26730,
-    6: 47520,
-    12: 83160,
 }
 
 # Týdenní varianta (2026-09-07, uživatelovo přání) — appka ji schválně
@@ -1523,7 +1519,7 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     podmiňovat tím, že generování je už odemčené.
 
     mode="subscription" (ne jednorázová platba) — Stripe strhává platbu
-    sám podle `interval_count` (1/3/6/12 měsíců). Datum konce appka
+    sám podle `interval_count` (1 týden nebo 1 měsíc). Datum konce appka
     nenastavuje napevno na +N dní, ale prodlužuje ho webhook
     (checkout.session.completed / invoice.payment_succeeded) podle
     skutečně zaplaceného období (`current_period_end`) — díky tomu appka
@@ -1547,10 +1543,7 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     else:
         months = req.months
         total_price_kc = UNLIMITED_GENERATION_PLANS[months]
-        product_name = (
-            "Neomezené generování na měsíc — ApexSignal" if months == 1
-            else f"Founder — neomezené generování na {months} měsíců — ApexSignal"
-        )
+        product_name = "Neomezené generování na měsíc — ApexSignal"
         interval, interval_count = "month", months
         metadata = {"user_id": str(user_id), "unlimited_generation": "1", "months": str(months)}
 
@@ -1781,9 +1774,9 @@ async def stripe_webhook(request: Request):
     #   1) Telegram kanál (490 Kč) — přes samostatný Stripe Payment Link,
     #      žádný účet appky, appka zákazníka pozná jen podle e-mailu,
     #      appka drží stav v tabulce subscriptions.
-    #   2) Neomezené generování (9900 Kč/měsíc, viz UNLIMITED_GENERATION_
-    #      PLANS pro 3/6/12měsíční tarify) — přes /payments/create-
-    #      unlimited-checkout-session, vázané na přihlášený user_id
+    #   2) Neomezené generování (2490 Kč/týden nebo 9900 Kč/měsíc, viz
+    #      UNLIMITED_WEEKLY_PLANS/UNLIMITED_GENERATION_PLANS) — přes
+    #      /payments/create-unlimited-checkout-session, vázané na přihlášený user_id
     #      appky (metadata.unlimited_generation == "1"), appka drží
     #      stav přímo na users.unlimited_until.
     # Appka je rozlišuje podle metadata.unlimited_generation, ne podle
