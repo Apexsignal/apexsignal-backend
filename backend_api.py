@@ -1575,6 +1575,28 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     return {"checkout_url": session.url}
 
 
+@app.get("/admin/_debug-checkout-session")
+def _debug_checkout_session(request: Request, session_id: str):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    session = stripe.checkout.Session.retrieve(session_id, expand=["line_items.data.price"])
+    return {
+        "amount_total_kc": session.get("amount_total", 0) / 100 if session.get("amount_total") else None,
+        "currency": session.get("currency"),
+        "mode": session.get("mode"),
+        "line_items": [
+            {
+                "amount": li["price"].get("unit_amount", 0) / 100 if li["price"].get("unit_amount") else None,
+                "recurring": li["price"].get("recurring"),
+                "product_name": (li["price"].get("product_data") or {}).get("name"),
+            }
+            for li in session.get("line_items", {}).get("data", [])
+        ],
+        "metadata": session.get("metadata"),
+    }
+
+
 @app.post("/payments/unlimited-billing-portal")
 def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
     """Billing portál appka pro neomezený tarif drží zvlášť od
