@@ -450,6 +450,28 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Sleva na měsíční členství za pozvané kamarády, co si sami zaplatili
+    # aspoň týdenní/měsíční neomezené generování (viz
+    # _process_membership_referral_credit) — UNIQUE na referred_user_id,
+    # appka stejného pozvaného kamaráda nemůže odměnit dvakrát, i kdyby
+    # si znovu koupil další období.
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS membership_referral_credits (
+                    id SERIAL PRIMARY KEY,
+                    referred_user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    credit_kc INTEGER NOT NULL,
+                    applied_to_stripe BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+
     # Appka si sem loguje otisk platební karty (ne číslo karty) u KAŽDÉHO
     # nákupu tokenů — díky tomu appka umí u doporučovacího systému poznat,
     # že doporučený a doporučitel platí stejnou kartou, i kdyby měli různé
@@ -1345,6 +1367,45 @@ def create_referral_reward(
             """,
             (referred_user_id, referrer_user_id, referred_tokens, referrer_tokens, card_fingerprint),
         )
+
+
+def has_membership_referral_credit(referred_user_id: int) -> bool:
+    with get_cursor() as cur:
+        cur.execute("SELECT 1 FROM membership_referral_credits WHERE referred_user_id = %s", (referred_user_id,))
+        return cur.fetchone() is not None
+
+
+def create_membership_referral_credit(
+    referred_user_id: int, referrer_user_id: int, credit_kc: int, applied_to_stripe: bool,
+) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO membership_referral_credits
+                (referred_user_id, referrer_user_id, credit_kc, applied_to_stripe)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (referred_user_id) DO NOTHING
+            """,
+            (referred_user_id, referrer_user_id, credit_kc, applied_to_stripe),
+        )
+
+
+def count_membership_referral_credits_since(referrer_user_id: int, since: datetime) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM membership_referral_credits WHERE referrer_user_id = %s AND created_at >= %s",
+            (referrer_user_id, since),
+        )
+        return cur.fetchone()["c"]
+
+
+def sum_membership_referral_credits(referrer_user_id: int) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(credit_kc), 0) AS s FROM membership_referral_credits WHERE referrer_user_id = %s AND applied_to_stripe = TRUE",
+            (referrer_user_id,),
+        )
+        return cur.fetchone()["s"]
 
 
 def record_card_fingerprint(user_id: int, fingerprint: Optional[str]) -> None:
