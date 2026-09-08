@@ -1652,6 +1652,27 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     return {"checkout_url": session.url}
 
 
+@app.post("/admin/_debug-test-membership-referral")
+def _debug_test_membership_referral(request: Request, referred_email: str, referrer_email: str):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    referred = db.get_user_by_email(referred_email)
+    referrer = db.get_user_by_email(referrer_email)
+    if not referred or not referrer:
+        raise HTTPException(status_code=404, detail="Účet nenalezen")
+    db.set_referred_by(referred["id"], referrer["id"])
+    _process_membership_referral_credit(referred["id"])
+    return {
+        "referred_id": referred["id"],
+        "referrer_id": referrer["id"],
+        "has_credit_row": db.has_membership_referral_credit(referred["id"]),
+        "referrer_stripe_customer_id": db.get_unlimited_stripe_customer_id(referrer["id"]),
+        "referrer_is_monthly": _referrer_has_active_monthly_plan(referrer["id"]),
+        "sum_applied_credit_kc": db.sum_membership_referral_credits(referrer["id"]),
+    }
+
+
 @app.post("/payments/unlimited-billing-portal")
 def unlimited_billing_portal(user_id: int = Depends(get_current_user_id)):
     """Billing portál appka pro neomezený tarif drží zvlášť od
