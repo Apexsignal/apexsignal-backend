@@ -1652,6 +1652,24 @@ def create_unlimited_checkout_session(req: UnlimitedCheckoutRequest, user_id: in
     return {"checkout_url": session.url}
 
 
+@app.post("/admin/_debug-test-stripe-balance-credit")
+def _debug_test_stripe_balance_credit(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    customer = stripe.Customer.create(email="debug-throwaway@apexsignal.cz", name="Appka debug throwaway")
+    try:
+        txn = stripe.Customer.create_balance_transaction(
+            customer.id, amount=-MEMBERSHIP_REFERRAL_CREDIT_KC * 100, currency="czk",
+            description="Appka test — appka tenhle testovací zákazník hned smaže",
+        )
+        refreshed = stripe.Customer.retrieve(customer.id)
+        result = {"balance_transaction_id": txn.id, "amount_kc": txn.amount / 100, "customer_balance_kc": refreshed.balance / 100}
+    finally:
+        stripe.Customer.delete(customer.id)
+    return result
+
+
 @app.post("/admin/_debug-test-membership-referral")
 def _debug_test_membership_referral(request: Request, referred_email: str, referrer_email: str):
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
