@@ -1176,7 +1176,7 @@ MIN_CUSTOM_TOKENS = 1
 # (appka tím odměňuje reálné zapojení). Pojmenované konstanty, ať appka
 # jde ladit bez zásahu do logiky.
 REFERRAL_REFERRER_TOKENS = 25
-REFERRAL_REFERRED_BONUS_TOKENS = 10
+REFERRAL_REFERRED_BONUS_TOKENS = 20  # 2× krátký tiket (uživatelovo přání 2026-09-08, dřív 10 = jen 1×)
 REFERRAL_TRIGGER_TICKET_TYPE = "kratky"
 REFERRAL_MAX_REWARDS_PER_MONTH = 10
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
