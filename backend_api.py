@@ -1402,6 +1402,14 @@ def _process_referral_reward(referred_user_id: int) -> None:
         )
         db.adjust_tokens(referred_user_id, REFERRAL_REFERRED_BONUS_TOKENS, "REFERRAL_BONUS_REFERRED")
         db.adjust_tokens(referrer_id, REFERRAL_REFERRER_TOKENS, "REFERRAL_BONUS_REFERRER")
+        try:
+            referrer = db.get_user_by_id(referrer_id)
+            if referrer and referrer.get("email"):
+                email_service.send_referral_reward_email(
+                    referrer["email"], REFERRAL_REFERRER_TOKENS, TOKEN_KC_VALUE,
+                )
+        except Exception as e:
+            print(f"[referral] Notifikační e-mail se nepodařilo odeslat (referrer_id={referrer_id}): {e}")
     except Exception as e:
         print(f"[referral] Zpracování odměny selhalo (referred_user_id={referred_user_id}): {e}")
 
