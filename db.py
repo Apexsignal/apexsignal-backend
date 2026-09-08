@@ -1265,15 +1265,6 @@ def adjust_tokens(user_id: int, amount: int, reason: str) -> int:
         return new_balance
 
 
-def count_token_transactions_with_reason(user_id: int, reason: str) -> int:
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM token_transactions WHERE user_id = %s AND reason = %s",
-            (user_id, reason),
-        )
-        return cur.fetchone()["c"]
-
-
 # =====================================================================
 # Doporučovací systém (viz backend_api.py: _process_referral_reward)
 # =====================================================================

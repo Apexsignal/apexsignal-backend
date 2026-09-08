@@ -1188,13 +1188,14 @@ FREE_TRIAL_TOKENS = TOKEN_COSTS["kratky"]
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
 
-# Doporučovací systém — spouštěč je POUŽITÍ tokenů na první krátký tiket
-# (appka "stredni" přestala nabízet úplně), ne proběhlá platba za tokeny
-# (appka tím odměňuje reálné zapojení). Pojmenované konstanty, ať appka
-# jde ladit bez zásahu do logiky.
+# Doporučovací systém — spouštěč je doporučeného účtu PRVNÍ SKUTEČNÁ
+# PLATBA appce (nákup tokenů nebo koupě neomezeného generování), ne jen
+# použití free trial tokenů (viz FREE_TRIAL_TOKENS výš — bez týhle
+# podmínky šlo odměnu vyfarmit zakládáním e-mailů bez jediné koruny,
+# viz _process_referral_reward). Pojmenované konstanty, ať appka jde
+# ladit bez zásahu do logiky.
 REFERRAL_REFERRER_TOKENS = 20  # 2× krátký tiket
 REFERRAL_REFERRED_BONUS_TOKENS = 10  # 1× krátký tiket (uživatelovo přání 2026-09-08: doporučitel dostane víc než doporučený)
-REFERRAL_TRIGGER_TICKET_TYPE = "kratky"
 REFERRAL_MAX_REWARDS_PER_MONTH = 10
 
 # Sleva na MĚSÍČNÍ členství za pozvané kamarády (2026-09-08, uživatelovo
@@ -1354,26 +1355,35 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
 
 def _process_referral_reward(referred_user_id: int) -> None:
     """
-    Appka tohle volá hned po odečtení tokenů za PRVNÍ krátký tiket
-    doporučeného účtu (REFERRAL_TRIGGER_TICKET_TYPE). Běží jako
-    best-effort — chyba tady nesmí shodit samotné generování tiketu,
-    appka jen zaloguje a jde dál.
+    Appka tohle volá hned po KAŽDÉ appce REÁLNĚ zaplacené platbě
+    doporučeného účtu (nákup tokenů i koupě týdenního/měsíčního
+    neomezeného generování — obojí appka volá ze Stripe webhooku, ne
+    hned po vygenerování tiketu). Běží jako best-effort — chyba tady
+    nesmí shodit samotné zpracování platby, appka jen zaloguje a jde
+    dál.
+
+    Appka spouštěč záměrně přesunula z "doporučený si vygeneroval první
+    tiket" na "doporučený appce SKUTEČNĚ zaplatil" (2026-09-08,
+    uživatelovo přání) — appka dřív dovolovala odměnu vyfarmit i bez
+    jediné platby: nový účet dostane 10 tokenů zdarma jen za ověření
+    e-mailu (FREE_TRIAL_TOKENS), takže si někdo mohl založit spoustu
+    e-mailů, každým "vygenerovat první tiket" z těch free tokenů a
+    posbírat odměnu doporučitele, aniž by appce kdy přišla jediná
+    koruna. Vyžadovat reálnou platbu appce stačí — appka na to
+    nepotřebuje SMS ověření ani jinou infrastrukturu navíc.
 
     Pojistky (musí projít VŠECHNY):
       1) účet vůbec někoho doporučil (referred_by_user_id),
-      2) appka ho ještě neodměnila (referral_rewards.referred_user_id UNIQUE),
-      3) tohle je jeho úplně první UNLOCK_KRATKY (ne třetí, ne desátý),
-      4) doporučitel nemá tento měsíc už vyčerpaný strop odměn,
-      5) doporučený a doporučitel neplatí stejnou kartou (otisk karty).
+      2) appka ho ještě neodměnila (referral_rewards.referred_user_id UNIQUE)
+         — díky UNIQUE appka odměnu připíše i při opakovaných platbách jen JEDNOU,
+      3) doporučitel nemá tento měsíc už vyčerpaný strop odměn,
+      4) doporučený a doporučitel neplatí stejnou kartou (otisk karty).
     """
     try:
         referrer_id = db.get_referred_by(referred_user_id)
         if not referrer_id:
             return
         if db.has_referral_reward(referred_user_id):
-            return
-        trigger_reason = f"UNLOCK_{REFERRAL_TRIGGER_TICKET_TYPE.upper()}"
-        if db.count_token_transactions_with_reason(referred_user_id, trigger_reason) != 1:
             return
         since = datetime.now(timezone.utc) - timedelta(days=30)
         if db.count_referral_rewards_for_referrer_since(referrer_id, since) >= REFERRAL_MAX_REWARDS_PER_MONTH:
@@ -1454,8 +1464,6 @@ def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
     cost = TOKEN_COSTS.get(ticket_type, 0)
     if cost > 0:
         db.adjust_tokens(user_id, -cost, f"UNLOCK_{ticket_type.upper()}")
-        if ticket_type == REFERRAL_TRIGGER_TICKET_TYPE:
-            _process_referral_reward(user_id)
 
 
 class RedeemCodeRequest(BaseModel):
@@ -1923,6 +1931,7 @@ async def stripe_webhook(request: Request):
                 daily_cap_override=int(raw_cap) if raw_cap else None,
             )
             _process_membership_referral_credit(user_id)
+            _process_referral_reward(user_id)
         elif obj.get("mode") == "subscription":
             # Platba přes samostatný Stripe Payment Link (kanál) — appka
             # tu nemá žádné metadata.user_id (nikdo se nepřihlašoval), jen
@@ -1964,6 +1973,7 @@ async def stripe_webhook(request: Request):
                         db.record_card_fingerprint(user_id, fingerprint)
                 except Exception as e:
                     print(f"[stripe] Nepodařilo se zaznamenat otisk karty (doporučovací pojistka): {e}")
+                _process_referral_reward(user_id)
 
     elif event_type.startswith("customer.subscription."):
         sub_metadata = obj.get("metadata") or {}
