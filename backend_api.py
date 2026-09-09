@@ -4290,34 +4290,6 @@ def admin_alert(req: AdminAlertRequest, request: Request):
     return {"status": "sent" if resp.ok else "error", "telegram_response": resp.json()}
 
 
-@app.get("/admin/_debug-ticket-lookup")
-def admin_debug_ticket_lookup(ticket_id: int, request: Request):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    with db.get_cursor() as cur:
-        cur.execute(
-            """
-            SELECT t.id, t.status, t.ticket_type, t.total_odds, t.actual_odds,
-                   t.actual_stake_amount, t.created_at, u.email
-              FROM tickets t JOIN users u ON u.id = t.user_id
-             WHERE t.id = %s
-            """,
-            (ticket_id,),
-        )
-        ticket = cur.fetchone()
-        cur.execute(
-            """
-            SELECT home_team, away_team, market_type, selection, odds, result,
-                   model_probability, market_probability, kickoff_date, kickoff_time, league
-              FROM ticket_selections WHERE ticket_id = %s
-            """,
-            (ticket_id,),
-        )
-        selections = cur.fetchall()
-    return {"ticket": dict(ticket) if ticket else None, "selections": [dict(s) for s in selections]}
-
-
 @app.post("/admin/resettle-ticket")
 def admin_resettle_ticket(ticket_id: int, request: Request):
     """
