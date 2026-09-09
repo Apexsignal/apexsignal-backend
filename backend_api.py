@@ -537,6 +537,7 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
 class PayoutRequestRequest(BaseModel):
     full_name: str
     account_number: str
+    ico: str
 
     @field_validator("full_name")
     @classmethod
@@ -552,6 +553,18 @@ class PayoutRequestRequest(BaseModel):
         v = v.strip()
         if not v or len(v) > 64:
             raise ValueError("Zadej platné číslo účtu")
+        return v
+
+    @field_validator("ico")
+    @classmethod
+    def validate_ico(cls, v: str) -> str:
+        # Appka appce vyžaduje IČO kvůli faktuře/účetnictví na výplatu
+        # (uživatelovo přání 2026-09-09: "potřebuji těch lidi IČO..jakoby
+        # fakturu") — appka nekontroluje formát proti registru
+        # ekonomických subjektů, jen appce nedovolí odeslat prázdné pole.
+        v = v.strip()
+        if not v or len(v) > 32:
+            raise ValueError("Zadej IČO")
         return v
 
 
@@ -574,7 +587,7 @@ def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(ge
     if pending_kc <= 0:
         raise HTTPException(status_code=400, detail="Nemáš žádnou nevyplacenou provizi.")
 
-    request_id = db.create_payout_request(user_id, req.full_name, req.account_number, pending_kc)
+    request_id = db.create_payout_request(user_id, req.full_name, req.account_number, req.ico, pending_kc)
 
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if chat_id:
@@ -585,6 +598,7 @@ def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(ge
                 "💸 Nová žádost o výplatu provize za doporučení\n"
                 f"Od: {user['email'] if user else user_id}\n"
                 f"Jméno: {req.full_name}\n"
+                f"IČO: {req.ico}\n"
                 f"Číslo účtu: {req.account_number}\n"
                 f"Částka: {pending_kc} Kč\n"
                 f"Žádost #{request_id}",
@@ -2751,7 +2765,7 @@ def admin_list_payout_requests(request: Request, status: Optional[str] = None):
         "requests": [
             {
                 "id": r["id"], "referrer_user_id": r["referrer_user_id"], "email": r["email"],
-                "full_name": r["full_name"], "account_number": r["account_number"],
+                "full_name": r["full_name"], "account_number": r["account_number"], "ico": r.get("ico"),
                 "requested_kc": r["requested_kc"], "status": r["status"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "paid_at": r["paid_at"].isoformat() if r["paid_at"] else None,

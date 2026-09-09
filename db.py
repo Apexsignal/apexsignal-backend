@@ -502,6 +502,13 @@ def ensure_schema() -> None:
                 )
                 """
             )
+            # IČO appka potřebuje kvůli faktuře/účetnictví na výplatu
+            # provize (appka to nemohla appce dát rovnou do CREATE TABLE
+            # výš, appka ho appce doplnila později) — appka zatím drží
+            # jako volný text, ne jen číslo, appka appce nevynucuje
+            # formát (appka na to nemá appce ověřenou validaci proti
+            # registru).
+            cur.execute("ALTER TABLE referral_payout_requests ADD COLUMN IF NOT EXISTS ico VARCHAR(32)")
     except Exception:
         pass
 
@@ -1524,14 +1531,16 @@ def has_pending_payout_request(referrer_user_id: int) -> bool:
         return cur.fetchone() is not None
 
 
-def create_payout_request(referrer_user_id: int, full_name: str, account_number: str, requested_kc: int) -> int:
+def create_payout_request(
+    referrer_user_id: int, full_name: str, account_number: str, ico: str, requested_kc: int,
+) -> int:
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO referral_payout_requests (referrer_user_id, full_name, account_number, requested_kc)
-            VALUES (%s, %s, %s, %s) RETURNING id
+            INSERT INTO referral_payout_requests (referrer_user_id, full_name, account_number, ico, requested_kc)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
             """,
-            (referrer_user_id, full_name, account_number, requested_kc),
+            (referrer_user_id, full_name, account_number, ico, requested_kc),
         )
         return cur.fetchone()["id"]
 
