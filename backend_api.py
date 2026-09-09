@@ -3608,7 +3608,7 @@ def admin_debug_preview_tomorrow(request: Request):
     tomorrow = (datetime.now(ZoneInfo("Europe/Prague")) + timedelta(days=1)).strftime("%Y-%m-%d")
     sports = [Sport.FOOTBALL]
     market_types = SPORT_MARKETS.get(Sport.FOOTBALL, [])
-    time_frame_days = 2
+    time_frame_days = 3
 
     matches = _fetch_candidate_matches(sports, time_frame_days)
     matches = [m for m in matches if m.kickoff_date == tomorrow]
@@ -3635,7 +3635,11 @@ def admin_debug_preview_tomorrow(request: Request):
             ],
         }
 
-    return {"tomorrow": tomorrow, "matches_available": len(matches), "safe": _fmt(result.get("safe")), "aggressive": _fmt(result.get("aggressive"))}
+    return {
+        "tomorrow": tomorrow, "matches_available": len(matches),
+        "sample": [{"home": m.home_team, "away": m.away_team, "league": m.league} for m in matches[:20]],
+        "safe": _fmt(result.get("safe")), "aggressive": _fmt(result.get("aggressive")),
+    }
 
 
 def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
