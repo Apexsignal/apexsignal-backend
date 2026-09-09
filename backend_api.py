@@ -530,7 +530,69 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
         "pending_kc": totals["pending_kc"],
         "commission_pct": REFERRAL_MEMBERSHIP_COMMISSION_PCT,
         "earnings": earnings,
+        "has_pending_payout_request": db.has_pending_payout_request(user_id),
     }
+
+
+class PayoutRequestRequest(BaseModel):
+    full_name: str
+    account_number: str
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 255:
+            raise ValueError("Zadej celé jméno a příjmení")
+        return v
+
+    @field_validator("account_number")
+    @classmethod
+    def validate_account_number(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 64:
+            raise ValueError("Zadej platné číslo účtu")
+        return v
+
+
+@app.post("/referral/request-payout")
+def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(get_current_user_id)):
+    """
+    Appka appce dovolí požádat o výplatu nasbírané provize za doporučení
+    — appka zadá jméno a číslo účtu, appka appce založí žádost a hned
+    pošle appce (uživateli appky, Davidovi) upozornění na Telegram s
+    fakturačními údaji. Appka samotnou platbu NEPOSÍLÁ automaticky —
+    appka appce jen zjednoduší, aby appka nemusela sama zjišťovat, kdo
+    kolik chce a kam poslat (appka to appce pošle ručně bankovním
+    převodem, pak appka appce označí přes /admin/referral-membership/
+    payout-requests/{id}/mark-paid).
+    """
+    if db.has_pending_payout_request(user_id):
+        raise HTTPException(status_code=409, detail="Už máš jednu žádost o výplatu čekající na vyřízení.")
+    totals = db.sum_referral_membership_earnings(user_id)
+    pending_kc = totals["pending_kc"]
+    if pending_kc <= 0:
+        raise HTTPException(status_code=400, detail="Nemáš žádnou nevyplacenou provizi.")
+
+    request_id = db.create_payout_request(user_id, req.full_name, req.account_number, pending_kc)
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if chat_id:
+        try:
+            user = db.get_user_by_id(user_id)
+            _send_telegram_message(
+                int(chat_id),
+                "💸 Nová žádost o výplatu provize za doporučení\n"
+                f"Od: {user['email'] if user else user_id}\n"
+                f"Jméno: {req.full_name}\n"
+                f"Číslo účtu: {req.account_number}\n"
+                f"Částka: {pending_kc} Kč\n"
+                f"Žádost #{request_id}",
+            )
+        except Exception as e:
+            print(f"[referral_payout] Nepodařilo se poslat Telegram upozornění: {e}")
+
+    return {"status": "requested", "request_id": request_id, "requested_kc": pending_kc}
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -2655,6 +2717,48 @@ def admin_referral_membership_mark_paid(referrer_user_id: int, request: Request)
 
     paid_kc = db.mark_referral_membership_paid(referrer_user_id)
     return {"referrer_user_id": referrer_user_id, "marked_paid_kc": paid_kc}
+
+
+@app.get("/admin/referral-membership/payout-requests")
+def admin_list_payout_requests(request: Request, status: Optional[str] = None):
+    """Appka appce (adminovi) ukáže žádosti o výplatu provize — appka
+    appce defaultně vrátí VŠECHNY (nejnovější první), appka appce nechá
+    filtrovat přes ?status=pending, ať appka vidí jen to, co ještě čeká
+    na vyřízení."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    requests_ = db.list_payout_requests(status=status)
+    return {
+        "requests": [
+            {
+                "id": r["id"], "referrer_user_id": r["referrer_user_id"], "email": r["email"],
+                "full_name": r["full_name"], "account_number": r["account_number"],
+                "requested_kc": r["requested_kc"], "status": r["status"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "paid_at": r["paid_at"].isoformat() if r["paid_at"] else None,
+            }
+            for r in requests_
+        ],
+    }
+
+
+@app.post("/admin/referral-membership/payout-requests/{request_id}/mark-paid")
+def admin_mark_payout_request_paid(request_id: int, request: Request):
+    """Appka appce (adminovi) označí KONKRÉTNÍ žádost o výplatu jako
+    vyplacenou — appka zavolá AŽ PO tom, co appka reálně pošle peníze
+    bankovním převodem. Appka appce zároveň označí i podkladové
+    jednotlivé provize (referral_membership_earnings) jako paid_out, ať
+    appka nezůstane v nekonzistentním stavu (viz db.mark_payout_request_paid)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    result = db.mark_payout_request_paid(request_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Žádost nenalezena nebo už byla vyřízena")
+    return {"request_id": request_id, "referrer_user_id": result["referrer_user_id"], "paid_kc": result["requested_kc"]}
 
 
 @app.get("/admin/channel-subscribers")
@@ -7226,7 +7330,7 @@ ALL_DB_TABLES = [
     # jak appka slibovala.
     "subscriptions", "sellers", "seller_client_subscriptions", "seller_earnings",
     "seller_leads", "app_settings", "telegram_link_codes", "user_events",
-    "referral_membership_earnings",
+    "referral_membership_earnings", "referral_payout_requests",
 ]
 # api_cache (nacachované odpovědi z the-odds-api/API-Football),
 # password_reset_tokens/email_verification_tokens (krátkodobé, časově

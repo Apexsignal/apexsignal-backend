@@ -481,6 +481,30 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Žádosti o výplatu provize za doporučení (2026-09-09) — appka appce
+    # dovolí zadat fakturační údaje (jméno, číslo účtu) a odešle appce
+    # (uživateli) upozornění na Telegram, appka platbu pořád posílá
+    # RUČNĚ bankovním převodem, appka jen appce zjednoduší, aby nemusela
+    # sama pátrat, kdo kolik chce a kam poslat.
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS referral_payout_requests (
+                    id SERIAL PRIMARY KEY,
+                    referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    full_name VARCHAR(255) NOT NULL,
+                    account_number VARCHAR(64) NOT NULL,
+                    requested_kc INTEGER NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    paid_at TIMESTAMPTZ
+                )
+                """
+            )
+    except Exception:
+        pass
+
     # Appka si sem loguje otisk platební karty (ne číslo karty) u KAŽDÉHO
     # nákupu tokenů — díky tomu appka umí u doporučovacího systému poznat,
     # že doporučený a doporučitel platí stejnou kartou, i kdyby měli různé
@@ -1448,6 +1472,74 @@ def mark_referral_membership_paid(referrer_user_id: int) -> int:
         )
         rows = cur.fetchall()
         return sum(r["commission_kc"] for r in rows)
+
+
+def has_pending_payout_request(referrer_user_id: int) -> bool:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM referral_payout_requests WHERE referrer_user_id = %s AND status = 'pending'",
+            (referrer_user_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def create_payout_request(referrer_user_id: int, full_name: str, account_number: str, requested_kc: int) -> int:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO referral_payout_requests (referrer_user_id, full_name, account_number, requested_kc)
+            VALUES (%s, %s, %s, %s) RETURNING id
+            """,
+            (referrer_user_id, full_name, account_number, requested_kc),
+        )
+        return cur.fetchone()["id"]
+
+
+def list_payout_requests(status: Optional[str] = None) -> list[dict]:
+    with get_cursor() as cur:
+        if status:
+            cur.execute(
+                """
+                SELECT r.*, u.email FROM referral_payout_requests r JOIN users u ON u.id = r.referrer_user_id
+                 WHERE r.status = %s ORDER BY r.created_at ASC
+                """,
+                (status,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT r.*, u.email FROM referral_payout_requests r JOIN users u ON u.id = r.referrer_user_id
+                 ORDER BY r.created_at DESC
+                """
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def mark_payout_request_paid(request_id: int) -> Optional[dict]:
+    """Appka appce označí žádost jako vyplacenou A ZÁROVEŇ appce označí
+    všechny referrerovy nevyplacené provize jako paid_out — appka to dělá
+    v jednom kroku, ať appka po vyplacení žádosti nezůstane appce v
+    nekonzistentním stavu (žádost vyřízená, ale jednotlivé platby appka
+    pořád vidí jako nevyplacené)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE referral_payout_requests SET status = 'paid', paid_at = now()
+             WHERE id = %s AND status = 'pending' RETURNING referrer_user_id, requested_kc
+            """,
+            (request_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute(
+            """
+            UPDATE referral_membership_earnings SET paid_out = TRUE, paid_out_at = now()
+             WHERE referrer_user_id = %s AND NOT paid_out
+            """,
+            (row["referrer_user_id"],),
+        )
+        return dict(row)
 
 
 def sum_referral_membership_earnings(referrer_user_id: int) -> dict:
