@@ -2626,11 +2626,19 @@ def admin_debug_cleanup_referral_membership_test(request: Request):
             ("cs_test_debug_1", "in_test_debug_renewal_1"),
         )
         deleted = cur.rowcount
-        referred_by_before = None
+        reset_referred_by = None
         if referred:
-            cur.execute("SELECT referred_by_user_id FROM users WHERE id = %s", (referred["id"],))
-            referred_by_before = cur.fetchone()
-    return {"deleted_earning_rows": deleted, "d_voves_referred_by_user_id": referred_by_before}
+            # Testovací volání appky omylem natrvalo nastavilo d.voves
+            # referred_by_user_id=testik (set_referred_by přepíše jen
+            # NULL, takže appka to musí ručně vrátit zpátky na NULL, ať
+            # appka nemá v produkci falešný doporučovací vztah mezi
+            # dvěma appčinými testovacími účty).
+            cur.execute(
+                "UPDATE users SET referred_by_user_id = NULL WHERE id = %s AND referred_by_user_id = 19 RETURNING id",
+                (referred["id"],),
+            )
+            reset_referred_by = cur.fetchone() is not None
+    return {"deleted_earning_rows": deleted, "reset_referred_by": reset_referred_by}
 
 
 @app.get("/admin/referral-membership/overview")
