@@ -3599,6 +3599,45 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         raise
 
 
+@app.post("/admin/_debug-preview-tomorrow")
+def admin_debug_preview_tomorrow(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    tomorrow = (datetime.now(ZoneInfo("Europe/Prague")) + timedelta(days=1)).strftime("%Y-%m-%d")
+    sports = [Sport.FOOTBALL]
+    market_types = SPORT_MARKETS.get(Sport.FOOTBALL, [])
+    time_frame_days = 2
+
+    matches = _fetch_candidate_matches(sports, time_frame_days)
+    matches = [m for m in matches if m.kickoff_date == tomorrow]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+
+    result = ticket_generator.generate(
+        matches, 0, sports, market_types, time_frame_days,
+        pool_filter=_pool_filter_for_risk(0),
+        allow_relaxed_min_odds=True,
+    )
+
+    def _fmt(ticket):
+        if ticket is None:
+            return None
+        return {
+            "total_odds": ticket.total_odds,
+            "combined_probability": ticket.combined_probability,
+            "selections": [
+                {"home_team": s.home_team, "away_team": s.away_team, "league": s.league,
+                 "market_type": s.market_type.value, "selection": s.selection, "odds": s.odds,
+                 "model_probability": s.model_probability, "market_probability": s.market_probability,
+                 "kickoff_time": s.kickoff_time}
+                for s in ticket.selections
+            ],
+        }
+
+    return {"tomorrow": tomorrow, "matches_available": len(matches), "safe": _fmt(result.get("safe")), "aggressive": _fmt(result.get("aggressive"))}
+
+
 def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
