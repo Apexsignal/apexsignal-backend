@@ -450,21 +450,30 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
-    # Sleva na měsíční členství za pozvané kamarády, co si sami zaplatili
-    # aspoň týdenní/měsíční neomezené generování (viz
-    # _process_membership_referral_credit) — UNIQUE na referred_user_id,
-    # appka stejného pozvaného kamaráda nemůže odměnit dvakrát, i kdyby
-    # si znovu koupil další období.
+    # Provize za doporučení placeného členství (2026-09-09, nahrazuje
+    # dřívější "slevu na měsíční členství" — ta fungovala jen pro
+    # referrery, co sami měli aktivní měsíční tarif, tenhle systém dává
+    # REÁLNÉ peníze úplně každému referrerovi, i opakovaně při každém
+    # obnovení, viz _process_referral_membership_commission). Appka
+    # vyplácí ručně (jako u prodejců, viz seller_earnings) — appka jen
+    # vede zůstatek, paid_out appka přepne až po skutečném převodu.
+    # Idempotence přes stripe_ref (checkout session ID první platby,
+    # invoice ID u obnovení) — stejný vzor jako seller_earnings.
     try:
         with get_cursor() as cur:
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS membership_referral_credits (
+                CREATE TABLE IF NOT EXISTS referral_membership_earnings (
                     id SERIAL PRIMARY KEY,
-                    referred_user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    credit_kc INTEGER NOT NULL,
-                    applied_to_stripe BOOLEAN NOT NULL DEFAULT FALSE,
+                    referred_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    stripe_ref VARCHAR(255) UNIQUE NOT NULL,
+                    plan_type VARCHAR(16) NOT NULL,
+                    payment_kc INTEGER NOT NULL,
+                    commission_pct FLOAT NOT NULL,
+                    commission_kc INTEGER NOT NULL,
+                    paid_out BOOLEAN NOT NULL DEFAULT FALSE,
+                    paid_out_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
                 """
@@ -1360,43 +1369,101 @@ def create_referral_reward(
         )
 
 
-def has_membership_referral_credit(referred_user_id: int) -> bool:
-    with get_cursor() as cur:
-        cur.execute("SELECT 1 FROM membership_referral_credits WHERE referred_user_id = %s", (referred_user_id,))
-        return cur.fetchone() is not None
-
-
-def create_membership_referral_credit(
-    referred_user_id: int, referrer_user_id: int, credit_kc: int, applied_to_stripe: bool,
-) -> None:
+def record_referral_membership_earning(
+    referrer_user_id: int, referred_user_id: int, stripe_ref: str,
+    plan_type: str, payment_kc: int, commission_pct: float, commission_kc: int,
+) -> bool:
+    """Appka appce zapíše provizi za doporučené placené členství — za
+    PRVNÍ platbu i za KAŽDÉ další obnovení (appka na to použije stejnou
+    tabulku, jen jiné stripe_ref: checkout session ID první platby,
+    invoice ID u obnovení — stejný vzor jako seller_earnings/
+    record_seller_renewal_earning). Appka vrátí True, jen když zapsala
+    NOVOU platbu (idempotence přes UNIQUE stripe_ref)."""
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO membership_referral_credits
-                (referred_user_id, referrer_user_id, credit_kc, applied_to_stripe)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (referred_user_id) DO NOTHING
+            INSERT INTO referral_membership_earnings
+                (referrer_user_id, referred_user_id, stripe_ref, plan_type, payment_kc, commission_pct, commission_kc)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (stripe_ref) DO NOTHING
             """,
-            (referred_user_id, referrer_user_id, credit_kc, applied_to_stripe),
+            (referrer_user_id, referred_user_id, stripe_ref, plan_type, payment_kc, commission_pct, commission_kc),
         )
+        return cur.rowcount > 0
 
 
-def count_membership_referral_credits_since(referrer_user_id: int, since: datetime) -> int:
+def get_referral_membership_earnings(referrer_user_id: int) -> list[dict]:
     with get_cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) AS c FROM membership_referral_credits WHERE referrer_user_id = %s AND created_at >= %s",
-            (referrer_user_id, since),
-        )
-        return cur.fetchone()["c"]
-
-
-def sum_membership_referral_credits(referrer_user_id: int) -> int:
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT COALESCE(SUM(credit_kc), 0) AS s FROM membership_referral_credits WHERE referrer_user_id = %s AND applied_to_stripe = TRUE",
+            """
+            SELECT e.id, e.referred_user_id, u.email AS referred_email, e.plan_type,
+                   e.payment_kc, e.commission_pct, e.commission_kc, e.paid_out, e.paid_out_at, e.created_at
+              FROM referral_membership_earnings e
+              JOIN users u ON u.id = e.referred_user_id
+             WHERE e.referrer_user_id = %s
+             ORDER BY e.created_at DESC
+            """,
             (referrer_user_id,),
         )
-        return cur.fetchone()["s"]
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_referral_membership_overview() -> list[dict]:
+    """Appka appce vrátí VŠECHNY referrery, co appce reálně vydělali
+    aspoň korunu na doporučeném členství, se souhrnem — appka na to
+    potřebuje přehled napříč všemi najednou (viz
+    /admin/referral-membership/overview), stejný vzor jako
+    list_sellers_overview."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.referrer_user_id, u.email,
+                   COUNT(*) AS total_payments,
+                   SUM(e.commission_kc) AS total_kc,
+                   SUM(e.commission_kc) FILTER (WHERE e.paid_out) AS paid_out_kc,
+                   SUM(e.commission_kc) FILTER (WHERE NOT e.paid_out) AS pending_kc
+              FROM referral_membership_earnings e
+              JOIN users u ON u.id = e.referrer_user_id
+             GROUP BY e.referrer_user_id, u.email
+             ORDER BY pending_kc DESC NULLS LAST
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def mark_referral_membership_paid(referrer_user_id: int) -> int:
+    """Appka appce označí VŠECHNY dosud nevyplacené provize daného
+    referrera jako vyplacené (appka platí ručně bankovním převodem, tohle
+    jen zapíše, že se to stalo) — appka appce vrátí, kolik Kč appka
+    reálně označila, ať appka ví, kolik doopravdy poslala."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE referral_membership_earnings
+               SET paid_out = TRUE, paid_out_at = now()
+             WHERE referrer_user_id = %s AND NOT paid_out
+             RETURNING commission_kc
+            """,
+            (referrer_user_id,),
+        )
+        rows = cur.fetchall()
+        return sum(r["commission_kc"] for r in rows)
+
+
+def sum_referral_membership_earnings(referrer_user_id: int) -> dict:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(commission_kc), 0) AS total_kc,
+                COALESCE(SUM(commission_kc) FILTER (WHERE paid_out), 0) AS paid_out_kc,
+                COALESCE(SUM(commission_kc) FILTER (WHERE NOT paid_out), 0) AS pending_kc
+              FROM referral_membership_earnings WHERE referrer_user_id = %s
+            """,
+            (referrer_user_id,),
+        )
+        row = cur.fetchone()
+        return {"total_kc": row["total_kc"], "paid_out_kc": row["paid_out_kc"], "pending_kc": row["pending_kc"]}
 
 
 def record_card_fingerprint(user_id: int, fingerprint: Optional[str]) -> None:

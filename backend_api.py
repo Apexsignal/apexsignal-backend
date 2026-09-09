@@ -517,18 +517,19 @@ def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
 
 @app.get("/referral/membership-progress")
 def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)):
-    """Appka appce ukáže, kolik pozvaných kamarádů appce reálně zaplatilo
-    (aspoň týdenní neomezené generování — appka nepočítá jen tokeny) a
-    kolik z toho appka doopravdy strhla jako slevu ze Stripe faktury.
-    Sleva platí jen měsíčním členům (viz MEMBERSHIP_REFERRAL_CREDIT_KC),
-    appka proto appce vrátí i is_monthly_member, ať appka frontendu umí
-    vysvětlit, proč je total_credit_kc nula i přes qualifying_count > 0."""
-    since = datetime.now(timezone.utc) - timedelta(days=30)
+    """Appka appce ukáže vydělané provize za doporučené placené členství
+    (viz _process_referral_membership_commission) — kolik celkem, kolik
+    už appka vyplatila (paid_out) a kolik ještě čeká na výplatu, plus
+    seznam jednotlivých plateb, ať appka uživateli umí ukázat, KDO a za
+    JAKÝ tarif mu vydělal."""
+    totals = db.sum_referral_membership_earnings(user_id)
+    earnings = db.get_referral_membership_earnings(user_id)
     return {
-        "qualifying_referrals_this_month": db.count_membership_referral_credits_since(user_id, since),
-        "total_credit_kc": db.sum_membership_referral_credits(user_id),
-        "credit_per_referral_kc": MEMBERSHIP_REFERRAL_CREDIT_KC,
-        "is_monthly_member": _referrer_has_active_monthly_plan(user_id),
+        "total_kc": totals["total_kc"],
+        "paid_out_kc": totals["paid_out_kc"],
+        "pending_kc": totals["pending_kc"],
+        "commission_pct": REFERRAL_MEMBERSHIP_COMMISSION_PCT,
+        "earnings": earnings,
     }
 
 
@@ -1198,15 +1199,21 @@ REFERRAL_REFERRER_TOKENS = 20  # 2× krátký tiket
 REFERRAL_REFERRED_BONUS_TOKENS = 10  # 1× krátký tiket (uživatelovo přání 2026-09-08: doporučitel dostane víc než doporučený)
 REFERRAL_MAX_REWARDS_PER_MONTH = 10
 
-# Sleva na MĚSÍČNÍ členství za pozvané kamarády (2026-09-08, uživatelovo
-# přání) — samostatný systém od tokenové odměny výš. Kamarád appce musí
-# zaplatit aspoň týdenní neomezené generování (ne jen tokeny), appka pak
-# doporučiteli, POKUD MÁ zrovna aktivní MĚSÍČNÍ tarif, připíše slevu
-# jako kredit na jeho Stripe zákaznický účet — Stripe ho sám automaticky
-# strhne z příští faktury (žádný appkou budovaný slevový kód/kupón).
-# Kredit appka nekrátí ani nestropuje — při 10 pozvaných (10×1000=10000 >
-# 9900) vyjde měsíc fakticky zdarma, přebytek se přenese na fakturu další.
-MEMBERSHIP_REFERRAL_CREDIT_KC = 1000
+# Provize za doporučení placeného ČLENSTVÍ (2026-09-09, uživatelovo
+# přání — nahrazuje dřívější "slevu na měsíční členství", co fungovala
+# jen pro referrery s vlastním aktivním měsíčním tarifem). Tenhle systém
+# dá REÁLNÉ peníze úplně KAŽDÉMU referrerovi, ne jen tomu, kdo sám platí
+# — a to při KAŽDÉ platbě kamaráda, i při každém dalším obnovení, ne jen
+# první platbě (appka appce vede zůstatek v Kč, appka appku vyplácí ručně
+# bankovním převodem, stejně jako u prodejců — viz
+# referral_membership_earnings/record_referral_membership_earning).
+# Odstupňováno podle appčina uvážení rizika (delší/dražší tarif appka
+# odmění vyšším procentem — 2026-09-09, uživatel chtěl 50 % napříč, appka
+# navrhla odstupňování kvůli nákladům, uživatel to přijal):
+REFERRAL_MEMBERSHIP_COMMISSION_PCT: dict[str, float] = {
+    "weekly": 0.30,
+    "monthly": 0.50,
+}
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -1414,54 +1421,43 @@ def _process_referral_reward(referred_user_id: int) -> None:
         print(f"[referral] Zpracování odměny selhalo (referred_user_id={referred_user_id}): {e}")
 
 
-def _referrer_has_active_monthly_plan(referrer_id: int) -> bool:
-    """Sleva appce platí jen na MĚSÍČNÍ tarif (uživatelovo přání) —
-    appka doporučitele pozná jako "měsíčního", když má aktivní neomezené
-    generování BEZ týdenního cap override (viz UNLIMITED_WEEKLY_DAILY_CAP,
-    ten appka nastaví jen týdenním zákazníkům)."""
-    until = db.get_unlimited_until(referrer_id)
-    if not until or until <= datetime.now(timezone.utc):
-        return False
-    cap_override = db.get_daily_generation_cap_override(referrer_id)
-    return cap_override != UNLIMITED_WEEKLY_DAILY_CAP
-
-
-def _process_membership_referral_credit(referred_user_id: int) -> None:
+def _process_referral_membership_commission(
+    referred_user_id: int, plan_type: str, payment_kc: int, stripe_ref: str,
+) -> None:
     """
-    Appka tohle volá při KAŽDÉM prvním úspěšném zaplacení neomezeného
-    generování (týdenní i měsíční) — checkout.session.completed appka
-    volá jen jednou za předplatné (obnovení jde přes invoice.payment_
-    succeeded, jinou větev), takže appka se tu nemusí sama hlídat proti
-    opakování z obnovení. Best-effort, chyba nesmí shodit aktivaci
-    samotného neomezeného tarifu.
+    Appka tohle volá při KAŽDÉ úspěšně zaplacené faktuře doporučeného
+    kamarádova neomezeného generování — první platbě (checkout.session.
+    completed) i každém dalším automatickém obnovení (invoice.payment_
+    succeeded) — na rozdíl od tokenové odměny (_process_referral_reward,
+    ta appka odmění jen JEDNOU) tady appka referrerovi platí OPAKOVANĚ,
+    dokud kamarád zůstává platícím členem (uživatelovo přání 2026-09-09).
+    Idempotence appka nechává na DB (stripe_ref UNIQUE, viz
+    record_referral_membership_earning) — appka appku klidně zavolá i
+    vícekrát na stejnou platbu (např. retry webhooku), appka to prostě
+    přeskočí. Best-effort, chyba tady nesmí shodit zpracování platby.
     """
     try:
         referrer_id = db.get_referred_by(referred_user_id)
         if not referrer_id:
             return
-        if db.has_membership_referral_credit(referred_user_id):
+        pct = REFERRAL_MEMBERSHIP_COMMISSION_PCT.get(plan_type)
+        if not pct:
             return
-        if not _referrer_has_active_monthly_plan(referrer_id):
-            # Appka si pozvání i tak poznamená (appka to počítá appce jako
-            # "N kamarádů tento měsíc" v appce), jen appka nesahá na
-            # Stripe — sleva platí jen aktivním měsíčním členům.
-            db.create_membership_referral_credit(referred_user_id, referrer_id, 0, applied_to_stripe=False)
-            return
-        customer_id = db.get_unlimited_stripe_customer_id(referrer_id)
-        if not customer_id:
-            db.create_membership_referral_credit(referred_user_id, referrer_id, 0, applied_to_stripe=False)
-            return
-        stripe.Customer.create_balance_transaction(
-            customer_id,
-            amount=-MEMBERSHIP_REFERRAL_CREDIT_KC * 100,
-            currency="czk",
-            description=f"Sleva za pozvaného kamaráda (user_id={referred_user_id})",
+        commission_kc = round(payment_kc * pct)
+        is_new = db.record_referral_membership_earning(
+            referrer_id, referred_user_id, stripe_ref, plan_type, payment_kc, pct, commission_kc,
         )
-        db.create_membership_referral_credit(
-            referred_user_id, referrer_id, MEMBERSHIP_REFERRAL_CREDIT_KC, applied_to_stripe=True,
-        )
+        if not is_new:
+            return
+        try:
+            referrer = db.get_user_by_id(referrer_id)
+            if referrer and referrer.get("email"):
+                plan_label = "týdenní členství" if plan_type == "weekly" else "měsíční členství"
+                email_service.send_referral_membership_commission_email(referrer["email"], commission_kc, plan_label)
+        except Exception as e:
+            print(f"[referral_membership] Notifikační e-mail se nepodařilo odeslat (referrer_id={referrer_id}): {e}")
     except Exception as e:
-        print(f"[membership_referral] Zpracování slevy selhalo (referred_user_id={referred_user_id}): {e}")
+        print(f"[referral_membership] Zpracování provize selhalo (referred_user_id={referred_user_id}): {e}")
 
 
 def _charge_tokens_for_ticket(user_id: int, ticket_type: str) -> None:
@@ -1938,7 +1934,9 @@ async def stripe_webhook(request: Request):
                 stripe_customer_id=obj.get("customer"),
                 daily_cap_override=int(raw_cap) if raw_cap else None,
             )
-            _process_membership_referral_credit(user_id)
+            plan_type = "weekly" if metadata.get("weeks") else "monthly"
+            amount_paid_kc = (obj.get("amount_total") or 0) // 100
+            _process_referral_membership_commission(user_id, plan_type, amount_paid_kc, obj["id"])
             _process_referral_reward(user_id)
         elif obj.get("mode") == "subscription":
             # Platba přes samostatný Stripe Payment Link (kanál) — appka
@@ -2081,6 +2079,15 @@ async def stripe_webhook(request: Request):
                                 inv_user_id, period_end, stripe_customer_id=sub.get("customer"),
                                 daily_cap_override=int(raw_cap) if raw_cap else None,
                             )
+                        # Provize za doporučení appka zapíše jen na SKUTEČNÉ
+                        # obnovení (billing_reason != subscription_create) —
+                        # tu úplně první platbu appka už odbavila výš v
+                        # checkout.session.completed, jinak by appka
+                        # doporučiteli připsala dvojnásobek za jednu platbu.
+                        if inv_user_id and obj.get("billing_reason") != "subscription_create":
+                            plan_type = "weekly" if sub_metadata.get("weeks") else "monthly"
+                            amount_paid_kc = (obj.get("amount_paid") or 0) // 100
+                            _process_referral_membership_commission(inv_user_id, plan_type, amount_paid_kc, obj["id"])
                     # payment_failed appka nijak aktivně neřeší — přístup
                     # doběhne do konce už zaplaceného období, opakované
                     # pokusy o strhnutí řeší Stripe sám podle svého plánu.
@@ -2605,6 +2612,49 @@ def admin_sellers_overview(request: Request):
             for l in db.list_seller_leads()
         ],
     }
+
+
+@app.get("/admin/referral-membership/overview")
+def admin_referral_membership_overview(request: Request):
+    """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
+    provizi za doporučené placené členství — kolik komu appka dluží
+    (pending_kc) a kolik už vyplatila, stejný vzor jako
+    /admin/sellers/overview. Appka vyplácí ručně, tenhle přehled je jen
+    pro appku (uživatele), ať ví, komu poslat peníze."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    overview = db.list_referral_membership_overview()
+    return {
+        "referrer_count": len(overview),
+        "total_pending_kc": sum(r["pending_kc"] or 0 for r in overview),
+        "total_paid_out_kc": sum(r["paid_out_kc"] or 0 for r in overview),
+        "referrers": [
+            {
+                "referrer_user_id": r["referrer_user_id"],
+                "email": r["email"],
+                "total_payments": r["total_payments"],
+                "total_kc": r["total_kc"],
+                "paid_out_kc": r["paid_out_kc"] or 0,
+                "pending_kc": r["pending_kc"] or 0,
+            }
+            for r in overview
+        ],
+    }
+
+
+@app.post("/admin/referral-membership/mark-paid")
+def admin_referral_membership_mark_paid(referrer_user_id: int, request: Request):
+    """Appka appce (adminovi) označí VŠECHNY nevyplacené provize daného
+    referrera jako vyplacené — appka tohle zavolá AŽ PO tom, co reálně
+    pošle peníze bankovním převodem (appka sama nic nevyplácí)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    paid_kc = db.mark_referral_membership_paid(referrer_user_id)
+    return {"referrer_user_id": referrer_user_id, "marked_paid_kc": paid_kc}
 
 
 @app.get("/admin/channel-subscribers")
@@ -7176,6 +7226,7 @@ ALL_DB_TABLES = [
     # jak appka slibovala.
     "subscriptions", "sellers", "seller_client_subscriptions", "seller_earnings",
     "seller_leads", "app_settings", "telegram_link_codes", "user_events",
+    "referral_membership_earnings",
 ]
 # api_cache (nacachované odpovědi z the-odds-api/API-Football),
 # password_reset_tokens/email_verification_tokens (krátkodobé, časově

@@ -164,6 +164,23 @@ def send_referral_reward_email(to_email: str, tokens: int, tokens_kc_value: int)
     return send_email(to_email, f"Získal jsi {tokens} tokenů za doporučení", _wrap_html(inner))
 
 
+def send_referral_membership_commission_email(to_email: str, commission_kc: int, plan_label: str) -> bool:
+    """Appka tohle posílá doporučiteli po KAŽDÉ platbě (i obnovení)
+    kamaráda, co appce platí přes jeho referral odkaz (viz
+    backend_api.py: _process_referral_membership_commission) — na rozdíl
+    od jednorázové tokenové odměny se tahle provize opakuje při každém
+    dalším zaplacení, appka to chce jasně odlišit."""
+    inner = f"""
+    <p style="color:#E7EBF2;font-size:15px;line-height:1.6;">Kamarád, co jsi pozval, appce zaplatil {plan_label} — máš provizi! 💰</p>
+    <p style="color:#8A93A8;font-size:14px;line-height:1.6;">
+      Appka ti připsala <strong style="color:#19E0C4;">{commission_kc} Kč</strong> na tvůj zůstatek
+      za doporučení. Zůstatek si necháš vyplatit — a stejná provize ti přijde
+      i při každé dalším kamarádově obnovení, dokud zůstává platícím členem.
+    </p>
+    """
+    return send_email(to_email, f"Získal jsi {commission_kc} Kč za doporučení", _wrap_html(inner))
+
+
 def send_seller_approved_email(to_email: str, dashboard_url: str) -> bool:
     """Appka tohle posílá hned po ručním schválení nového prodejce
     (POST /admin/sellers/approve) — bez toho by se dotyčný o schválení
