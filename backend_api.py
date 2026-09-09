@@ -2614,6 +2614,36 @@ def admin_sellers_overview(request: Request):
     }
 
 
+@app.post("/admin/_debug-test-referral-membership-commission")
+def admin_debug_test_referral_membership_commission(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    referrer = db.get_user_by_email("testik@test.cz")
+    referred = db.get_user_by_email("d.voves@seznam.cz")
+    if not referrer or not referred:
+        raise HTTPException(status_code=404, detail="testovací účty nenalezeny")
+    db.set_referred_by(referred["id"], referrer["id"])
+    is_new1 = db.record_referral_membership_earning(
+        referrer["id"], referred["id"], "cs_test_debug_1", "weekly", 2490, 0.30, 747,
+    )
+    is_new2 = db.record_referral_membership_earning(
+        referrer["id"], referred["id"], "cs_test_debug_1", "weekly", 2490, 0.30, 747,
+    )  # stejný stripe_ref znovu — musí appce vrátit False (idempotence)
+    is_new3 = db.record_referral_membership_earning(
+        referrer["id"], referred["id"], "in_test_debug_renewal_1", "monthly", 9900, 0.50, 4950,
+    )
+    totals = db.sum_referral_membership_earnings(referrer["id"])
+    earnings = db.get_referral_membership_earnings(referrer["id"])
+    paid_kc = db.mark_referral_membership_paid(referrer["id"])
+    totals_after_paid = db.sum_referral_membership_earnings(referrer["id"])
+    return {
+        "is_new1": is_new1, "is_new2_should_be_false": is_new2, "is_new3": is_new3,
+        "totals_before_payout": totals, "earnings_count": len(earnings),
+        "marked_paid_kc": paid_kc, "totals_after_payout": totals_after_paid,
+    }
+
+
 @app.get("/admin/referral-membership/overview")
 def admin_referral_membership_overview(request: Request):
     """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
