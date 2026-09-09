@@ -1433,23 +1433,64 @@ def get_referral_membership_earnings(referrer_user_id: int) -> list[dict]:
 
 
 def list_referral_membership_overview() -> list[dict]:
-    """Appka appce vrátí VŠECHNY referrery, co appce reálně vydělali
-    aspoň korunu na doporučeném členství, se souhrnem — appka na to
-    potřebuje přehled napříč všemi najednou (viz
+    """Appka appce vrátí VŠECHNY referrery, co appce přivedli aspoň
+    jednoho zaregistrovaného kamaráda NEBO aspoň korunu vydělali, se
+    souhrnem — appka na to potřebuje přehled napříč všemi najednou (viz
     /admin/referral-membership/overview), stejný vzor jako
-    list_sellers_overview."""
+    list_sellers_overview. total_referred appka počítá ze VŠECH
+    zaregistrovaných přes odkaz (i těch, co appce ještě nic nezaplatili)
+    — appka to musí počítat oddělenou subquery od plateb, jinak by JOIN
+    násobil částky počtem přivedených lidí."""
     with get_cursor() as cur:
         cur.execute(
             """
-            SELECT e.referrer_user_id, u.email,
-                   COUNT(*) AS total_payments,
-                   SUM(e.commission_kc) AS total_kc,
-                   SUM(e.commission_kc) FILTER (WHERE e.paid_out) AS paid_out_kc,
-                   SUM(e.commission_kc) FILTER (WHERE NOT e.paid_out) AS pending_kc
+            WITH referred_counts AS (
+                SELECT referred_by_user_id AS referrer_id, COUNT(*) AS total_referred
+                  FROM users WHERE referred_by_user_id IS NOT NULL
+                 GROUP BY referred_by_user_id
+            ),
+            earnings_agg AS (
+                SELECT referrer_user_id AS referrer_id,
+                       COUNT(DISTINCT referred_user_id) AS paying_referred,
+                       COUNT(*) AS total_payments,
+                       SUM(commission_kc) AS total_kc,
+                       SUM(commission_kc) FILTER (WHERE paid_out) AS paid_out_kc,
+                       SUM(commission_kc) FILTER (WHERE NOT paid_out) AS pending_kc
+                  FROM referral_membership_earnings
+                 GROUP BY referrer_user_id
+            )
+            SELECT u.id AS referrer_user_id, u.email,
+                   COALESCE(rc.total_referred, 0) AS total_referred,
+                   COALESCE(ea.paying_referred, 0) AS paying_referred,
+                   COALESCE(ea.total_payments, 0) AS total_payments,
+                   COALESCE(ea.total_kc, 0) AS total_kc,
+                   COALESCE(ea.paid_out_kc, 0) AS paid_out_kc,
+                   COALESCE(ea.pending_kc, 0) AS pending_kc
+              FROM users u
+              LEFT JOIN referred_counts rc ON rc.referrer_id = u.id
+              LEFT JOIN earnings_agg ea ON ea.referrer_id = u.id
+             WHERE COALESCE(rc.total_referred, 0) > 0 OR COALESCE(ea.total_kc, 0) > 0
+             ORDER BY pending_kc DESC, total_referred DESC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_all_referral_membership_earnings() -> list[dict]:
+    """Appka appce vrátí VŠECHNY platby přes doporučení napříč všemi
+    referrery najednou (kdo koho přivedl a co appce zaplatil) — appka na
+    to potřebuje jednu plochou tabulku pro admin přehled, ne procházení
+    referrera po referrerovi."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.id, e.referrer_user_id, ru.email AS referrer_email,
+                   e.referred_user_id, du.email AS referred_email,
+                   e.plan_type, e.payment_kc, e.commission_kc, e.paid_out, e.created_at
               FROM referral_membership_earnings e
-              JOIN users u ON u.id = e.referrer_user_id
-             GROUP BY e.referrer_user_id, u.email
-             ORDER BY pending_kc DESC NULLS LAST
+              JOIN users ru ON ru.id = e.referrer_user_id
+              JOIN users du ON du.id = e.referred_user_id
+             ORDER BY e.created_at DESC
             """
         )
         return [dict(r) for r in cur.fetchall()]

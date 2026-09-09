@@ -2688,20 +2688,37 @@ def admin_referral_membership_overview(request: Request):
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
     overview = db.list_referral_membership_overview()
+    earnings = db.list_all_referral_membership_earnings()
     return {
         "referrer_count": len(overview),
+        "total_referred": sum(r["total_referred"] or 0 for r in overview),
+        "total_paying_referred": sum(r["paying_referred"] or 0 for r in overview),
         "total_pending_kc": sum(r["pending_kc"] or 0 for r in overview),
         "total_paid_out_kc": sum(r["paid_out_kc"] or 0 for r in overview),
         "referrers": [
             {
                 "referrer_user_id": r["referrer_user_id"],
                 "email": r["email"],
+                "total_referred": r["total_referred"] or 0,
+                "paying_referred": r["paying_referred"] or 0,
                 "total_payments": r["total_payments"],
                 "total_kc": r["total_kc"],
                 "paid_out_kc": r["paid_out_kc"] or 0,
                 "pending_kc": r["pending_kc"] or 0,
             }
             for r in overview
+        ],
+        "earnings": [
+            {
+                "referrer_email": e["referrer_email"],
+                "referred_email": e["referred_email"],
+                "plan_type": e["plan_type"],
+                "payment_kc": e["payment_kc"],
+                "commission_kc": e["commission_kc"],
+                "paid_out": e["paid_out"],
+                "created_at": e["created_at"].isoformat() if e["created_at"] else None,
+            }
+            for e in earnings
         ],
     }
 
