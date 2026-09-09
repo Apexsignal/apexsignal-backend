@@ -7034,6 +7034,17 @@ def _special_account_label(user_id: int) -> Optional[str]:
     return None
 
 
+@app.get("/admin/_debug-env-ids")
+def admin_debug_env_ids(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return {
+        "TRANSPARENCY_USER_ID": os.environ.get("TRANSPARENCY_USER_ID"),
+        "DAILY_TICKETS_USER_ID": os.environ.get("DAILY_TICKETS_USER_ID"),
+    }
+
+
 @app.post("/admin/showcase/seed")
 def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
     """
