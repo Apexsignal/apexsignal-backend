@@ -4309,7 +4309,7 @@ def admin_debug_ticket_lookup(ticket_id: int, request: Request):
         cur.execute(
             """
             SELECT home_team, away_team, market_type, selection, odds, result,
-                   home_score, away_score, kickoff_date, kickoff_time, league
+                   model_probability, market_probability, kickoff_date, kickoff_time, league
               FROM ticket_selections WHERE ticket_id = %s
             """,
             (ticket_id,),
