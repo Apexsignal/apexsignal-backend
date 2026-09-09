@@ -2676,6 +2676,34 @@ def admin_sellers_overview(request: Request):
     }
 
 
+@app.post("/admin/_debug-seed-referral-earning")
+def admin_debug_seed_referral_earning(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    referrer = db.get_user_by_email("testik@test.cz")
+    referred = db.get_user_by_email("d.voves@seznam.cz")
+    if not referrer or not referred:
+        raise HTTPException(status_code=404, detail="testovací účty nenalezeny")
+    db.record_referral_membership_earning(
+        referrer["id"], referred["id"], "cs_test_ui_preview_1", "monthly", 9900, 0.50, 4950,
+    )
+    return {"status": "seeded"}
+
+
+@app.post("/admin/_debug-cleanup-referral-earning")
+def admin_debug_cleanup_referral_earning(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    with db.get_cursor() as cur:
+        cur.execute("DELETE FROM referral_membership_earnings WHERE stripe_ref = %s RETURNING id", ("cs_test_ui_preview_1",))
+        deleted = cur.rowcount
+        cur.execute("DELETE FROM referral_payout_requests WHERE account_number = %s RETURNING id", ("TEST_UI_PREVIEW",))
+        deleted_reqs = cur.rowcount
+    return {"deleted_earnings": deleted, "deleted_requests": deleted_reqs}
+
+
 @app.get("/admin/referral-membership/overview")
 def admin_referral_membership_overview(request: Request):
     """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
