@@ -2614,33 +2614,6 @@ def admin_sellers_overview(request: Request):
     }
 
 
-@app.post("/admin/_debug-cleanup-referral-membership-test")
-def admin_debug_cleanup_referral_membership_test(request: Request):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    referred = db.get_user_by_email("d.voves@seznam.cz")
-    with db.get_cursor() as cur:
-        cur.execute(
-            "DELETE FROM referral_membership_earnings WHERE stripe_ref IN (%s, %s) RETURNING id",
-            ("cs_test_debug_1", "in_test_debug_renewal_1"),
-        )
-        deleted = cur.rowcount
-        reset_referred_by = None
-        if referred:
-            # Testovací volání appky omylem natrvalo nastavilo d.voves
-            # referred_by_user_id=testik (set_referred_by přepíše jen
-            # NULL, takže appka to musí ručně vrátit zpátky na NULL, ať
-            # appka nemá v produkci falešný doporučovací vztah mezi
-            # dvěma appčinými testovacími účty).
-            cur.execute(
-                "UPDATE users SET referred_by_user_id = NULL WHERE id = %s AND referred_by_user_id = 19 RETURNING id",
-                (referred["id"],),
-            )
-            reset_referred_by = cur.fetchone() is not None
-    return {"deleted_earning_rows": deleted, "reset_referred_by": reset_referred_by}
-
-
 @app.get("/admin/referral-membership/overview")
 def admin_referral_membership_overview(request: Request):
     """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
