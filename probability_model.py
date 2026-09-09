@@ -1046,6 +1046,15 @@ class MarketEvaluator:
             if match.sport == Sport.FOOTBALL and match.double_chance_odds:
                 dc_probs = cls.double_chance_probabilities(match.home_expected_goals, match.away_expected_goals)
                 for selection, odds in match.double_chance_odds.items():
+                    # "1X" (neprohra domácích) appka vyřadila úplně
+                    # (2026-09-09, po dvou reálných prohrách — Lille,
+                    # Sandviken) — kalibrace na 32 vzorcích ukázala jen
+                    # 53% skutečnou úspěšnost, i když model/trh tvrdily
+                    # ~75 %. "X2" (neprohra hostů) appka nechala beze
+                    # změny, tam kalibrace sedí (76 % skutečných na 21
+                    # vzorcích) — viz /admin/all-markets-calibration.
+                    if selection == "1X":
+                        continue
                     candidates.append(cls._candidate(match, MarketType.DOUBLE_CHANCE, selection, dc_probs[selection], odds))
 
             # Poločasové Under appka zrušila stejným pravidlem jako
