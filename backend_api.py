@@ -3601,24 +3601,54 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
 
 @app.post("/admin/_debug-preview-tomorrow")
 def admin_debug_preview_tomorrow(request: Request):
+    """Zrcadlí _run_generate_job (i s widen-fallbackem), jen bez
+    exclude_ids z uložených tiketů — appka appce ukáže, co by reálně
+    nabídla, kdyby appka ignorovala historii."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    tomorrow = (datetime.now(ZoneInfo("Europe/Prague")) + timedelta(days=1)).strftime("%Y-%m-%d")
     sports = [Sport.FOOTBALL]
     market_types = SPORT_MARKETS.get(Sport.FOOTBALL, [])
-    time_frame_days = 3
+    time_frame_days = 2
 
     matches = _fetch_candidate_matches(sports, time_frame_days)
-    matches = [m for m in matches if m.kickoff_date == tomorrow]
     matches = _filter_future_matches(matches, buffer_minutes=5)
+    matches = _filter_within_days(matches, time_frame_days)
 
     result = ticket_generator.generate(
         matches, 0, sports, market_types, time_frame_days,
         pool_filter=_pool_filter_for_risk(0),
         allow_relaxed_min_odds=True,
     )
+    horizon_note = None
+    used_wider = False
+    if result["safe"] is None:
+        wider_days = time_frame_days + 1
+        wider_matches = _fetch_candidate_matches(sports, wider_days)
+        wider_matches = _filter_future_matches(wider_matches, buffer_minutes=5)
+        wider_matches = _filter_within_days(wider_matches, wider_days)
+        wider_result = ticket_generator.generate(
+            wider_matches, 0, sports, market_types, wider_days,
+            pool_filter=_pool_filter_for_risk(0),
+            allow_relaxed_min_odds=True,
+        )
+        if wider_result["safe"] is not None:
+            result = wider_result
+            used_wider = True
+            horizon_note = f"V okně {time_frame_days} dny appka nenašla dost kandidátů, nabízí zápasy až za {wider_days} dní."
+        else:
+            all_markets = _all_markets_for_sports(sports)
+            if set(all_markets) != set(market_types):
+                markets_result = ticket_generator.generate(
+                    wider_matches, 0, sports, all_markets, wider_days,
+                    pool_filter=_pool_filter_for_risk(0),
+                    allow_relaxed_min_odds=True,
+                )
+                if markets_result["safe"] is not None:
+                    result = markets_result
+                    used_wider = True
+                    horizon_note = "Appka musela zkusit i ostatní trhy (např. Under góly), ne jen výchozí výběr."
 
     def _fmt(ticket):
         if ticket is None:
@@ -3628,16 +3658,15 @@ def admin_debug_preview_tomorrow(request: Request):
             "combined_probability": ticket.combined_probability,
             "selections": [
                 {"home_team": s.home_team, "away_team": s.away_team, "league": s.league,
+                 "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
                  "market_type": s.market_type.value, "selection": s.selection, "odds": s.odds,
-                 "model_probability": s.model_probability, "market_probability": s.market_probability,
-                 "kickoff_time": s.kickoff_time}
+                 "model_probability": s.model_probability, "market_probability": s.market_probability}
                 for s in ticket.selections
             ],
         }
 
     return {
-        "tomorrow": tomorrow, "matches_available": len(matches),
-        "sample": [{"home": m.home_team, "away": m.away_team, "league": m.league} for m in matches[:20]],
+        "matches_available": len(matches), "used_wider_window": used_wider, "horizon_note": horizon_note,
         "safe": _fmt(result.get("safe")), "aggressive": _fmt(result.get("aggressive")),
     }
 
