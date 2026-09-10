@@ -3568,6 +3568,47 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         raise
 
 
+@app.get("/admin/_debug-verify-token")
+def admin_debug_verify_token(email: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    user = db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="not found")
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT token FROM email_verification_tokens WHERE user_id = %s AND used_at IS NULL ORDER BY id DESC LIMIT 1",
+            (user["id"],),
+        )
+        row = cur.fetchone()
+    return {"token": row["token"] if row else None, "referred_by": db.get_referred_by(user["id"])}
+
+
+@app.get("/admin/_debug-token-balance")
+def admin_debug_token_balance(email: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    user = db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"balance": db.get_token_balance(user["id"]), "referred_by": db.get_referred_by(user["id"])}
+
+
+@app.post("/admin/_debug-delete-test-user")
+def admin_debug_delete_test_user(email: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    user = db.get_user_by_email(email)
+    if not user:
+        return {"status": "not_found"}
+    with db.get_cursor() as cur:
+        cur.execute("DELETE FROM users WHERE id = %s", (user["id"],))
+    return {"status": "deleted"}
+
+
 def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
