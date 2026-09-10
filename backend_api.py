@@ -3599,6 +3599,66 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         raise
 
 
+@app.post("/admin/_debug-generate-save-today")
+def admin_debug_generate_save_today(request: Request):
+    """Stejná logika jako předchozí náhledy (widen-fallback, bez
+    exclude_ids z historie), ale tentokrát appka výsledek i ULOŽÍ na
+    testik@test.cz, ať appka může tiket poslat na Telegram."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email("testik@test.cz")
+    if not user:
+        raise HTTPException(status_code=404, detail="testik@test.cz nenalezen")
+    user_id = user["id"]
+
+    sports = [Sport.FOOTBALL]
+    market_types = SPORT_MARKETS.get(Sport.FOOTBALL, [])
+    time_frame_days = 1
+
+    matches = _fetch_candidate_matches(sports, time_frame_days)
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+    matches = _filter_within_days(matches, time_frame_days)
+
+    result = ticket_generator.generate(
+        matches, 0, sports, market_types, time_frame_days,
+        pool_filter=_pool_filter_for_risk(0),
+        allow_relaxed_min_odds=True,
+    )
+    if result["safe"] is None:
+        wider_days = time_frame_days + 1
+        wider_matches = _fetch_candidate_matches(sports, wider_days)
+        wider_matches = _filter_future_matches(wider_matches, buffer_minutes=5)
+        wider_matches = _filter_within_days(wider_matches, wider_days)
+        wider_result = ticket_generator.generate(
+            wider_matches, 0, sports, market_types, wider_days,
+            pool_filter=_pool_filter_for_risk(0),
+            allow_relaxed_min_odds=True,
+        )
+        if wider_result["safe"] is not None:
+            result = wider_result
+
+    ticket = result.get("safe")
+    if ticket is None:
+        return {"status": "no_ticket_found"}
+
+    ticket_id = repo.save_ticket(user_id, ticket)
+    try:
+        row = db.fetch_ticket_rows(ticket_id=ticket_id)
+        if row:
+            selection_ids = [s.get("id") for s in row[0].get("selections", [])]
+            if selection_ids:
+                provider = data_provider.get_provider(Sport.FOOTBALL)
+                new_status = _try_settle_ticket(provider, ticket, selection_ids)
+                if new_status is not None:
+                    repo.set_ticket_status(ticket_id, new_status)
+    except Exception:
+        pass
+
+    return {"ticket_id": ticket_id, "status": "saved"}
+
+
 def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
