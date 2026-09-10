@@ -3578,7 +3578,7 @@ def admin_debug_verify_token(email: str, request: Request):
         raise HTTPException(status_code=404, detail="not found")
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT token FROM email_verification_tokens WHERE user_id = %s AND used_at IS NULL ORDER BY id DESC LIMIT 1",
+            "SELECT token FROM email_verification_tokens WHERE user_id = %s AND NOT used ORDER BY created_at DESC LIMIT 1",
             (user["id"],),
         )
         row = cur.fetchone()
