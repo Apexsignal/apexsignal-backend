@@ -470,12 +470,14 @@ def register(req: RegisterRequest, request: Request):
         except Exception as e:
             print(f"[register] Nepodařilo se přiřadit doporučitele ({req.ref}): {e}")
 
-    # Zkušební tokeny appka teď dá až PO ověření e-mailu (viz
-    # /auth/verify-email) — jinak šlo dokola zakládat účty s vymyšlenými
-    # e-maily jen kvůli opakovanému zkušebnímu tiketu zdarma. Účet appka
-    # založí a přihlásí hned (appka nechce novému uživateli blokovat
-    # přihlášení), jen generování zůstane bez tokenů, dokud e-mail
-    # nepotvrdí.
+    # Uvítací dárek (jen když appka výš zjistila platného doporučitele)
+    # appka dá až PO ověření e-mailu (viz /auth/verify-email) — jinak by
+    # šlo dokola zakládat účty s vymyšlenými e-maily jen kvůli
+    # opakovanému dárku. Účet appka založí a přihlásí hned (appka nechce
+    # novému uživateli blokovat přihlášení), jen generování zůstane bez
+    # tokenů, dokud e-mail nepotvrdí (a nemá-li appka platný referral kód,
+    # zůstane bez tokenů úplně — appka teď dává tokeny zdarma jen za
+    # doporučení, ne za pouhou registraci).
     try:
         verify_token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
@@ -497,15 +499,20 @@ def verify_email(req: VerifyEmailRequest):
         raise HTTPException(status_code=400, detail="Odkaz na potvrzení e-mailu je neplatný nebo vypršel")
     already_verified = db.is_email_verified(user_id)
     db.set_email_verified(user_id)
+    free_tokens_granted = False
     if not already_verified:
-        # Zkušební tokeny appka připíše až tady, přesně jednou — token je
-        # jednorázový (consume_email_verification_token ho hned označí
-        # jako použitý), takže appka nemůže omylem připsat dárek dvakrát.
+        # Appka dárek dá až tady (přesně jednou — token je jednorázový,
+        # consume_email_verification_token ho hned označí jako použitý),
+        # a JEN když se účet zaregistroval přes kamarádův kód/odkaz
+        # (referred_by_user_id nastavené) — appka žádné tokeny zdarma jen
+        # tak za ověření e-mailu nedává (2026-09-10, uživatelovo přání).
         try:
-            db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma, e-mail ověřen)")
+            if db.get_referred_by(user_id):
+                db.adjust_tokens(user_id, REFERRAL_CODE_GIFT_TOKENS, "REFERRAL_CODE_GIFT")
+                free_tokens_granted = True
         except Exception as e:
-            print(f"[verify_email] Nepodařilo se přidat zkušební tokeny: {e}")
-    return {"status": "E-mail potvrzen", "free_tokens_granted": not already_verified}
+            print(f"[verify_email] Nepodařilo se přidat uvítací dárek: {e}")
+    return {"status": "E-mail potvrzen", "free_tokens_granted": free_tokens_granted}
 
 
 @app.get("/referral/my-code")
@@ -627,6 +634,7 @@ def login(req: LoginRequest, request: Request):
 
 class GoogleAuthRequest(BaseModel):
     credential: str  # ID token appka dostane z Google Identity Services na frontendu
+    ref: Optional[str] = None  # doporučovací kód z ?ref= — appka ho appce pošle jen při registraci, stejně jako /auth/register
 
 
 @app.post("/auth/google", response_model=AuthResponse)
@@ -658,17 +666,29 @@ def google_auth(req: GoogleAuthRequest):
         random_password = secrets.token_urlsafe(32)
         user_id = db.create_user(email, auth.hash_password(random_password))
         is_new_user = True
+        # Doporučovací systém — appka referred_by nastaví jen TADY, při
+        # registraci, stejně jako u /auth/register (viz tam). Neplatný/
+        # neznámý kód appka jen tiše ignoruje.
+        if req.ref:
+            try:
+                referrer_id = db.get_user_id_by_referral_code(req.ref)
+                if referrer_id:
+                    db.set_referred_by(user_id, referrer_id)
+            except Exception as e:
+                print(f"[google_auth] Nepodařilo se přiřadit doporučitele ({req.ref}): {e}")
         # Google appce v idinfo posílá vlastní "email_verified" příznak —
         # appka mu věří (appka o tomhle tokenu už výš ověřila podpis i
         # cílového klienta), takže tu appka nepotřebuje appky vlastní
-        # ověřovací e-mail: Google účet je ověřený hned, appka rovnou
-        # připíše zkušební tokeny.
+        # ověřovací e-mail: Google účet appka ověří hned. Appka žádné
+        # tokeny zdarma jen tak nedává — jen když se účet zaregistroval
+        # přes kamarádův kód/odkaz (stejná podmínka jako /auth/verify-email).
         if idinfo.get("email_verified"):
             db.set_email_verified(user_id)
-            try:
-                db.adjust_tokens(user_id, FREE_TRIAL_TOKENS, "uvítací zkušební tokeny (1. tiket zdarma, Google účet)")
-            except Exception as e:
-                print(f"[google_auth] Nepodařilo se přidat zkušební tokeny: {e}")
+            if db.get_referred_by(user_id):
+                try:
+                    db.adjust_tokens(user_id, REFERRAL_CODE_GIFT_TOKENS, "REFERRAL_CODE_GIFT")
+                except Exception as e:
+                    print(f"[google_auth] Nepodařilo se přidat uvítací dárek: {e}")
         try:
             email_service.send_welcome_email(email)
         except Exception as e:
@@ -1255,25 +1275,20 @@ ticket_generator = TicketGenerator()
 TOKEN_KC_VALUE = 30  # 1 token = 30 Kč — appka to appce i frontendu drží na jednom místě
 TOKEN_COSTS = {"kratky": 10}  # 300 Kč při TOKEN_KC_VALUE=30 — appka BOOST i STŘEDNÍ přestala nabízet úplně
 
-# Každý nový účet dostane přesně tolik tokenů, kolik appka strhne za JEDEN
-# krátký tiket (viz TOKEN_COSTS["kratky"]) — appka tak novému uživateli
-# nechá jedno generování vyzkoušet zdarma, než se rozhodne platit
-# (tokeny/kanál/Founder). Fixní číslo místo TOKEN_COSTS["kratky"] přímo by
-# appce mohlo tiše rozjet zkušební dárek, kdyby se cena krátkého tiketu
-# někdy změnila — appka to chce takhle svázané schválně.
-FREE_TRIAL_TOKENS = TOKEN_COSTS["kratky"]
+# Appka žádné tokeny zdarma jen za registraci/ověření e-mailu NEDÁVÁ
+# (2026-09-10, uživatelovo přání: "Uplne bych zrusil strukturu ze nekdo
+# dostane neco zdarma za tokeny" — appka dřív dávala FREE_TRIAL_TOKENS
+# úplně každému, což šlo zneužít zakládáním e-mailů). Jediný způsob, jak
+# appka dá tokeny zdarma, je REFERRAL_CODE_GIFT_TOKENS — jednorázový
+# dárek tomu, kdo se zaregistruje přes kamarádův odkaz/kód (viz
+# _redeem_referral_code), doporučitel sám nedostává nic (čistě
+# jednosměrný dárek, uživatelovo přání). Fixní číslo místo
+# TOKEN_COSTS["kratky"] přímo by appce mohlo tiše rozjet zkušební dárek,
+# kdyby se cena krátkého tiketu někdy změnila — appka to chce takhle
+# svázané schválně.
+REFERRAL_CODE_GIFT_TOKENS = TOKEN_COSTS["kratky"]
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
-
-# Doporučovací systém — spouštěč je doporučeného účtu PRVNÍ SKUTEČNÁ
-# PLATBA appce (nákup tokenů nebo koupě neomezeného generování), ne jen
-# použití free trial tokenů (viz FREE_TRIAL_TOKENS výš — bez týhle
-# podmínky šlo odměnu vyfarmit zakládáním e-mailů bez jediné koruny,
-# viz _process_referral_reward). Pojmenované konstanty, ať appka jde
-# ladit bez zásahu do logiky.
-REFERRAL_REFERRER_TOKENS = 20  # 2× krátký tiket
-REFERRAL_REFERRED_BONUS_TOKENS = 10  # 1× krátký tiket (uživatelovo přání 2026-09-08: doporučitel dostane víc než doporučený)
-REFERRAL_MAX_REWARDS_PER_MONTH = 10
 
 # Provize za doporučení placeného ČLENSTVÍ (2026-09-09, uživatelovo
 # přání — nahrazuje dřívější "slevu na měsíční členství", co fungovala
@@ -1436,65 +1451,23 @@ def _check_token_balance(user_id: int, risk_level: int) -> None:
         )
 
 
-def _process_referral_reward(referred_user_id: int) -> None:
+def _redeem_referral_code(user_id: int, code: str) -> Optional[dict]:
     """
-    Appka tohle volá hned po KAŽDÉ appce REÁLNĚ zaplacené platbě
-    doporučeného účtu (nákup tokenů i koupě týdenního/měsíčního
-    neomezeného generování — obojí appka volá ze Stripe webhooku, ne
-    hned po vygenerování tiketu). Běží jako best-effort — chyba tady
-    nesmí shodit samotné zpracování platby, appka jen zaloguje a jde
-    dál.
-
-    Appka spouštěč záměrně přesunula z "doporučený si vygeneroval první
-    tiket" na "doporučený appce SKUTEČNĚ zaplatil" (2026-09-08,
-    uživatelovo přání) — appka dřív dovolovala odměnu vyfarmit i bez
-    jediné platby: nový účet dostane 10 tokenů zdarma jen za ověření
-    e-mailu (FREE_TRIAL_TOKENS), takže si někdo mohl založit spoustu
-    e-mailů, každým "vygenerovat první tiket" z těch free tokenů a
-    posbírat odměnu doporučitele, aniž by appce kdy přišla jediná
-    koruna. Vyžadovat reálnou platbu appce stačí — appka na to
-    nepotřebuje SMS ověření ani jinou infrastrukturu navíc.
-
-    Pojistky (musí projít VŠECHNY):
-      1) účet vůbec někoho doporučil (referred_by_user_id),
-      2) appka ho ještě neodměnila (referral_rewards.referred_user_id UNIQUE)
-         — díky UNIQUE appka odměnu připíše i při opakovaných platbách jen JEDNOU,
-      3) doporučitel nemá tento měsíc už vyčerpaný strop odměn,
-      4) doporučený a doporučitel neplatí stejnou kartou (otisk karty).
+    Appka appce dá REFERRAL_CODE_GIFT_TOKENS, když appce zadá kamarádův
+    unikátní referral kód — jednosměrný dárek (2026-09-10, uživatelovo
+    přání), doporučitel sám nedostává nic. Appka appce vrátí None, když
+    kód nepatří žádnému účtu, je appky vlastní, nebo appka už dřív kód
+    od NĚKOHO uplatnila (db.set_referred_by appce dovolí nastavit
+    referred_by jen JEDNOU za život účtu — appka na tom rovnou staví
+    idempotenci, ať appka nemusí appce vést zvlášť další tabulku).
     """
-    try:
-        referrer_id = db.get_referred_by(referred_user_id)
-        if not referrer_id:
-            return
-        if db.has_referral_reward(referred_user_id):
-            return
-        since = datetime.now(timezone.utc) - timedelta(days=30)
-        if db.count_referral_rewards_for_referrer_since(referrer_id, since) >= REFERRAL_MAX_REWARDS_PER_MONTH:
-            print(f"[referral] Doporučitel {referrer_id} dosáhl měsíčního stropu odměn — nepřipisuji")
-            return
-        referred_fingerprints = db.get_card_fingerprints(referred_user_id)
-        referrer_fingerprints = db.get_card_fingerprints(referrer_id)
-        shared = referred_fingerprints & referrer_fingerprints
-        if shared:
-            print(f"[referral] Doporučený {referred_user_id} sdílí kartu s doporučitelem {referrer_id} — odměna zamítnuta")
-            return
-
-        db.create_referral_reward(
-            referred_user_id, referrer_id, REFERRAL_REFERRED_BONUS_TOKENS, REFERRAL_REFERRER_TOKENS,
-            next(iter(referred_fingerprints), None),
-        )
-        db.adjust_tokens(referred_user_id, REFERRAL_REFERRED_BONUS_TOKENS, "REFERRAL_BONUS_REFERRED")
-        db.adjust_tokens(referrer_id, REFERRAL_REFERRER_TOKENS, "REFERRAL_BONUS_REFERRER")
-        try:
-            referrer = db.get_user_by_id(referrer_id)
-            if referrer and referrer.get("email"):
-                email_service.send_referral_reward_email(
-                    referrer["email"], REFERRAL_REFERRER_TOKENS, TOKEN_KC_VALUE,
-                )
-        except Exception as e:
-            print(f"[referral] Notifikační e-mail se nepodařilo odeslat (referrer_id={referrer_id}): {e}")
-    except Exception as e:
-        print(f"[referral] Zpracování odměny selhalo (referred_user_id={referred_user_id}): {e}")
+    referrer_id = db.get_user_id_by_referral_code(code)
+    if not referrer_id or referrer_id == user_id:
+        return None
+    if not db.set_referred_by(user_id, referrer_id):
+        return None
+    new_balance = db.adjust_tokens(user_id, REFERRAL_CODE_GIFT_TOKENS, "REFERRAL_CODE_GIFT")
+    return {"tokens_granted": REFERRAL_CODE_GIFT_TOKENS, "new_balance": new_balance}
 
 
 def _process_referral_membership_commission(
@@ -1504,8 +1477,8 @@ def _process_referral_membership_commission(
     Appka tohle volá při KAŽDÉ úspěšně zaplacené faktuře doporučeného
     kamarádova neomezeného generování — první platbě (checkout.session.
     completed) i každém dalším automatickém obnovení (invoice.payment_
-    succeeded) — na rozdíl od tokenové odměny (_process_referral_reward,
-    ta appka odmění jen JEDNOU) tady appka referrerovi platí OPAKOVANĚ,
+    succeeded) — na rozdíl od jednorázového uvítacího dárku za kód
+    (_redeem_referral_code, ten appka dá jen JEDNOU) tady appka referrerovi platí OPAKOVANĚ,
     dokud kamarád zůstává platícím členem (uživatelovo přání 2026-09-09).
     Idempotence appka nechává na DB (stripe_ref UNIQUE, viz
     record_referral_membership_earning) — appka appku klidně zavolá i
@@ -2013,7 +1986,6 @@ async def stripe_webhook(request: Request):
             plan_type = "weekly" if metadata.get("weeks") else "monthly"
             amount_paid_kc = (obj.get("amount_total") or 0) // 100
             _process_referral_membership_commission(user_id, plan_type, amount_paid_kc, obj["id"])
-            _process_referral_reward(user_id)
         elif obj.get("mode") == "subscription":
             # Platba přes samostatný Stripe Payment Link (kanál) — appka
             # tu nemá žádné metadata.user_id (nikdo se nepřihlašoval), jen
@@ -2042,20 +2014,6 @@ async def stripe_webhook(request: Request):
             tokens = int(metadata.get("tokens", 0))
             if user_id and tokens:
                 db.adjust_tokens(user_id, tokens, f"STRIPE_PAYMENT:{obj['id']}")
-                # Appka si otisk platební karty (ne číslo) uloží kvůli
-                # doporučovacímu systému — appka tak pozná sdílenou kartu
-                # mezi doporučeným a doporučitelem, i na různé e-maily.
-                # Best-effort: chyba tady nesmí shodit připsání tokenů výš.
-                try:
-                    pi_id = obj.get("payment_intent")
-                    if pi_id:
-                        pi = stripe.PaymentIntent.retrieve(pi_id, expand=["payment_method"])
-                        pm = pi.get("payment_method")
-                        fingerprint = (pm.get("card") or {}).get("fingerprint") if isinstance(pm, dict) else None
-                        db.record_card_fingerprint(user_id, fingerprint)
-                except Exception as e:
-                    print(f"[stripe] Nepodařilo se zaznamenat otisk karty (doporučovací pojistka): {e}")
-                _process_referral_reward(user_id)
 
     elif event_type.startswith("customer.subscription."):
         sub_metadata = obj.get("metadata") or {}
@@ -2310,9 +2268,20 @@ def redeem_token_code(req: RedeemCodeRequest, user_id: int = Depends(get_current
     if not code:
         raise HTTPException(status_code=400, detail="Zadej kód")
     result = db.redeem_code(code, user_id)
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+    if result["ok"]:
+        return result
+    # Appky admin kódy (redeem_code výš) a kamarádovy OSOBNÍ referral
+    # kódy (get_or_create_referral_code) appka schválně drží ve stejném
+    # poli "Zadej kód" — appka to appce zkusí jako druhou možnost, až
+    # když první selže, ať appka nemusí appce na frontendu dělat dvě
+    # oddělená pole. Viz _redeem_referral_code.
+    referral_result = _redeem_referral_code(user_id, code)
+    if referral_result:
+        return {
+            "ok": True, "tokens": referral_result["tokens_granted"], "new_balance": referral_result["new_balance"],
+            "message": f"Získal jsi {referral_result['tokens_granted']} tokenů od kamaráda!",
+        }
+    raise HTTPException(status_code=400, detail=result["error"])
 
 
 class CreateRedeemCodeRequest(BaseModel):

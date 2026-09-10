@@ -1346,20 +1346,24 @@ def get_user_id_by_referral_code(code: str) -> Optional[int]:
         return row["id"] if row else None
 
 
-def set_referred_by(user_id: int, referrer_user_id: int) -> None:
+def set_referred_by(user_id: int, referrer_user_id: int) -> bool:
     """
-    Appka tohle volá jen PŘI REGISTRACI nového účtu — podmínka
-    `referred_by_user_id IS NULL` je tu jako pojistka, appka referred_by
-    nikdy nepřepisuje podruhé (i kdyby se stejná registrace omylem
-    zavolala dvakrát).
+    Appka referred_by nastaví jen JEDNOU za život účtu — podmínka
+    `referred_by_user_id IS NULL` appce zaručí, že appka referred_by
+    nikdy nepřepíše podruhé (ať appka volá appku při registraci přes
+    ?ref=, nebo appka appku uplatní ručně přes /tokens/redeem, viz
+    _redeem_referral_code). Appka appce vrátí True, jen když appka
+    reálně nastavila novou hodnotu — appka appce na tom staví
+    idempotenci "kód appce jde uplatnit jen jednou".
     """
     if referrer_user_id == user_id:
-        return
+        return False
     with get_cursor() as cur:
         cur.execute(
             "UPDATE users SET referred_by_user_id = %s WHERE id = %s AND referred_by_user_id IS NULL",
             (referrer_user_id, user_id),
         )
+        return cur.rowcount > 0
 
 
 def get_referred_by(user_id: int) -> Optional[int]:
@@ -1367,37 +1371,6 @@ def get_referred_by(user_id: int) -> Optional[int]:
         cur.execute("SELECT referred_by_user_id FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
         return row["referred_by_user_id"] if row else None
-
-
-def has_referral_reward(referred_user_id: int) -> bool:
-    with get_cursor() as cur:
-        cur.execute("SELECT 1 FROM referral_rewards WHERE referred_user_id = %s", (referred_user_id,))
-        return cur.fetchone() is not None
-
-
-def count_referral_rewards_for_referrer_since(referrer_user_id: int, since: datetime) -> int:
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM referral_rewards WHERE referrer_user_id = %s AND created_at >= %s",
-            (referrer_user_id, since),
-        )
-        return cur.fetchone()["c"]
-
-
-def create_referral_reward(
-    referred_user_id: int, referrer_user_id: int, referred_tokens: int, referrer_tokens: int,
-    card_fingerprint: Optional[str],
-) -> None:
-    with get_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO referral_rewards
-                (referred_user_id, referrer_user_id, referred_tokens, referrer_tokens, card_fingerprint)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (referred_user_id) DO NOTHING
-            """,
-            (referred_user_id, referrer_user_id, referred_tokens, referrer_tokens, card_fingerprint),
-        )
 
 
 def record_referral_membership_earning(
@@ -1606,29 +1579,6 @@ def sum_referral_membership_earnings(referrer_user_id: int) -> dict:
         )
         row = cur.fetchone()
         return {"total_kc": row["total_kc"], "paid_out_kc": row["paid_out_kc"], "pending_kc": row["pending_kc"]}
-
-
-def record_card_fingerprint(user_id: int, fingerprint: Optional[str]) -> None:
-    """Appka appce jen loguje otisky karet, co appka kdy viděla u nákupu
-    tokenů — appka to nepoužívá k ničemu jinému než k detekci sdílené
-    karty mezi doporučeným a doporučitelem."""
-    if not fingerprint:
-        return
-    with get_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO user_card_fingerprints (user_id, fingerprint)
-            VALUES (%s, %s)
-            ON CONFLICT (user_id, fingerprint) DO NOTHING
-            """,
-            (user_id, fingerprint),
-        )
-
-
-def get_card_fingerprints(user_id: int) -> set[str]:
-    with get_cursor() as cur:
-        cur.execute("SELECT fingerprint FROM user_card_fingerprints WHERE user_id = %s", (user_id,))
-        return {r["fingerprint"] for r in cur.fetchall()}
 
 
 # =====================================================================
