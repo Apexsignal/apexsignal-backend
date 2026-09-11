@@ -224,6 +224,23 @@ OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # ("vyradit skotskou ligu") z Over gólů úplně
                               # vyřazuje, ne jen zpřísňuje.
 
+OVER_GOALS_EXCLUDED_LEAGUES = {
+    "Bundesliga", "Super Liga", "Czech Liga", "1. Division",
+    "Serie B", "Segunda Liga", "UEFA Champions League",
+}
+# appka (2026-09-11) při celkovém auditu appky přes appčin samostatný
+# /admin/goals-market-calibration (appka si předtím tenhle trh vůbec
+# nerozebírala podle ligy, jen podle prahu) našla dalších 7 lig s
+# prokazatelně špatnou kalibrací na Over gólů, u proher navíc appka
+# vidí systematicky sebejistější model než trh:
+#   Bundesliga 33.3 % (n=6), Super Liga (Srbsko) 42.9 % (n=14),
+#   Czech Liga 44.4 % (n=9), 1. Division 47.4 % (n=19, největší
+#   vzorek z těchhle), Serie B 55.6 % (n=18), Segunda Liga 55.6 % (n=9),
+#   UEFA Champions League 57.1 % (n=70 — appka to samé zjistila i u
+#   dvojtipu v CL, 42.9 %, viz DOUBLE_CHANCE_EXCLUDED_LEAGUES; appka to
+#   bere jako vlastnost ligy, ne konkrétního trhu — v CL appce vychází
+#   dobře jen match_winner, 100 % na 17 vzorcích).
+
 MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) přes
                               # /admin/all-markets-calibration zjistila FNL
                               # (ruská 2. liga) na výhře favorita jen 33.3 %
@@ -1026,7 +1043,11 @@ class MarketEvaluator:
                 match.home_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
                 and match.away_attack_rate >= OVER_GOALS_MIN_TEAM_ATTACK_RATE
             )
-            if has_reliable_form and both_teams_attacking and match.country not in OVER_GOALS_EXCLUDED_COUNTRIES:
+            if (
+                has_reliable_form and both_teams_attacking
+                and match.country not in OVER_GOALS_EXCLUDED_COUNTRIES
+                and match.league not in OVER_GOALS_EXCLUDED_LEAGUES
+            ):
                 for threshold, odds in match.over_goals_odds.items():
                     prob = cls.over_goals_probability(match.home_expected_goals, match.away_expected_goals, threshold)
                     candidate = cls._candidate(match, MarketType.OVER_GOALS, f"over_{threshold}", prob, odds)
