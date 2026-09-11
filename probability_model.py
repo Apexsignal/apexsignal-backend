@@ -224,14 +224,17 @@ OVER_GOALS_EXCLUDED_COUNTRIES = {"Scotland"}  # skotská Premiership appce
                               # ("vyradit skotskou ligu") z Over gólů úplně
                               # vyřazuje, ne jen zpřísňuje.
 
-MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL"}  # appka (2026-08-13) přes
+MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) přes
                               # /admin/all-markets-calibration zjistila FNL
                               # (ruská 2. liga) na výhře favorita jen 33.3 %
                               # (3/9) — zatímco match_winner celkově appce jede
                               # 84.8 % (99 vzorků). Stejný princip jako
                               # OVER_GOALS_EXCLUDED_COUNTRIES u Skotska —
                               # appka radši ligu úplně vynechá, než aby ji
-                              # jen zpřísňovala.
+                              # jen zpřísňovala. "Ekstraklasa" (polská liga)
+                              # appka doplnila 2026-09-11 ze stejného důvodu —
+                              # 28.6 % (2/7), zatímco match_winner je jinde
+                              # skoro všude 85-100 %.
 
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
