@@ -7900,3 +7900,30 @@ def _prepare_signal_prompt(data):
     return "Převypravuj tyhle data o sázení do plynulého českého textu (čistě informativní, bez rad).\n\nData: " + json.dumps(data)
 
 
+
+
+@app.get("/admin/_debug-search-match")
+def _debug_search_match(request: Request, q: str):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    results = []
+    for env_var in ["DAILY_TICKETS_USER_ID", "TRANSPARENCY_USER_ID", "TEST3_USER_ID"]:
+        uid_raw = os.environ.get(env_var)
+        if not uid_raw:
+            continue
+        try:
+            uid = int(uid_raw)
+        except ValueError:
+            continue
+        tickets = _list_saved_tickets_for_user(uid)
+        for t in tickets:
+            for s in t.selections:
+                if q.lower() in s.home_team.lower() or q.lower() in s.away_team.lower():
+                    results.append({
+                        "account": env_var, "ticket_id": t.ticket_id, "status": t.status,
+                        "created_at": t.created_at, "match": f"{s.home_team} – {s.away_team}",
+                        "market_type": s.market_type, "selection": s.selection, "odds": s.odds,
+                        "result": s.result,
+                    })
+    return {"results": results}
