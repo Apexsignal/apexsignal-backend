@@ -7903,25 +7903,3 @@ def _prepare_signal_prompt(data):
 
 
 
-
-@app.post("/admin/_debug-send-tomorrow-ticket1")
-def _debug_send_tomorrow_ticket1(request: Request):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    tomorrow = (datetime.now(ZoneInfo("Europe/Prague")).date() + timedelta(days=1)).isoformat()
-    all_matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 3)
-    all_matches = _filter_future_matches(all_matches, buffer_minutes=5)
-    tomorrow_matches = [m for m in all_matches if m.kickoff_date == tomorrow]
-
-    result = ticket_generator.generate(tomorrow_matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 3)
-    ticket = result["safe"]
-    if ticket is None:
-        raise HTTPException(status_code=404, detail="Tiket se nepovedlo sestavit")
-
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        raise HTTPException(status_code=500, detail="TELEGRAM_CHAT_ID není nastavené")
-    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, 0), chat_id=int(chat_id))
-    return {"status": "sent", "total_odds": ticket.total_odds}
