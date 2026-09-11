@@ -2817,6 +2817,40 @@ def admin_list_payout_requests(request: Request, status: Optional[str] = None):
     }
 
 
+class ManualDeclarationRequest(BaseModel):
+    email: str
+    has_ico: bool
+    ico: Optional[str] = None
+    note: str = ""
+
+
+@app.post("/admin/referral/manual-declaration")
+def admin_set_manual_declaration(req: ManualDeclarationRequest, request: Request):
+    """Appka appce (adminovi) dovolí ručně zapsat čestné prohlášení za
+    referrera, co NENÍ daňový rezident ČR (appka mu v appce standardní
+    formulář se zákonem §10 vůbec nenabídne, appka appce místo toho pošle
+    e-mail a appka to s ním vyřeší individuálně mimo appku) — appka
+    appce použije stejnou tabulku (referral_payout_declarations), takže
+    appce se pak commission gate v _process_referral_membership_commission
+    chová úplně stejně, appka jen appce text prohlášení nahradí appčinou
+    poznámkou o tom, jak to bylo dohodnuté."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Uživatel s tímhle e-mailem nenalezen")
+    if req.has_ico and not (req.ico or "").strip():
+        raise HTTPException(status_code=400, detail="Zadej IČO")
+
+    text = "Ručně zpracováno adminem — referrer mimo ČR / individuální dohoda."
+    if req.note.strip():
+        text += f" Poznámka: {req.note.strip()}"
+    db.submit_referral_declaration(user["id"], req.has_ico, (req.ico or "").strip() or None, text)
+    return {"status": "ok", "user_id": user["id"]}
+
+
 @app.post("/admin/referral-membership/payout-requests/{request_id}/mark-paid")
 def admin_mark_payout_request_paid(request_id: int, request: Request):
     """Appka appce (adminovi) označí KONKRÉTNÍ žádost o výplatu jako
