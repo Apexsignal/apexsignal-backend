@@ -512,6 +512,30 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # Čestné prohlášení k výplatě provize (2026-09-11) — appka appce
+    # nesmí vyplatit ani korunu provize, dokud appka nemá od appky
+    # (referrera) potvrzeno, ŽE má IČO (appka pak čeká fakturu) NEBO že
+    # jde o příležitostný příjem dle §10 a appka si ho zdaní sama —
+    # appka appce text prohlášení ukládá CELÝ (ne jen boolean), ať appka
+    # má doklad, CO přesně appka appce odsouhlasila, i kdyby appka text
+    # později změnila. Appka appce dovolí prohlášení podat znovu (ON
+    # CONFLICT DO UPDATE), např. když appka mezitím IČO založí.
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS referral_payout_declarations (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    has_ico BOOLEAN NOT NULL,
+                    ico VARCHAR(32),
+                    declaration_text TEXT NOT NULL,
+                    accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+    except Exception:
+        pass
+
     # Appka si sem loguje otisk platební karty (ne číslo karty) u KAŽDÉHO
     # nákupu tokenů — díky tomu appka umí u doporučovacího systému poznat,
     # že doporučený a doporučitel platí stejnou kartou, i kdyby měli různé
@@ -1399,6 +1423,36 @@ def get_invited_summary(referrer_user_id: int) -> dict:
         }
 
 
+def submit_referral_declaration(user_id: int, has_ico: bool, ico: Optional[str], declaration_text: str) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO referral_payout_declarations (user_id, has_ico, ico, declaration_text, accepted_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (user_id) DO UPDATE SET
+                has_ico = EXCLUDED.has_ico, ico = EXCLUDED.ico,
+                declaration_text = EXCLUDED.declaration_text, accepted_at = now()
+            """,
+            (user_id, has_ico, ico, declaration_text),
+        )
+
+
+def get_referral_declaration(user_id: int) -> Optional[dict]:
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT user_id, has_ico, ico, declaration_text, accepted_at FROM referral_payout_declarations WHERE user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def has_referral_declaration(user_id: int) -> bool:
+    with get_cursor() as cur:
+        cur.execute("SELECT 1 FROM referral_payout_declarations WHERE user_id = %s", (user_id,))
+        return cur.fetchone() is not None
+
+
 def record_referral_membership_earning(
     referrer_user_id: int, referred_user_id: int, stripe_ref: str,
     plan_type: str, payment_kc: int, commission_pct: float, commission_kc: int,
@@ -1531,7 +1585,7 @@ def has_pending_payout_request(referrer_user_id: int) -> bool:
 
 
 def create_payout_request(
-    referrer_user_id: int, full_name: str, account_number: str, ico: str, requested_kc: int,
+    referrer_user_id: int, full_name: str, account_number: str, ico: Optional[str], requested_kc: int,
 ) -> int:
     with get_cursor() as cur:
         cur.execute(

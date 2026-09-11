@@ -526,6 +526,36 @@ def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
     return {"code": code, "link": f"{frontend_url}/?ref={code}"}
 
 
+class DeclarationRequest(BaseModel):
+    has_ico: bool
+    ico: Optional[str] = None
+
+    @field_validator("ico")
+    @classmethod
+    def validate_ico(cls, v: Optional[str], info) -> Optional[str]:
+        has_ico = info.data.get("has_ico")
+        v = (v or "").strip() or None
+        if has_ico and not v:
+            raise ValueError("Zadej IČO")
+        if v and len(v) > 32:
+            raise ValueError("IČO je moc dlouhé")
+        return v
+
+
+@app.post("/referral/accept-declaration")
+def accept_referral_declaration(req: DeclarationRequest, user_id: int = Depends(get_current_user_id)):
+    """
+    Appka appce nesmí připsat ŽÁDNOU provizi za doporučení, dokud appka
+    (referrer) tohle neodešle — viz REFERRAL_DECLARATION_TEXT_* a gate
+    v _process_referral_membership_commission. Appka appce uloží PŘESNÝ
+    text, co appka odsouhlasila (ne jen has_ico bool), ať appka má
+    doklad k výplatě.
+    """
+    text = REFERRAL_DECLARATION_TEXT_HAS_ICO if req.has_ico else REFERRAL_DECLARATION_TEXT_NO_ICO
+    db.submit_referral_declaration(user_id, req.has_ico, req.ico, text)
+    return {"status": "accepted", "has_ico": req.has_ico}
+
+
 @app.get("/referral/membership-progress")
 def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)):
     """Appka appce ukáže vydělané provize za doporučené placené členství
@@ -536,6 +566,7 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
     totals = db.sum_referral_membership_earnings(user_id)
     earnings = db.get_referral_membership_earnings(user_id)
     invited = db.get_invited_summary(user_id)
+    declaration = db.get_referral_declaration(user_id)
     return {
         "total_kc": totals["total_kc"],
         "paid_out_kc": totals["paid_out_kc"],
@@ -546,13 +577,16 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
         "registered_total": invited["registered_total"],
         "paying_total": invited["paying_total"],
         "active_now": invited["active_now"],
+        "has_declaration": declaration is not None,
+        "declaration_has_ico": declaration["has_ico"] if declaration else None,
+        "declaration_ico": declaration["ico"] if declaration else None,
     }
 
 
 class PayoutRequestRequest(BaseModel):
     full_name: str
     account_number: str
-    ico: str
+    ico: Optional[str] = None
 
     @field_validator("full_name")
     @classmethod
@@ -595,6 +629,12 @@ def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(ge
     převodem, pak appka appce označí přes /admin/referral-membership/
     payout-requests/{id}/mark-paid).
     """
+    declaration = db.get_referral_declaration(user_id)
+    if not declaration:
+        raise HTTPException(status_code=400, detail="Nejdřív odešli čestné prohlášení k výplatě provize.")
+    ico = (req.ico or "").strip() or declaration.get("ico")
+    if declaration["has_ico"] and not ico:
+        raise HTTPException(status_code=400, detail="Zadej IČO — ve svém prohlášení jsi uvedl, že IČO máš.")
     if db.has_pending_payout_request(user_id):
         raise HTTPException(status_code=409, detail="Už máš jednu žádost o výplatu čekající na vyřízení.")
     totals = db.sum_referral_membership_earnings(user_id)
@@ -602,7 +642,7 @@ def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(ge
     if pending_kc <= 0:
         raise HTTPException(status_code=400, detail="Nemáš žádnou nevyplacenou provizi.")
 
-    request_id = db.create_payout_request(user_id, req.full_name, req.account_number, req.ico, pending_kc)
+    request_id = db.create_payout_request(user_id, req.full_name, req.account_number, ico, pending_kc)
 
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if chat_id:
@@ -613,7 +653,7 @@ def request_referral_payout(req: PayoutRequestRequest, user_id: int = Depends(ge
                 "💸 Nová žádost o výplatu provize za doporučení\n"
                 f"Od: {user['email'] if user else user_id}\n"
                 f"Jméno: {req.full_name}\n"
-                f"IČO: {req.ico}\n"
+                f"IČO: {ico or '— (příležitostný příjem dle §10, appka nesráží daň)'}\n"
                 f"Číslo účtu: {req.account_number}\n"
                 f"Částka: {pending_kc} Kč\n"
                 f"Žádost #{request_id}",
@@ -1313,6 +1353,24 @@ REFERRAL_MEMBERSHIP_COMMISSION_PCT: dict[str, float] = {
     "weekly": 0.30,
     "monthly": 0.50,
 }
+
+# Appka žádnou provizi za doporučení nesmí připsat, dokud referrer
+# neodešle čestné prohlášení (2026-09-11, uživatelovo přání) — appka to
+# vynucuje v _process_referral_membership_commission (žádná provize se
+# ani nezaloží, appka to appce jasně řekne v appce, ať appka ví, proč jí
+# "chybí" peníze). Appka appce ukládá CELÝ text, co appka odsouhlasila
+# (ne jen checkbox), ať appka má doklad — appka appce dovolí prohlášení
+# znovu odeslat (např. při doplnění IČO později).
+REFERRAL_DECLARATION_TEXT_HAS_ICO = (
+    "Čestně prohlašuji, že k výplatě provize za doporučení v appce ApexSignal mám platné IČO "
+    "a na vyplácenou částku appce (David Novik, IČO 05010276) vystavím fakturu."
+)
+REFERRAL_DECLARATION_TEXT_NO_ICO = (
+    "Čestně prohlašuji, že nemám IČO a provize za doporučení v appce ApexSignal je pro mě "
+    "příležitostným příjmem dle § 10 zákona č. 586/1992 Sb., o daních z příjmů. Zavazuji se tento "
+    "příjem sám přiznat a zdanit ve svém daňovém přiznání. Beru na vědomí, že ApexSignal "
+    "(David Novik, IČO 05010276) z vyplacené částky nesráží ani neodvádí žádnou daň ani pojistné."
+)
 MAX_CUSTOM_TOKENS = 5000  # pojistka proti překlepu/zneužití při vlastní částce
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -1496,6 +1554,13 @@ def _process_referral_membership_commission(
     try:
         referrer_id = db.get_referred_by(referred_user_id)
         if not referrer_id:
+            return
+        if not db.has_referral_declaration(referrer_id):
+            # Appka referrerovi žádnou provizi nepřipíše, dokud appka
+            # neodešle čestné prohlášení (uživatelovo přání 2026-09-11) —
+            # appka o tuhle platbu referrera prostě připraví, appka mu to
+            # v appce jasně ukáže (viz has_declaration v
+            # /referral/membership-progress) a řekne, co má udělat.
             return
         pct = REFERRAL_MEMBERSHIP_COMMISSION_PCT.get(plan_type)
         if not pct:
