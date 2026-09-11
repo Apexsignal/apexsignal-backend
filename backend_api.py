@@ -535,6 +535,7 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
     JAKÝ tarif mu vydělal."""
     totals = db.sum_referral_membership_earnings(user_id)
     earnings = db.get_referral_membership_earnings(user_id)
+    invited = db.get_invited_summary(user_id)
     return {
         "total_kc": totals["total_kc"],
         "paid_out_kc": totals["paid_out_kc"],
@@ -542,6 +543,9 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
         "commission_pct": REFERRAL_MEMBERSHIP_COMMISSION_PCT,
         "earnings": earnings,
         "has_pending_payout_request": db.has_pending_payout_request(user_id),
+        "registered_total": invited["registered_total"],
+        "paying_total": invited["paying_total"],
+        "active_now": invited["active_now"],
     }
 
 

@@ -1373,6 +1373,32 @@ def get_referred_by(user_id: int) -> Optional[int]:
         return row["referred_by_user_id"] if row else None
 
 
+def get_invited_summary(referrer_user_id: int) -> dict:
+    """Appka appce spočítá, kolik lidí přes appčin kód/odkaz zaregistrovala
+    (referred_by_user_id), kolik z nich si už NĚKDY koupilo neomezené
+    generování (unlimited_until IS NOT NULL) a kolik má appka aktivní
+    PRÁVĚ TEĎ (unlimited_until v budoucnosti) — appka to appce dřív nikde
+    nepočítala per-uživatel, jen v admin agregátu (list_referral_membership_overview)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS registered_total,
+                COUNT(*) FILTER (WHERE unlimited_until IS NOT NULL) AS paying_total,
+                COUNT(*) FILTER (WHERE unlimited_until > NOW()) AS active_now
+              FROM users
+             WHERE referred_by_user_id = %s
+            """,
+            (referrer_user_id,),
+        )
+        row = cur.fetchone()
+        return {
+            "registered_total": row["registered_total"] or 0,
+            "paying_total": row["paying_total"] or 0,
+            "active_now": row["active_now"] or 0,
+        }
+
+
 def record_referral_membership_earning(
     referrer_user_id: int, referred_user_id: int, stripe_ref: str,
     plan_type: str, payment_kc: int, commission_pct: float, commission_kc: int,
