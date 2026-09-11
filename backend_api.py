@@ -519,7 +519,11 @@ def verify_email(req: VerifyEmailRequest):
 def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
     code = db.get_or_create_referral_code(user_id)
     frontend_url = os.environ.get("FRONTEND_URL", "https://apexsignal.cz")
-    return {"code": code, "link": f"{frontend_url}/app/?ref={code}"}
+    # Appka appce posílá odkaz na LANDING PAGE (ne rovnou appku samotnou),
+    # ať cizí/skeptický návštěvník nejdřív appku pochopí, než ho appka
+    # hodí rovnou na registraci — landing page appce ?ref= sama propíše
+    # do všech tlačítek vedoucích do appky (viz index.html).
+    return {"code": code, "link": f"{frontend_url}/?ref={code}"}
 
 
 @app.get("/referral/membership-progress")
