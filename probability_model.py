@@ -195,6 +195,20 @@ BTTS_STRICT_MIN_PROB = 0.71  # appka (2026-08-09) přes /admin/all-markets-calib
                               # živě naměřila jen 55.9 % skutečnou úspěšnost na BTTS
                               # (34 vzorků), u proher model v průměru o 10.9 p. b.
                               # sebejistější než trh — appka práh zvedla na 75 %.
+
+DOUBLE_CHANCE_EXCLUDED_LEAGUES = frozenset({
+    "3. Liga", "UEFA Champions League", "2. Bundesliga", "Superettan",
+})
+# appka (2026-09-11) přes /admin/all-markets-calibration zjistila, že
+# odebrání "1X" (viz níže) problém úplně nevyřešilo — appka pořád
+# prohrávala i s "X2" (Darmstadt – Bielefeld), a to KONKRÉTNĚ v týchhle
+# ligách, bez ohledu na to, jestli šlo o 1X nebo X2: 3. Liga 16.7 %
+# (n=6), UEFA Champions League 42.9 % (n=7), 2. Bundesliga 44.4 % (n=9),
+# Superettan 55.6 % (n=9) — appka model tam tvrdil 70-75 %. Appka proto
+# celý trh double_chance (obě selekce) v těchhle konkrétních ligách
+# vyřadila, ne jen jednu selekci — je to vlastnost LIGY (vyrovnanější/
+# nepředvídatelné soutěže), ne vlastnost 1X/X2. Ostatní ligy appka
+# nechala beze změny, dokud appka neuvidí podobný vzorec i tam.
                               #
                               # 2026-08-15: /admin/probability-distribution ukázal,
                               # že appka toho dne neměla ANI JEDEN BTTS kandidát
@@ -1043,7 +1057,11 @@ class MarketEvaluator:
             # v backend_api.py), takže double_chance_odds/ht_*_odds bude u
             # VĚTŠINY zápasů prázdné — appka to bere jako normální stav, ne
             # chybu, a kandidáta prostě nenabídne.
-            if match.sport == Sport.FOOTBALL and match.double_chance_odds:
+            if (
+                match.sport == Sport.FOOTBALL
+                and match.double_chance_odds
+                and match.league not in DOUBLE_CHANCE_EXCLUDED_LEAGUES
+            ):
                 dc_probs = cls.double_chance_probabilities(match.home_expected_goals, match.away_expected_goals)
                 for selection, odds in match.double_chance_odds.items():
                     # "1X" (neprohra domácích) appka vyřadila úplně
