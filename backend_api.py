@@ -7907,23 +7907,22 @@ def _debug_search_match(request: Request, q: str):
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    results = []
-    for env_var in ["DAILY_TICKETS_USER_ID", "TRANSPARENCY_USER_ID", "TEST3_USER_ID"]:
-        uid_raw = os.environ.get(env_var)
-        if not uid_raw:
-            continue
-        try:
-            uid = int(uid_raw)
-        except ValueError:
-            continue
-        tickets = _list_saved_tickets_for_user(uid)
-        for t in tickets:
-            for s in t.selections:
-                if q.lower() in s.home_team.lower() or q.lower() in s.away_team.lower():
-                    results.append({
-                        "account": env_var, "ticket_id": t.ticket_id, "status": t.status,
-                        "created_at": t.created_at, "match": f"{s.home_team} – {s.away_team}",
-                        "market_type": s.market_type, "selection": s.selection, "odds": s.odds,
-                        "result": s.result,
-                    })
-    return {"results": results}
+    from db import get_cursor
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT u.email, t.id AS ticket_id, t.status, t.created_at,
+                   s.home_team, s.away_team, s.market_type, s.selection, s.odds, s.result
+              FROM ticket_selections s
+              JOIN tickets t ON t.id = s.ticket_id
+              JOIN users u ON u.id = t.user_id
+             WHERE s.home_team ILIKE %s OR s.away_team ILIKE %s
+             ORDER BY t.created_at DESC
+             LIMIT 50
+            """,
+            (f"%{q}%", f"%{q}%"),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
+    return {"results": rows}
