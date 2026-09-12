@@ -7929,15 +7929,3 @@ def _prepare_signal_prompt(data):
 
 
 
-
-@app.post("/admin/_debug-bulk-delete-tickets")
-def _debug_bulk_delete_tickets(request: Request, ids: str):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    ticket_ids = [int(x) for x in ids.split(",") if x.strip()]
-    deleted = []
-    for tid in ticket_ids:
-        db.delete_ticket(tid)
-        deleted.append(tid)
-    return {"deleted": deleted, "count": len(deleted)}
