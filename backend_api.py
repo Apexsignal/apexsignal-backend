@@ -308,6 +308,9 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     ref: Optional[str] = None  # doporučovací kód z ?ref= — appka ho appce pošle jen při registraci
+    device_seen: Optional[bool] = None  # appka appce pošle True, když appka v localStorage appky
+    # už NAJDE appčinu značku z PŘEDCHOZÍ registrace na stejném zařízení/prohlížeči — appka appce
+    # to jen zaznamená pro admin přehled (viz multi_account_flag), appka na tom nic neblokuje.
 
     @field_validator("email")
     @classmethod
@@ -458,6 +461,8 @@ def register(req: RegisterRequest, request: Request):
         raise HTTPException(status_code=409, detail="Tenhle e-mail už je zaregistrovaný")
     user_id = db.create_user(req.email, auth.hash_password(req.password))
     db.set_registration_ip(user_id, client_ip)
+    if req.device_seen:
+        db.set_multi_account_flag(user_id, True)
     rate_limiter.record_success(req.email, client_ip)
 
     # Doporučovací systém — appka referred_by nastaví jen TADY, při
@@ -684,6 +689,7 @@ def login(req: LoginRequest, request: Request):
 class GoogleAuthRequest(BaseModel):
     credential: str  # ID token appka dostane z Google Identity Services na frontendu
     ref: Optional[str] = None  # doporučovací kód z ?ref= — appka ho appce pošle jen při registraci, stejně jako /auth/register
+    device_seen: Optional[bool] = None  # viz RegisterRequest.device_seen
 
 
 @app.post("/auth/google", response_model=AuthResponse)
@@ -715,6 +721,8 @@ def google_auth(req: GoogleAuthRequest, request: Request):
         random_password = secrets.token_urlsafe(32)
         user_id = db.create_user(email, auth.hash_password(random_password))
         db.set_registration_ip(user_id, _client_ip(request))
+        if req.device_seen:
+            db.set_multi_account_flag(user_id, True)
         is_new_user = True
         # Doporučovací systém — appka referred_by nastaví jen TADY, při
         # registraci, stejně jako u /auth/register (viz tam). Neplatný/
@@ -2743,7 +2751,10 @@ def admin_referral_suspicious_ip_matches(request: Request):
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-    return {"matches": db.list_suspicious_referral_ip_matches()}
+    return {
+        "matches": db.list_suspicious_referral_ip_matches(),
+        "multi_account_flagged": db.list_multi_account_flagged_users(),
+    }
 
 
 @app.get("/admin/referral-membership/overview")

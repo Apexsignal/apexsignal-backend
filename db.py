@@ -443,6 +443,18 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # appka appce nastaví, když appka na frontendu appce sama zjistila
+    # (přes localStorage v prohlížeči appky), že appka na TOMHLE zařízení
+    # už dřív jeden účet registrovala — appka na tom taky nic
+    # neblokuje, jen appce to appka ukáže v admin přehledu (uživatelovo
+    # přání 2026-09-12, appka appce navíc zobrazí varování přímo appce
+    # v registračním formuláři appky).
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS multi_account_flag BOOLEAN NOT NULL DEFAULT false")
+    except Exception:
+        pass
+
     # UNIQUE na referred_user_id = appka nemůže odměnit stejný doporučený
     # účet dvakrát, ani omylem (viz _process_referral_reward).
     try:
@@ -788,6 +800,26 @@ def set_registration_ip(user_id: int, ip: Optional[str]) -> None:
         return
     with get_cursor() as cur:
         cur.execute("UPDATE users SET registration_ip = %s WHERE id = %s", (ip[:64], user_id))
+
+
+def set_multi_account_flag(user_id: int, flag: bool) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE users SET multi_account_flag = %s WHERE id = %s", (flag, user_id))
+
+
+def list_multi_account_flagged_users() -> list[dict]:
+    """Appka appce (adminovi) ukáže účty, co appka SAMA (na appčině
+    frontendu, přes localStorage) rozpoznala jako založené na zařízení,
+    kde už dřív jiný appčin účet vznikl — čistě informativní, appka na
+    tom nic automaticky neblokuje."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT email, registration_ip, created_at FROM users WHERE multi_account_flag = true ORDER BY created_at DESC"
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
+    return rows
 
 
 def list_suspicious_referral_ip_matches() -> list[dict]:
