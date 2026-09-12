@@ -1458,6 +1458,37 @@ def mark_one_time_code_used(code_id: int, used_by_user_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def list_one_time_codes_overview() -> list[dict]:
+    """Appka appce (adminovi) ukáže, KOLIKRÁT který účet appčiných 5
+    jednorázových kódů vygeneroval a použil, i KDO konkrétně je použil —
+    appka to appce sama v appce (uživatelské rozhraní) neukazuje, appka
+    to potřebuje jen pro appčin přehled napříč všemi účty."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.code, o.used_at, owner.email AS owner_email,
+                   used.email AS used_by_email
+              FROM referral_one_time_codes o
+              JOIN users owner ON owner.id = o.owner_user_id
+              LEFT JOIN users used ON used.id = o.used_by_user_id
+             ORDER BY owner.email, o.id
+            """
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    by_owner: dict[str, dict] = {}
+    for r in rows:
+        acc = by_owner.setdefault(r["owner_email"], {"email": r["owner_email"], "generated": 0, "used": 0, "used_by": []})
+        acc["generated"] += 1
+        if r["used_by_email"]:
+            acc["used"] += 1
+            acc["used_by"].append({
+                "code": r["code"], "used_by_email": r["used_by_email"],
+                "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+            })
+    return sorted(by_owner.values(), key=lambda x: x["generated"], reverse=True)
+
+
 def get_user_id_by_referral_code(code: str) -> Optional[int]:
     with get_cursor() as cur:
         cur.execute("SELECT id FROM users WHERE referral_code = %s", (code.strip().upper(),))

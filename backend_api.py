@@ -2791,6 +2791,18 @@ def admin_sellers_overview(request: Request):
     }
 
 
+@app.get("/admin/referral-onetime-codes/overview")
+def admin_onetime_codes_overview(request: Request):
+    """Appka appce (adminovi) ukáže, kolik appčiných 5 jednorázových
+    kódů (viz /referral/generate-onetime-code) který účet vygeneroval a
+    použil, i KDO konkrétně je použil — appka to appce v appce (běžné
+    uživatelské rozhraní) neukazuje, jen appka (admin) to vidí."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return {"owners": db.list_one_time_codes_overview()}
+
+
 @app.get("/admin/referral-membership/overview")
 def admin_referral_membership_overview(request: Request):
     """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
