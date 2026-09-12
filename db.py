@@ -1391,34 +1391,46 @@ def get_or_create_referral_code(user_id: int) -> str:
 ONE_TIME_CODES_PER_USER = 5
 
 
-def get_or_create_one_time_codes(user_id: int) -> list[dict]:
-    """Appka appce doplní chybějící kódy do stropu ONE_TIME_CODES_PER_USER
-    (5) — líně, při první potřebě, stejný vzor jako get_or_create_referral_code.
-    Strop appka NIKDY nezvyšuje, i kdyby appka všech 5 utratila."""
+def get_one_time_codes(user_id: int) -> list[dict]:
+    """Appka appce jen VRÁTÍ, co už appka má vygenerované — nic
+    nevytváří. Appka appce dá appce (frontendu) tlačítko "Vygenerovat
+    kód", ať appka vidí, KOLIK jich reálně chce, ne všech 5 najednou
+    (2026-09-12, uživatelovo přání)."""
     with get_cursor() as cur:
         cur.execute(
             "SELECT id, code, used_by_user_id, used_at FROM referral_one_time_codes WHERE owner_user_id = %s ORDER BY id",
             (user_id,),
         )
-        rows = [dict(r) for r in cur.fetchall()]
-    for _ in range(ONE_TIME_CODES_PER_USER - len(rows)):
-        for _attempt in range(10):
-            code = "".join(secrets.choice(_REFERRAL_CODE_ALPHABET) for _ in range(6))
-            try:
-                with get_cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO referral_one_time_codes (owner_user_id, code)
-                        VALUES (%s, %s)
-                        RETURNING id, code, used_by_user_id, used_at
-                        """,
-                        (user_id, code),
-                    )
-                    rows.append(dict(cur.fetchone()))
-                    break
-            except Exception:
-                continue  # kolize kódu (UNIQUE), appka zkusí jiný náhodný kód
-    return rows
+        return [dict(r) for r in cur.fetchall()]
+
+
+def generate_one_time_code(user_id: int) -> Optional[dict]:
+    """Appka appce vygeneruje PŘESNĚ JEDEN nový kód, jen když appka
+    ještě nemá vyčerpaný strop ONE_TIME_CODES_PER_USER (5) — appka appce
+    vrátí None, když appka strop appce už dřív vyčerpala."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM referral_one_time_codes WHERE owner_user_id = %s",
+            (user_id,),
+        )
+        if cur.fetchone()["n"] >= ONE_TIME_CODES_PER_USER:
+            return None
+    for _ in range(10):
+        code = "".join(secrets.choice(_REFERRAL_CODE_ALPHABET) for _ in range(6))
+        try:
+            with get_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO referral_one_time_codes (owner_user_id, code)
+                    VALUES (%s, %s)
+                    RETURNING id, code, used_by_user_id, used_at
+                    """,
+                    (user_id, code),
+                )
+                return dict(cur.fetchone())
+        except Exception:
+            continue  # kolize kódu (UNIQUE), appka zkusí jiný náhodný kód
+    return None
 
 
 def get_one_time_code(code: str) -> Optional[dict]:

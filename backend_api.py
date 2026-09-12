@@ -526,22 +526,33 @@ def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
     return {"code": code, "link": f"{frontend_url}/?ref={code}"}
 
 
+def _onetime_code_dict(r: dict) -> dict:
+    return {
+        "code": r["code"],
+        "used": r["used_by_user_id"] is not None,
+        "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+    }
+
+
 @app.get("/referral/my-onetime-codes")
 def get_my_onetime_codes(user_id: int = Depends(get_current_user_id)):
-    """5 jednorázových osobních kódů appka appce vygeneruje líně napoprvé
-    (viz get_or_create_one_time_codes) — appka je NAVÍC k appčinu
-    nekonečně použitelnému odkazu, appka je předává postupně po jednom."""
-    rows = db.get_or_create_one_time_codes(user_id)
-    return {
-        "codes": [
-            {
-                "code": r["code"],
-                "used": r["used_by_user_id"] is not None,
-                "used_at": r["used_at"].isoformat() if r["used_at"] else None,
-            }
-            for r in rows
-        ],
-    }
+    """Appka appce jen ukáže, co už má vygenerované — nic nevytváří (viz
+    POST /referral/generate-onetime-code). Strop je navždy
+    db.ONE_TIME_CODES_PER_USER (5)."""
+    rows = db.get_one_time_codes(user_id)
+    return {"codes": [_onetime_code_dict(r) for r in rows], "max_codes": db.ONE_TIME_CODES_PER_USER}
+
+
+@app.post("/referral/generate-onetime-code")
+def generate_my_onetime_code(user_id: int = Depends(get_current_user_id)):
+    """Appka appce vygeneruje JEDEN nový jednorázový kód na kliknutí,
+    NAVÍC k nekonečnému odkazu — appka je nedává appce všech 5 najednou
+    (uživatelovo přání 2026-09-12), appka appce dovolí kliknout, až kdy
+    reálně kód potřebuje, do stropu 5."""
+    row = db.generate_one_time_code(user_id)
+    if row is None:
+        raise HTTPException(status_code=400, detail=f"Už máš vygenerovaných všech {db.ONE_TIME_CODES_PER_USER} kódů.")
+    return _onetime_code_dict(row)
 
 
 class DeclarationRequest(BaseModel):
