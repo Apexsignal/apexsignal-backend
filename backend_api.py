@@ -1029,6 +1029,7 @@ class Repo:
 
     def __init__(self):
         self._last_batch_match_ids: dict[int, set[int]] = {}  # user_id -> match_ids ze VŠECH zatím nabídnutých (ne nutně uložených) tiketů od posledního uložení
+        self._replace_selection_count: dict[int, int] = {}  # user_id -> kolikrát appka appce dovolila /tickets/replace-selection od posledního /tickets/generate (viz reset_replace_count)
         db.ensure_schema()
 
     # --- Tikety: persistované, viz db.py -------------------------------
@@ -1319,6 +1320,25 @@ class Repo:
         se rozhodl, co chce, appka tak nemá důvod dál blokovat nevybrané
         zápasy z předchozích (neuložených) pokusů."""
         self._last_batch_match_ids.pop(user_id, None)
+
+    REPLACE_SELECTION_FREE_LIMIT = 1  # appka appce dovolí vyměnit nohu tiketu ZDARMA jen tolikrát
+    # na jedno generování — appka bez týhle pojistky appce dovolila /tickets/replace-selection
+    # volat neomezeně (appka to nikdy nezpoplatňovala, viz _charge_tokens_for_ticket), takže si
+    # appka mohla postupně projet celý appčin denní pool zápasů bez zaplacení tokenů
+    # (uživatelovo zjištění 2026-09-12).
+
+    def reset_replace_count(self, user_id: int) -> None:
+        self._replace_selection_count.pop(user_id, None)
+
+    def try_consume_replace_selection(self, user_id: int) -> bool:
+        """Appka appce vrátí True (a spotřebuje appčinu jednu výměnu zdarma),
+        jen dokud appka nepřekročila REPLACE_SELECTION_FREE_LIMIT — appka appce
+        vrátí False, když appka appce už appku vyčerpala."""
+        used = self._replace_selection_count.get(user_id, 0)
+        if used >= self.REPLACE_SELECTION_FREE_LIMIT:
+            return False
+        self._replace_selection_count[user_id] = used + 1
+        return True
 
 
 repo = Repo()
@@ -3688,6 +3708,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
+        repo.reset_replace_count(user_id)  # nové generování appce dá zase jednu výměnu zdarma
 
         if result["safe"] is not None:
             _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
@@ -3768,6 +3789,7 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
+        repo.reset_replace_count(user_id)  # nové generování appce dá zase jednu výměnu zdarma
 
         if result["safe"] is not None:
             _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
@@ -4956,8 +4978,23 @@ def replace_selection(req: TicketGenerateRequestWithExclude, user_id: int = Depe
     v týhle editační session, ne celou historii — appka tak uměla
     nabídnout náhradu za zápas, co uživatel má vsazený v jiném, dřív
     uloženém tiketu). Appka to appce doplňuje, ať nemá různě bezpečná
-    chování pro v podstatě stejnou operaci (generování tiketu)."""
+    chování pro v podstatě stejnou operaci (generování tiketu).
+
+    Appka appce tenhle endpoint dřív vůbec nezpoplatňovala (na rozdíl od
+    /tickets/generate) — uživatel si tak mohl mačkáním appky "vyměnit
+    zápas" projet celý appčin denní pool bez zaplacení jediného tokenu
+    (uživatelovo zjištění 2026-09-12). Appka appce teď dovolí JEN
+    Repo.REPLACE_SELECTION_FREE_LIMIT (1) výměnu zdarma na jedno
+    generování (viz reset_replace_count volané z /tickets/generate a
+    /tickets/regenerate) — appka appce zbytek doplní appku appky vlastní
+    poznámkou (horizon_note), ať appka appce vidí, že tenhle konkrétní
+    tiket appka appce jednou přeskládala."""
     _require_generation_enabled(user_id)
+    if not repo.try_consume_replace_selection(user_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Tenhle tiket appka appce už jednou přeskládala zdarma — pro další změnu vygeneruj nový tiket.",
+        )
     exclude_ids = set(req.exclude_match_ids) | set(repo.get_all_saved_match_ids(user_id)) | set(repo.get_last_batch(user_id))
     matches = _fetch_candidate_matches(req.sports, req.time_frame_days)
     matches = [m for m in matches if m.match_id not in exclude_ids]
@@ -4968,7 +5005,7 @@ def replace_selection(req: TicketGenerateRequestWithExclude, user_id: int = Depe
         pool_filter=_pool_filter_for_risk(req.risk_level),
     )
     return TicketPairResponse(
-        safe=TicketResponse.from_domain(result["safe"]) if result["safe"] else None,
+        safe=TicketResponse.from_domain(result["safe"], horizon_note="Jedna noha tiketu byla ručně vyměněna.") if result["safe"] else None,
         aggressive=None,
     )
 
