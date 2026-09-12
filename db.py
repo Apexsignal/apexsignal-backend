@@ -536,31 +536,6 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
-    # Jednorázové osobní kódy k doporučení (2026-09-12, uživatelovo
-    # přání) — appka NAVÍC k appčinu nekonečně použitelnému
-    # referral_code/odkazu dá každému účtu přesně ONE_TIME_CODES_PER_USER
-    # (5) kódů, co appka smí předat po jednom, konkrétním klientům.
-    # Odměna appce je STEJNÁ jako u obyčejného referral kódu (10 tokenů,
-    # REFERRAL_CODE_GIFT_TOKENS) — appka jen appce umožní sledovat, KOMU
-    # přesně kód appka dala, a strop je navždy 5, appka ho nikdy
-    # nedoplňuje.
-    try:
-        with get_cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS referral_one_time_codes (
-                    id SERIAL PRIMARY KEY,
-                    owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    code VARCHAR(16) UNIQUE NOT NULL,
-                    used_by_user_id INTEGER REFERENCES users(id),
-                    used_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT now()
-                )
-                """
-            )
-    except Exception:
-        pass
-
     # Appka si sem loguje otisk platební karty (ne číslo karty) u KAŽDÉHO
     # nákupu tokenů — díky tomu appka umí u doporučovacího systému poznat,
     # že doporučený a doporučitel platí stejnou kartou, i kdyby měli různé
@@ -1386,107 +1361,6 @@ def get_or_create_referral_code(user_id: int) -> str:
         except Exception:
             continue  # kolize kódu (UNIQUE), appka zkusí jiný náhodný kód
     raise RuntimeError("Appce se nepodařilo vygenerovat unikátní referral kód")
-
-
-ONE_TIME_CODES_PER_USER = 5
-
-
-def get_one_time_codes(user_id: int) -> list[dict]:
-    """Appka appce jen VRÁTÍ, co už appka má vygenerované — nic
-    nevytváří. Appka appce dá appce (frontendu) tlačítko "Vygenerovat
-    kód", ať appka vidí, KOLIK jich reálně chce, ne všech 5 najednou
-    (2026-09-12, uživatelovo přání)."""
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT id, code, used_by_user_id, used_at FROM referral_one_time_codes WHERE owner_user_id = %s ORDER BY id",
-            (user_id,),
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-
-def generate_one_time_code(user_id: int) -> Optional[dict]:
-    """Appka appce vygeneruje PŘESNĚ JEDEN nový kód, jen když appka
-    ještě nemá vyčerpaný strop ONE_TIME_CODES_PER_USER (5) — appka appce
-    vrátí None, když appka strop appce už dřív vyčerpala."""
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM referral_one_time_codes WHERE owner_user_id = %s",
-            (user_id,),
-        )
-        if cur.fetchone()["n"] >= ONE_TIME_CODES_PER_USER:
-            return None
-    for _ in range(10):
-        code = "".join(secrets.choice(_REFERRAL_CODE_ALPHABET) for _ in range(6))
-        try:
-            with get_cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO referral_one_time_codes (owner_user_id, code)
-                    VALUES (%s, %s)
-                    RETURNING id, code, used_by_user_id, used_at
-                    """,
-                    (user_id, code),
-                )
-                return dict(cur.fetchone())
-        except Exception:
-            continue  # kolize kódu (UNIQUE), appka zkusí jiný náhodný kód
-    return None
-
-
-def get_one_time_code(code: str) -> Optional[dict]:
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT id, owner_user_id, used_by_user_id FROM referral_one_time_codes WHERE code = %s",
-            (code.strip().upper(),),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-
-def mark_one_time_code_used(code_id: int, used_by_user_id: int) -> bool:
-    """appka appce dovolí kód spotřebovat jen JEDNOU — podmínka
-    `used_by_user_id IS NULL` appce zaručí idempotenci stejným
-    způsobem jako set_referred_by u obyčejného referral kódu."""
-    with get_cursor() as cur:
-        cur.execute(
-            """
-            UPDATE referral_one_time_codes SET used_by_user_id = %s, used_at = now()
-             WHERE id = %s AND used_by_user_id IS NULL
-            """,
-            (used_by_user_id, code_id),
-        )
-        return cur.rowcount > 0
-
-
-def list_one_time_codes_overview() -> list[dict]:
-    """Appka appce (adminovi) ukáže, KOLIKRÁT který účet appčiných 5
-    jednorázových kódů vygeneroval a použil, i KDO konkrétně je použil —
-    appka to appce sama v appce (uživatelské rozhraní) neukazuje, appka
-    to potřebuje jen pro appčin přehled napříč všemi účty."""
-    with get_cursor() as cur:
-        cur.execute(
-            """
-            SELECT o.code, o.used_at, owner.email AS owner_email,
-                   used.email AS used_by_email
-              FROM referral_one_time_codes o
-              JOIN users owner ON owner.id = o.owner_user_id
-              LEFT JOIN users used ON used.id = o.used_by_user_id
-             ORDER BY owner.email, o.id
-            """
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-
-    by_owner: dict[str, dict] = {}
-    for r in rows:
-        acc = by_owner.setdefault(r["owner_email"], {"email": r["owner_email"], "generated": 0, "used": 0, "used_by": []})
-        acc["generated"] += 1
-        if r["used_by_email"]:
-            acc["used"] += 1
-            acc["used_by"].append({
-                "code": r["code"], "used_by_email": r["used_by_email"],
-                "used_at": r["used_at"].isoformat() if r["used_at"] else None,
-            })
-    return sorted(by_owner.values(), key=lambda x: x["generated"], reverse=True)
 
 
 def get_user_id_by_referral_code(code: str) -> Optional[int]:
