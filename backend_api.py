@@ -526,6 +526,24 @@ def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
     return {"code": code, "link": f"{frontend_url}/?ref={code}"}
 
 
+@app.get("/referral/my-onetime-codes")
+def get_my_onetime_codes(user_id: int = Depends(get_current_user_id)):
+    """5 jednorázových osobních kódů appka appce vygeneruje líně napoprvé
+    (viz get_or_create_one_time_codes) — appka je NAVÍC k appčinu
+    nekonečně použitelnému odkazu, appka je předává postupně po jednom."""
+    rows = db.get_or_create_one_time_codes(user_id)
+    return {
+        "codes": [
+            {
+                "code": r["code"],
+                "used": r["used_by_user_id"] is not None,
+                "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
 class DeclarationRequest(BaseModel):
     has_ico: bool
     ico: Optional[str] = None
@@ -1536,6 +1554,28 @@ def _redeem_referral_code(user_id: int, code: str) -> Optional[dict]:
     return {"tokens_granted": REFERRAL_CODE_GIFT_TOKENS, "new_balance": new_balance}
 
 
+def _redeem_one_time_code(user_id: int, code: str) -> Optional[dict]:
+    """
+    Appka appce dá stejný dárek jako u obyčejného referral kódu
+    (REFERRAL_CODE_GIFT_TOKENS), jen z jednoho z appčiných 5 JEDNORÁZOVÝCH
+    osobních kódů (2026-09-12, uživatelovo přání — appka je chtěla NAVÍC
+    k nekonečně použitelnému odkazu, ať appka může kód předat postupně
+    konkrétním klientům, po jednom). Appka appce vrátí None, když kód
+    neexistuje, je appky vlastní, je už použitý, nebo appka appce už
+    dřív nastavila referred_by od NĚKOHO JINÉHO (set_referred_by appce
+    dovolí nastavit jen jednou za život účtu).
+    """
+    row = db.get_one_time_code(code)
+    if not row or row["used_by_user_id"] is not None or row["owner_user_id"] == user_id:
+        return None
+    if not db.set_referred_by(user_id, row["owner_user_id"]):
+        return None
+    if not db.mark_one_time_code_used(row["id"], user_id):
+        return None
+    new_balance = db.adjust_tokens(user_id, REFERRAL_CODE_GIFT_TOKENS, "REFERRAL_ONE_TIME_CODE_GIFT")
+    return {"tokens_granted": REFERRAL_CODE_GIFT_TOKENS, "new_balance": new_balance}
+
+
 def _process_referral_membership_commission(
     referred_user_id: int, plan_type: str, payment_kc: int, stripe_ref: str,
 ) -> None:
@@ -2353,6 +2393,14 @@ def redeem_token_code(req: RedeemCodeRequest, user_id: int = Depends(get_current
         return {
             "ok": True, "tokens": referral_result["tokens_granted"], "new_balance": referral_result["new_balance"],
             "message": f"Získal jsi {referral_result['tokens_granted']} tokenů od kamaráda!",
+        }
+    # Appčiných 5 JEDNORÁZOVÝCH osobních kódů (viz _redeem_one_time_code)
+    # appka zkusí jako třetí a poslední možnost, ve stejném poli.
+    onetime_result = _redeem_one_time_code(user_id, code)
+    if onetime_result:
+        return {
+            "ok": True, "tokens": onetime_result["tokens_granted"], "new_balance": onetime_result["new_balance"],
+            "message": f"Získal jsi {onetime_result['tokens_granted']} tokenů od kamaráda!",
         }
     raise HTTPException(status_code=400, detail=result["error"])
 
