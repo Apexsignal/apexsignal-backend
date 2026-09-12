@@ -430,6 +430,19 @@ def ensure_schema() -> None:
     except Exception:
         pass
 
+    # IP appka zaznamená při registraci (2026-09-12, uživatelovo přání) —
+    # ČISTĚ informativní, appka na tom NIC automaticky neblokuje (appka
+    # ví, že mobilní CGNAT sdílí IP mezi spoustou reálných lidí a appka
+    # by appce jinak appku zablokovala omylem) — appka to appce jen
+    # appce ukáže v admin přehledu jako "podezřelé", když appka vidí
+    # referrera a jeho čerstvě doporučeného na STEJNÉ IP, appka to pak
+    # appce vyřeší ručně.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_ip VARCHAR(64)")
+    except Exception:
+        pass
+
     # UNIQUE na referred_user_id = appka nemůže odměnit stejný doporučený
     # účet dvakrát, ani omylem (viz _process_referral_reward).
     try:
@@ -768,6 +781,37 @@ def create_user(email: str, password_hash: str) -> int:
             (email.strip().lower(), password_hash),
         )
         return cur.fetchone()["id"]
+
+
+def set_registration_ip(user_id: int, ip: Optional[str]) -> None:
+    if not ip:
+        return
+    with get_cursor() as cur:
+        cur.execute("UPDATE users SET registration_ip = %s WHERE id = %s", (ip[:64], user_id))
+
+
+def list_suspicious_referral_ip_matches() -> list[dict]:
+    """Appka appce (adminovi) ukáže PÁRY referrer→doporučený, co appka
+    zaregistrovala ze STEJNÉ IP adresy — čistě informativní seznam,
+    appka na tom nic neblokuje ani nezakazuje (viz komentář u
+    registration_ip ve schématu), jen appka appce dá appce vědět, co
+    stojí za ruční kontrolu."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT ref_u.email AS referrer_email, u.email AS referred_email,
+                   u.registration_ip AS ip, u.created_at
+              FROM users u
+              JOIN users ref_u ON ref_u.id = u.referred_by_user_id
+             WHERE u.registration_ip IS NOT NULL
+               AND u.registration_ip = ref_u.registration_ip
+             ORDER BY u.created_at DESC
+            """
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
+    return rows
 
 
 def get_user_by_email(email: str) -> Optional[dict]:

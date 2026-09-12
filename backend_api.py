@@ -457,6 +457,7 @@ def register(req: RegisterRequest, request: Request):
         rate_limiter.record_failed_attempt(req.email, client_ip)
         raise HTTPException(status_code=409, detail="Tenhle e-mail už je zaregistrovaný")
     user_id = db.create_user(req.email, auth.hash_password(req.password))
+    db.set_registration_ip(user_id, client_ip)
     rate_limiter.record_success(req.email, client_ip)
 
     # Doporučovací systém — appka referred_by nastaví jen TADY, při
@@ -686,7 +687,7 @@ class GoogleAuthRequest(BaseModel):
 
 
 @app.post("/auth/google", response_model=AuthResponse)
-def google_auth(req: GoogleAuthRequest):
+def google_auth(req: GoogleAuthRequest, request: Request):
     """
     Appka ověří Google ID token (podpis i cílový klient appka ověří
     knihovnou google-auth, nedůvěřuje ničemu, co nedostane přímo od
@@ -713,6 +714,7 @@ def google_auth(req: GoogleAuthRequest):
     if not user:
         random_password = secrets.token_urlsafe(32)
         user_id = db.create_user(email, auth.hash_password(random_password))
+        db.set_registration_ip(user_id, _client_ip(request))
         is_new_user = True
         # Doporučovací systém — appka referred_by nastaví jen TADY, při
         # registraci, stejně jako u /auth/register (viz tam). Neplatný/
@@ -2730,6 +2732,18 @@ def admin_sellers_overview(request: Request):
             for l in db.list_seller_leads()
         ],
     }
+
+
+@app.get("/admin/referral-suspicious-ip-matches")
+def admin_referral_suspicious_ip_matches(request: Request):
+    """Appka appce (adminovi) ukáže páry referrer→doporučený, co appka
+    zaregistrovala ze STEJNÉ IP adresy — čistě informativní (viz
+    db.list_suspicious_referral_ip_matches), appka na tom nic
+    neblokuje. Appka to appce dá appce jen jako podnět k ruční kontrole."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return {"matches": db.list_suspicious_referral_ip_matches()}
 
 
 @app.get("/admin/referral-membership/overview")
