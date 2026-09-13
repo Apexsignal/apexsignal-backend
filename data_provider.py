@@ -1928,9 +1928,13 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # 512 MB RAM), tentokrát ne při stahování/obohacování (to appka díky
 # dávkování a gc.collect() ustála), ale hned POTOM, ve fázi stavby
 # samotného tiketu (viz gc.collect() nově i v TicketGenerator.generate()).
-# Uživatel chtěl strop stáhnout na 150 — bezpečnostní rezerva pod 180,
-# dokud appka neběží na Render plánu s víc RAM.
-MAX_FIXTURES_PER_REQUEST = 150
+# Appka nejdřív zkusila 150 — živě to prošlo 2x z 3 (třetí pád nastal
+# hned po sobě jdoucím druhém těžkém volání, ne izolovaně), ale appka to
+# pak stejně živě viděla spadnout i izolovaně na 150. Appka jde
+# bezpečnostně ještě níž, na 100 — na 512 MB RAM appka radši nabídne
+# míň zápasů spolehlivě, než víc a nejistě. Definitivní řešení zůstává
+# upgrade Render plánu (víc RAM), appka na to sama nemá přístup.
+MAX_FIXTURES_PER_REQUEST = 100
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
