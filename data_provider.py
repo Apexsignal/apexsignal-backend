@@ -1934,7 +1934,15 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # bezpečnostně ještě níž, na 100 — na 512 MB RAM appka radši nabídne
 # míň zápasů spolehlivě, než víc a nejistě. Definitivní řešení zůstává
 # upgrade Render plánu (víc RAM), appka na to sama nemá přístup.
-MAX_FIXTURES_PER_REQUEST = 100
+#
+# 2026-09-13, později týž den: appka mezitím SOUČASNĚ snížila i
+# souběžnost obohacování (FIXTURE_ENRICHMENT_WORKERS 10→5,
+# FIXTURE_ENRICHMENT_BATCH_SIZE 40→20 v backend_api.py) — špička paměti
+# při stejném počtu zápasů je teď nižší než v okamžiku, kdy appka na 150
+# padala. Uživatel chtěl zpátky víc zápasů (100 appce dávalo příliš málo
+# reálných příležitostí) — appka jde zpátky na 150 a spoléhá na tuhle
+# souběžnostní opravu, ne že by 150 samo o sobě bylo bezpečnější než dřív.
+MAX_FIXTURES_PER_REQUEST = 150
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
