@@ -16,6 +16,7 @@ historických statistik týmů (xG modely, forma, h2h, atd.).
 
 from __future__ import annotations
 
+import gc
 import math
 import random
 from dataclasses import dataclass, field
@@ -1507,6 +1508,15 @@ class TicketGenerator:
                     print(f"[{ticket_key}] Tiket sestaven s prahem {int(threshold*100)}%")
                 break  # Tiket se povedl! Skončit.
 
+            # Appka appce mezi jednotlivými prahy zamete starý pool (2026-09-13,
+            # stejná pojistka jako u _build_football_matches v backend_api.py)
+            # — appka appku živě viděla spadnout OOM přesně v týhle fázi
+            # (stavba tiketu), i když samotné stahování/obohacování zápasů
+            # doběhlo v pořádku. Bez gc.collect() appce staré pooly (a jejich
+            # SelectionCandidate objekty) zbytečně drží paměť, dokud appka
+            # sama nedoběhne na konec funkce.
+            gc.collect()
+
         # Poslední záchranná síť pro kratky (2026-08-27, uživatelovo přání):
         # když appka nesestaví ani jeden platný tiket s ověřeným KOMBINOVANÝM
         # (Kelly) edge napříč nohama, zkusí appka jednodušší skládání — vezme
@@ -1530,6 +1540,7 @@ class TicketGenerator:
                 ticket = self._build_ticket(fallback_pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
                 if ticket is not None:
                     print(f"[{ticket_key}] Tiket sestaven záchrannou sítí (70%+, kladný individuální edge, bez kombinovaného Kelly)")
+            gc.collect()
 
         if ticket is None:
             counts_str = ", ".join(f"{pct}%={n}" for pct, n in sorted(candidate_counts.items(), reverse=True))
