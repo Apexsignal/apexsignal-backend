@@ -51,19 +51,40 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     return _pool
 
 
+def _reset_pool() -> None:
+    """Appka celý pool zahodí a příští volání si založí úplně nový.
+
+    Appka (2026-09-13) živě narazila na "connection ... failed: Connection
+    refused" u /tickets/generate, opakovaně a NA STÁLE STEJNOU IP — přitom
+    /auth/login (taky čte z DB) appce ve STEJNOU dobu fungoval normálně.
+    To vylučuje, že by appčina Postgres byla celá nedostupná (to by appce
+    spadlo úplně všechno) — appka spíš drží v POOLU zastaralé/mrtvé
+    spojení (nebo appka na tuhle IP míří kvůli nějaké appkou zvenčí
+    zacachované DNS odpovědi, co se od vytvoření poolu už změnila) a
+    getconn() appce ho pořád dokola nabízí/zkouší, i když je nefunkční.
+    Prosté opakování se stejným poolem appce nepomohlo (viz historie —
+    appka to zkusila a padalo to dál úplně stejně). Appka teď při
+    OperationalError radši celý pool zahodí (closeall, ignoruje chyby při
+    zavírání) a nechá _get_pool() založit úplně nový, s čerstvým DNS
+    lookupem a čerstvými TCP spojeními.
+    """
+    global _pool
+    old_pool = _pool
+    _pool = None
+    if old_pool is not None:
+        try:
+            old_pool.closeall()
+        except Exception as e:
+            print(f"[db] closeall na starém poolu selhalo (appka to ignoruje, pool stejně zahazuje): {e}")
+
+
 @contextmanager
 def get_cursor():
     """Context manager pro DB připojení — bere/vrací spojení z poolu místo navazování nového.
 
-    appka (2026-09-13) živě narazila na "connection ... failed: Connection
-    refused" u /tickets/generate — appčina Postgres appce na chvíli
-    přestala reagovat (appka to viděla přímo v odchycené výjimce, pravdě-
-    podobně souvislost s dnešní sérií OOM restartů webové appky, po kterých
-    appka pokaždé navázala CELÝ NOVÝ connection pool, zatímco appky staré
-    spojení mohla appce na DB straně chvíli viset). appka takovéhle
-    přechodné výpadky spojení (ne chyby v datech/query) teď zkusí pár-
-    krát zopakovat s krátkou pauzou, než appka skutečně vzdá a appce
-    vyhodí chybu dál.
+    Na OperationalError appka pool zahodí (viz _reset_pool) a založí nový,
+    než appka zkusí znovu — prosté opakování se stejným poolem appce
+    nepomáhalo (viz komentář u _reset_pool).
     """
     pool = _get_pool()
     conn = None
@@ -72,10 +93,12 @@ def get_cursor():
             conn = pool.getconn()
             break
         except psycopg2.OperationalError as e:
+            print(f"[db] getconn selhalo (pokus {attempt + 1}/3), appka zahazuje pool a zkouší znovu: {e}")
+            _reset_pool()
             if attempt == 2:
                 raise
-            print(f"[db] getconn selhalo (pokus {attempt + 1}/3), appka to za chvíli zkusí znovu: {e}")
             time.sleep(1.5 * (attempt + 1))
+            pool = _get_pool()
     try:
         cur = conn.cursor()
         yield cur
