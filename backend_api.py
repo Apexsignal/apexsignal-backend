@@ -7872,7 +7872,7 @@ def _run_debug_today_full_job(request_id: str) -> None:
     try:
         today = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
 
-        all_matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 3)
+        all_matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 1)
         all_matches = _filter_future_matches(all_matches, buffer_minutes=5)
         today_matches = [m for m in all_matches if m.kickoff_date == today]
 
