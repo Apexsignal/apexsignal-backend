@@ -7862,6 +7862,14 @@ def _prepare_signal_prompt(data):
     return "Převypravuj tyhle data o sázení do plynulého českého textu (čistě informativní, bez rad).\n\nData: " + json.dumps(data)
 
 
+@app.get("/admin/_debug-constants")
+def _debug_constants(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return {"MAX_FIXTURES_PER_REQUEST": data_provider.MAX_FIXTURES_PER_REQUEST}
+
+
 
 
 
