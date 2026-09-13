@@ -3832,8 +3832,14 @@ def _start_generation_job(user_id: int, req: TicketGenerateRequest, run_fn) -> s
         except HTTPException as e:
             _results_store(request_id, {"status": "error", "detail": e.detail})
         except Exception as e:
-            print(f"[generate-job] {request_id} selhalo: {e}")
-            _results_store(request_id, {"status": "error", "detail": "Generování se nepovedlo, zkus to znovu."})
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[generate-job] {request_id} selhalo: {e}\n{tb}")
+            # DOČASNĚ appka appce vrací i skutečnou příčinu (2026-09-13,
+            # diagnostika opakovaného "Generování se nepovedlo") — appka
+            # tohle appce po zjištění příčiny appce vrátí zpátky na obecnou
+            # zprávu, appka klientovi jinak neukazuje interní tracebacky.
+            _results_store(request_id, {"status": "error", "detail": f"Generování se nepovedlo, zkus to znovu. [DEBUG: {type(e).__name__}: {e}]"})
         # Appka tu záměrně NEMAŽE _GENERATION_PROGRESS hned po doběhnutí
         # (dřív tu bylo _progress_clear(request_id)) — když je generování
         # rychlé (zápasy/statistiky ještě teplé v mezipaměti z předchozího
