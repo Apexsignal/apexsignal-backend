@@ -77,7 +77,13 @@ import stripe
 # dokud nemá vyšší plán (viz i MAX_FIXTURES_PER_REQUEST a dávkové
 # zpracování v _build_football_matches níž — všechny tři appka ladila
 # společně na stejný cíl).
-FIXTURE_ENRICHMENT_WORKERS = 10
+#
+# 2026-09-13: appka i po snížení MAX_FIXTURES_PER_REQUEST (180→150→100)
+# pořád živě zaznamenala OOM (viz stejné datum v probability_model.py) —
+# appka jde dál a snižuje i souběžnost obohacování z 10 na 5 vláken.
+# Pomaleji, ale míň zápasů rozpracovaných zároveň = nižší špička paměti
+# v jednu chvíli. Cena: generování appce potrvá zhruba 2x déle.
+FIXTURE_ENRICHMENT_WORKERS = 5
 
 # Dixon-Coles zafitovaná útočná/obranná síla CELÉ ligy (2026-08-06) — appka
 # to zkusila jako přesnější náhradu heuristického odhadu z posledních
@@ -3153,7 +3159,7 @@ def _enrich_one_fixture(provider, raw: dict, standings_cache: dict, standings_lo
     )
 
 
-FIXTURE_ENRICHMENT_BATCH_SIZE = 40  # appka (2026-08-07, viz FIXTURE_ENRICHMENT_WORKERS
+FIXTURE_ENRICHMENT_BATCH_SIZE = 20  # appka (2026-08-07, viz FIXTURE_ENRICHMENT_WORKERS
 # výš) zpracovává zápasy po DÁVKÁCH, ne všechny najednou — appka dřív
 # appka pouhým jedním voláním executor.submit() na VŠECHNY zápasy (klidně
 # 200-400) rovnou vytvořila stejný počet Future objektů a živě k nim
@@ -3163,6 +3169,11 @@ FIXTURE_ENRICHMENT_BATCH_SIZE = 40  # appka (2026-08-07, viz FIXTURE_ENRICHMENT_
 # teď frontu drží krátkou (max BATCH_SIZE čekajících) a mezi dávkami
 # uvolní paměť (gc.collect()), ať appka nemá špičku paměti úměrnou
 # CELÉMU oknu, ale jen jedné dávce.
+#
+# 2026-09-13: appka snížila z 40 na 20 (souběžně se snížením
+# FIXTURE_ENRICHMENT_WORKERS 10→5 výš) — appka i po MAX_FIXTURES_PER_REQUEST=150
+# živě zaznamenala další OOM, takže appka dál snižuje špičku paměti za
+# cenu pomalejšího generování.
 
 
 def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Optional[str] = None) -> list[MatchInput]:
