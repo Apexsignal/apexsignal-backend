@@ -3834,7 +3834,7 @@ def _start_generation_job(user_id: int, req: TicketGenerateRequest, run_fn) -> s
         except Exception as e:
             import traceback
             print(f"[generate-job] {request_id} selhalo: {e}\n{traceback.format_exc()}")
-            _results_store(request_id, {"status": "error", "detail": f"Generování se nepovedlo, zkus to znovu. [DEBUG: {type(e).__name__}: {e}]"})
+            _results_store(request_id, {"status": "error", "detail": "Generování se nepovedlo, zkus to znovu."})
         # Appka tu záměrně NEMAŽE _GENERATION_PROGRESS hned po doběhnutí
         # (dřív tu bylo _progress_clear(request_id)) — když je generování
         # rychlé (zápasy/statistiky ještě teplé v mezipaměti z předchozího
