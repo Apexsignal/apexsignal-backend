@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -52,9 +53,29 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
 
 @contextmanager
 def get_cursor():
-    """Context manager pro DB připojení — bere/vrací spojení z poolu místo navazování nového."""
+    """Context manager pro DB připojení — bere/vrací spojení z poolu místo navazování nového.
+
+    appka (2026-09-13) živě narazila na "connection ... failed: Connection
+    refused" u /tickets/generate — appčina Postgres appce na chvíli
+    přestala reagovat (appka to viděla přímo v odchycené výjimce, pravdě-
+    podobně souvislost s dnešní sérií OOM restartů webové appky, po kterých
+    appka pokaždé navázala CELÝ NOVÝ connection pool, zatímco appky staré
+    spojení mohla appce na DB straně chvíli viset). appka takovéhle
+    přechodné výpadky spojení (ne chyby v datech/query) teď zkusí pár-
+    krát zopakovat s krátkou pauzou, než appka skutečně vzdá a appce
+    vyhodí chybu dál.
+    """
     pool = _get_pool()
-    conn = pool.getconn()
+    conn = None
+    for attempt in range(3):
+        try:
+            conn = pool.getconn()
+            break
+        except psycopg2.OperationalError as e:
+            if attempt == 2:
+                raise
+            print(f"[db] getconn selhalo (pokus {attempt + 1}/3), appka to za chvíli zkusí znovu: {e}")
+            time.sleep(1.5 * (attempt + 1))
     try:
         cur = conn.cursor()
         yield cur
