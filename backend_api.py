@@ -8005,6 +8005,20 @@ def admin_weekly_calibration_alert(request: Request):
     return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
 
 
+@app.post("/admin/_debug-bulk-delete-tickets")
+def _debug_bulk_delete_tickets(request: Request, ids: str):
+    """Dočasné: appka smaže seznam tiketů podle ID (čárkou oddělené)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    ticket_ids = [int(x) for x in ids.split(",") if x.strip()]
+    deleted = 0
+    for tid in ticket_ids:
+        db.delete_ticket(tid)
+        deleted += 1
+    return {"deleted": deleted}
+
+
 
 
 
