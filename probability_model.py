@@ -64,6 +64,18 @@ MAX_MODEL_MARKET_GAP = 0.08  # appka model_probability pro edge/vklad neumožní
                               # trhu, tím spíš je model špatně, ne že appka "našla
                               # hodnotu". Viz edge_capped_model_probability.
 
+SUSPICIOUS_MODEL_MARKET_GAP = 0.20  # appka (2026-09-14) živě narazila na Rio Ave –
+                              # Estrela: model dal 66,5 %, 16 bookmakerů dohromady jen
+                              # 35,4 % (rozdíl 31 pb) — appka kandidáta rovnou zahodí,
+                              # když se appky model od trhu takhle extrémně vzdálí (viz
+                              # passes_sanity_gap v build_candidates). Na rozdíl od
+                              # MAX_MODEL_MARKET_GAP (8 pb, jen pro edge/vklad UŽ
+                              # vybraného kandidáta) je tenhle práh záměrně volnější —
+                              # appka nechce zahazovat běžné, mírně "smělejší" odhady
+                              # (appka jich dnes viděla spoustu v rozmezí 2-9 pb), jen
+                              # ty opravdu extrémní, co appka nikdy neviděla u reálně
+                              # dobrého úlovku.
+
 MODEL_HIGH_CONFIDENCE_CAP = 0.75  # tvrdý strop na SUROVÝ model_probability (appka ho
                               # aplikuje ještě PŘED porovnáním s trhem, viz _candidate),
                               # rozhodnuto 2026-08-05 na appčiných vlastních vyhodnocených
@@ -1190,9 +1202,26 @@ class MarketEvaluator:
                 return min(min_prob, MATCH_WINNER_MIN_PROB)
             return min_prob
 
+        # appka (2026-09-14) živě narazila na Rio Ave – Estrela: appky model
+        # dal Estrele 66,5 % (xG 1.32 : 2.74), zatímco 16 bookmakerů dohromady
+        # (de-vigovaně) dávalo jen 35,4 % — rozdíl 31 bodů, mnohem víc, než
+        # appka kdy viděla u skutečně dobrého úlovku (2-9 bodů). Tak velký
+        # rozchod appky modelu s trhem appka bere jako podezření na chybu
+        # ve VSTUPNÍCH datech (např. jeden extrémní výsledek v posledních 10
+        # zápasech, co appce zkreslí průměr xG), ne jako geniální přehlédnutou
+        # příležitost — appka takového kandidáta radši rovnou zahodí. MAX_MODEL_
+        # MARKET_GAP (viz výš) totiž jen omezuje edge/vklad u kandidáta, co už
+        # appka vybrala — appku SAMOTNOU volbu favorita (např. u výhry zápasu)
+        # to vůbec nechrání, proto appka potřebuje samostatnou pojistku tady.
+        def passes_sanity_gap(c: SelectionCandidate) -> bool:
+            if c.market_probability is None:
+                return True  # bez appky tržní ceny appka nemá s čím srovnat
+            return abs(c.model_probability - c.market_probability) <= SUSPICIOUS_MODEL_MARKET_GAP
+
         return [
             c for c in candidates
-            if c.model_probability >= effective_min_prob(c) and c.probability >= effective_min_prob(c) and passes_odds_filter(c)
+            if c.model_probability >= effective_min_prob(c) and c.probability >= effective_min_prob(c)
+            and passes_odds_filter(c) and passes_sanity_gap(c)
         ]
 
     @staticmethod
