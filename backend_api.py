@@ -8005,36 +8005,6 @@ def admin_weekly_calibration_alert(request: Request):
     return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
 
 
-@app.get("/admin/_debug-ht-over-goals")
-def _debug_ht_over_goals(request: Request, time_frame_days: int = 2, min_prob: float = 0.0):
-    """Dočasné: appka appce ukáže aktuální kandidáty na poločasové góly
-    (appka je jinak počítá, ale do DAILY_TICKETS_MARKETS je nezahrnuje)."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
-    pool = []
-    for m in matches:
-        pool.extend([
-            c for c in MarketEvaluator.build_candidates(m, min_prob=min_prob)
-            if c.market_type == MarketType.HT_OVER_GOALS
-        ])
-    pool.sort(key=lambda c: c.probability, reverse=True)
-    return {
-        "count": len(pool),
-        "candidates": [
-            {
-                "match": f"{c.home_team} - {c.away_team}", "league": c.league, "country": c.country,
-                "selection": c.selection, "odds": c.odds,
-                "model_probability_pct": round(c.model_probability * 100, 1),
-                "market_probability_pct": round(c.market_probability * 100, 1) if c.market_probability is not None else None,
-                "kickoff": f"{c.kickoff_date} {c.kickoff_time}",
-            }
-            for c in pool
-        ],
-    }
-
 
 
 
