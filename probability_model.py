@@ -1682,22 +1682,29 @@ class TicketGenerator:
         # řazení appku dá vyšší prioritě přednost, kdykoli existuje
         # kombinace, co ji obsahuje.
         #
-        # 2026-09-14: uživatel pořadí přehodil — "Nejdriv tiket sestaveni
-        # vyhra favorita pak over 1.5 gol nebo btts a pak az neprohra".
-        # Dvojtip appka teď staví AŽ ZA over góly/BTTS (dřív byl hned po
-        # výhře) — appka to respektuje jako uživatelovo rozhodnutí, i když
-        # appky vlastní kalibrace (viz /admin/all-markets-calibration) řadí
-        # dvojtip (60-83 % podle selekce) obvykle spolehlivěji než BTTS
-        # (jen 60 %, viz i BTTS_STRICT_MIN_PROB=0.80 výš) — appka na tenhle
-        # nesoulad upozornila, uživatel to i tak chtěl takhle.
-        MARKET_PRIORITY = {
-            MarketType.MATCH_WINNER: 0,
-            MarketType.OVER_GOALS: 1,
-            MarketType.BTTS: 1,
-            MarketType.DOUBLE_CHANCE: 2,
-        }
+        # 2026-09-14: appka pořadí ladila s uživatelem několikrát za sebou
+        # (výhra→góly/BTTS→dvojtip, pak zpátky výhra→dvojtip→góly/BTTS),
+        # než appka dostala přesné, konečné zadání: "vyhra, pak over 1,5
+        # golu, pak dvojtip, pak over 2 a 2,5 a 3, a potom btts" — appka
+        # góly appce rozdělila na dvě různé priority podle KONKRÉTNÍHO
+        # prahu (over_1.5 appka staví hned za výhru, PŘED dvojtip; ostatní
+        # prahy 2.0/2.5/3.0+ appka staví AŽ ZA dvojtip), proto appka
+        # potřebuje funkci místo prostého slovníku podle market_type.
+        def market_priority(c: SelectionCandidate) -> int:
+            if c.market_type == MarketType.MATCH_WINNER:
+                return 0
+            if c.market_type == MarketType.OVER_GOALS and c.selection == "over_1.5":
+                return 1
+            if c.market_type == MarketType.DOUBLE_CHANCE:
+                return 2
+            if c.market_type == MarketType.OVER_GOALS:
+                return 3
+            if c.market_type == MarketType.BTTS:
+                return 4
+            return 5
+
         ordered_pool = sorted(
-            pool, key=lambda c: (MARKET_PRIORITY.get(c.market_type, 3), -c.probability)
+            pool, key=lambda c: (market_priority(c), -c.probability)
         )
 
         min_selections = self.MIN_SELECTIONS.get(ticket_type, 2)
