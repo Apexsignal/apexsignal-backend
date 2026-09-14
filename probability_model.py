@@ -192,10 +192,19 @@ MATCH_WINNER_MIN_PROB = 0.65  # appčin absolutní tvrdý floor (uživatel: "Ok
                               # dolů až na tenhle floor, i když ostatní trhy
                               # mají vyšší (71%) běžný požadavek.
 
-BTTS_STRICT_MIN_PROB = 0.71  # appka (2026-08-09) přes /admin/all-markets-calibration
+BTTS_STRICT_MIN_PROB = 0.80  # appka (2026-08-09) přes /admin/all-markets-calibration
                               # živě naměřila jen 55.9 % skutečnou úspěšnost na BTTS
                               # (34 vzorků), u proher model v průměru o 10.9 p. b.
-                              # sebejistější než trh — appka práh zvedla na 75 %.
+                              # sebejistější než trh — appka práh tehdy měla zvednout
+                              # na 75 %, ale v kódu zůstalo jen 0.71 (appka si toho
+                              # 2026-09-14 všimla — komentář a hodnota si neseděly).
+                              # Navíc appka na 40 vzorcích (i po 08-09 opravě) pořád
+                              # měří jen 60 % — appka teď jde přísněji, na 80 %, ne
+                              # jen na dřív zamýšlených 75 %, protože rozdíl model
+                              # vs. skutečnost přetrvává i po prvním zásahu a appka
+                              # nemá jednu konkrétní ligu na vinu (rozeseté přes víc
+                              # lig s malým vzorkem), takže přesnější fix appka
+                              # nemůže udělat — jen plošně přitvrdit práh.
 
 DOUBLE_CHANCE_EXCLUDED_LEAGUES = frozenset({
     "3. Liga", "UEFA Champions League", "2. Bundesliga", "Superettan",
