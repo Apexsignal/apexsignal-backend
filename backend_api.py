@@ -8005,6 +8005,15 @@ def admin_weekly_calibration_alert(request: Request):
     return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
 
 
+@app.get("/admin/_debug-transparency-id")
+def _debug_transparency_id(request: Request):
+    """Dočasné: appka vrátí číselné TRANSPARENCY_USER_ID."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return {"TRANSPARENCY_USER_ID": os.environ.get("TRANSPARENCY_USER_ID")}
+
+
 
 
 
