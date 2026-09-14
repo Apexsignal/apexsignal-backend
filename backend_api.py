@@ -7925,6 +7925,86 @@ def _prepare_signal_prompt(data):
     return "Převypravuj tyhle data o sázení do plynulého českého textu (čistě informativní, bez rad).\n\nData: " + json.dumps(data)
 
 
+# appka (2026-09-14, uživatelovo přání "automatizace, co se sama učí ze
+# sázek") — appka záměrně NENÍ plně autonomní (viz historie: appka dřív
+# nechala model sázet bez ověření kladného edge a appka dostala 0 %
+# úspěšnost na středním tiketu, viz TicketGenerator). Tenhle týdenní job
+# jen spočítá stejnou kalibraci, co appka appce už umí ukázat ručně
+# (/admin/all-markets-calibration), a pošle appce Telegram upozornění —
+# appka SAMA NIC NEMĚNÍ, žádnou ligu ani trh automaticky nevyřazuje.
+# Rozhodnutí appka nechává na uživateli.
+WEEKLY_CALIBRATION_MIN_SAMPLES = 8  # appka pod tímhle appce nedůvěřuje — moc malý vzorek, moc statistického šumu
+WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT = 55.0  # appka appce nahlásí kombinaci, jejíž skutečná úspěšnost padne pod tohle číslo
+
+
+@app.post("/admin/weekly-calibration-alert")
+def admin_weekly_calibration_alert(request: Request):
+    """appka jednou týdně (viz GitHub Actions cron) spočítá win-rate
+    podle trh+selekce+liga za CELOU appky historii a appce pošle Telegram
+    upozornění, pokud najde kombinaci s dost vzorky
+    (>= WEEKLY_CALIBRATION_MIN_SAMPLES) a reálnou úspěšností pod
+    WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT. appka NIC SAMA nemění, jen
+    upozorňuje — rozhodnutí (vyřadit/nechat) appka nechává na uživateli.
+    Read-only appka (kromě odeslání Telegram zprávy), nic neukládá."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT market_type, selection, result, model_probability, market_probability, league
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost')
+            """
+        )
+        rows = cur.fetchall()
+
+    by_league_market: dict[str, dict] = {}
+    for row in rows:
+        key = f"{row['market_type']}:{row['selection']}:{row['league'] or 'neznámá'}"
+        acc = by_league_market.setdefault(key, {"won": 0, "lost": 0, "model_probs": []})
+        acc[row["result"]] += 1
+        if row["model_probability"] is not None:
+            acc["model_probs"].append(float(row["model_probability"]))
+
+    flagged = []
+    for key, acc in by_league_market.items():
+        total = acc["won"] + acc["lost"]
+        if total < WEEKLY_CALIBRATION_MIN_SAMPLES:
+            continue
+        win_rate = acc["won"] / total * 100
+        if win_rate >= WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT:
+            continue
+        avg_model = (sum(acc["model_probs"]) / len(acc["model_probs"]) * 100) if acc["model_probs"] else None
+        flagged.append({
+            "trh_selekce_liga": key,
+            "pocet": total,
+            "win_rate_pct": round(win_rate, 1),
+            "prumerny_model_pct": round(avg_model, 1) if avg_model is not None else None,
+        })
+    flagged.sort(key=lambda x: x["win_rate_pct"])
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_status = "skipped"
+    if chat_id and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        if flagged:
+            lines = [f"⚠️ Týdenní kalibrační kontrola appky — {len(flagged)} podezřelých kombinací (appka nic sama neměnila, jen appce hlásí):", ""]
+            for f in flagged[:10]:
+                model_str = f"appky model {f['prumerny_model_pct']} %" if f['prumerny_model_pct'] is not None else "appky model neznámo"
+                lines.append(f"• {f['trh_selekce_liga']} — {f['win_rate_pct']} % úspěšnost ({f['pocet']} vzorků), {model_str}")
+            text = "\n".join(lines)
+        else:
+            text = "✅ Týdenní kalibrační kontrola appky — appka nic podezřelého nenašla."
+        try:
+            _send_telegram_message(int(chat_id), text)
+            telegram_status = "sent"
+        except Exception as e:
+            telegram_status = f"error: {e}"
+
+    return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
+
+
 
 
 

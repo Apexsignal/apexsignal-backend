@@ -1,0 +1,36 @@
+# appka (2026-09-14, uživatelovo přání "automatizace co se sama učí ze
+# sázek") — appka NENÍ plně autonomní (viz historie 0% úspěšnosti u
+# středního tiketu, po zrušení edge-kontroly). Tenhle cron jednou týdně
+# spočítá kalibraci (win-rate podle trh+liga) a pošle appce Telegram
+# upozornění, pokud najde podezřelou kombinaci — appka SAMA NIC NEMĚNÍ,
+# rozhodnutí (vyřadit ligu/trh) nechává na uživateli.
+#
+# Neděle 08:00 UTC = 9:00/10:00 v Praze (podle letního/zimního času) —
+# appka to zvolila jako klidný čas na konci týdne, appka nezáleží na
+# přesné minutě.
+#
+# Vyžaduje stejný repozitářový secret ADMIN_TASK_KEY jako ostatní appky
+# workflow soubory.
+name: Týdenní kalibrační upozornění
+
+on:
+  schedule:
+    - cron: "0 8 * * 0"
+  workflow_dispatch: {}  # appka umožní i ruční spuštění z záložky Actions
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Spočítat kalibraci a poslat Telegram upozornění (appka nic sama nemění)
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/weekly-calibration-alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+
+      - name: Upozornit na Telegram, pokud kontrola selhala
+        if: failure()
+        run: |
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/alert \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"⚠️ Týdenní kalibrační kontrola (weekly-calibration-alert.yml) dnes selhala. Zkontroluj GitHub Actions: https://github.com/Apexsignal/apexsignal-backend/actions/runs/${{ github.run_id }}\"}"
