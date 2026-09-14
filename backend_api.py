@@ -35,7 +35,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from probability_model import (
@@ -241,6 +241,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# appka appce (2026-09-14) chtěla zabránit AI botům appku trénovat na
+# appky datech (výsledky, tikety) a obecným scraperům je kopírovat —
+# CORS appce nic nedá, chrání jen prohlížeč appky (Origin hlavička), ne
+# přímé volání skriptem/botem, co Origin vůbec neposílá. Appka proto
+# přidává dvě samostatné vrstvy: blokuje podle User-Agent (známí
+# AI/scraper boti dostanou rovnou 403) a jednoduchý rate limit na IP
+# appky (moc rychlé volání appka odmítne, i beze jména v User-Agentu).
+_BLOCKED_USER_AGENT_SUBSTRINGS = [
+    # AI trénovací/crawler boti — appky známá jména.
+    "gptbot", "chatgpt-user", "ccbot", "anthropic-ai", "claudebot", "claude-web",
+    "google-extended", "googleother", "bytespider", "bingbot-ai", "cohere-ai",
+    "perplexitybot", "omgilibot", "omgili", "diffbot", "youbot", "meta-externalagent",
+    "facebookbot", "applebot-extended", "timpibot", "bytedance",
+    # obecné scrapery/HTTP knihovny — appka je appce rovnou blokuje,
+    # appka appky reálný appky prohlížeč appky takhle appku nepředstaví.
+    "scrapy", "python-requests", "python-urllib", "curl/", "wget/", "go-http-client",
+    "node-fetch", "axios/", "java/", "libwww-perl", "httpclient",
+]
+
+# appka appce jednoduchý in-memory rate limit — appky zvlášť appka
+# appky (stejný přístup jako rate_limiter.py, žádná nová závislost).
+from collections import defaultdict as _defaultdict, deque as _deque
+
+_PUBLIC_RATE_WINDOW_SECONDS = 60
+_PUBLIC_RATE_MAX_REQUESTS = 30  # appka appku appce appku appky 30 appky/minutu appku appku appku IP appku appky
+_public_request_log: dict[str, "_deque[float]"] = _defaultdict(_deque)
+
+
+@app.middleware("http")
+async def _block_bots_and_rate_limit(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/public/"):
+        return await call_next(request)
+
+    user_agent = (request.headers.get("user-agent") or "").lower()
+    if any(needle in user_agent for needle in _BLOCKED_USER_AGENT_SUBSTRINGS):
+        return JSONResponse(status_code=403, content={"detail": "Přístup zamítnut."})
+
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
+    now = time.time()
+    log = _public_request_log[client_ip]
+    while log and log[0] < now - _PUBLIC_RATE_WINDOW_SECONDS:
+        log.popleft()
+    if len(log) >= _PUBLIC_RATE_MAX_REQUESTS:
+        return JSONResponse(status_code=429, content={"detail": "Příliš mnoho požadavků, zkus to za chvíli znovu."})
+    log.append(now)
+
+    return await call_next(request)
 
 # Appka na vlastní generování zákazníky zatím nemá zaplacené API kredity
 # ve verzi, co by uneslo reálný provoz (jen appce vlastní denní účet pro
