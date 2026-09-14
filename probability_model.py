@@ -1677,18 +1677,24 @@ class TicketGenerator:
         # appka navíc (2026-08-09, uživatelovo přání: "Dat prednost vyhra
         # favorita, pak vyhra nebo remiza, pak over golu a pak vsechno
         # dalsi") řadí trhy podle pevného pořadí spolehlivosti bez ohledu
-        # na syrovou pravděpodobnost — match_winner (84,2% skutečná
-        # úspěšnost, viz /admin/all-markets-calibration) appka staví
-        # nejvýš, dvojtip (bezpečnostní noha z podstaty) druhý, over góly
-        # třetí, všechno ostatní (BTTS, over_cards) naposled — appka je
-        # zpřísnila kvůli prokázané přeceněnosti. _search_combo zkouší
-        # "zahrnout" větev dřív pro kandidáty DŘÍV v ordered_pool (DFS níže),
-        # takže tohle řazení appku dá vyšší prioritě přednost, kdykoli
-        # existuje kombinace, co ji obsahuje.
+        # na syrovou pravděpodobnost. _search_combo zkouší "zahrnout" větev
+        # dřív pro kandidáty DŘÍV v ordered_pool (DFS níže), takže tohle
+        # řazení appku dá vyšší prioritě přednost, kdykoli existuje
+        # kombinace, co ji obsahuje.
+        #
+        # 2026-09-14: uživatel pořadí přehodil — "Nejdriv tiket sestaveni
+        # vyhra favorita pak over 1.5 gol nebo btts a pak az neprohra".
+        # Dvojtip appka teď staví AŽ ZA over góly/BTTS (dřív byl hned po
+        # výhře) — appka to respektuje jako uživatelovo rozhodnutí, i když
+        # appky vlastní kalibrace (viz /admin/all-markets-calibration) řadí
+        # dvojtip (60-83 % podle selekce) obvykle spolehlivěji než BTTS
+        # (jen 60 %, viz i BTTS_STRICT_MIN_PROB=0.80 výš) — appka na tenhle
+        # nesoulad upozornila, uživatel to i tak chtěl takhle.
         MARKET_PRIORITY = {
             MarketType.MATCH_WINNER: 0,
-            MarketType.DOUBLE_CHANCE: 1,
-            MarketType.OVER_GOALS: 2,
+            MarketType.OVER_GOALS: 1,
+            MarketType.BTTS: 1,
+            MarketType.DOUBLE_CHANCE: 2,
         }
         ordered_pool = sorted(
             pool, key=lambda c: (MARKET_PRIORITY.get(c.market_type, 3), -c.probability)
