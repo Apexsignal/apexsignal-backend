@@ -1208,20 +1208,31 @@ class MarketEvaluator:
         # appka kdy viděla u skutečně dobrého úlovku (2-9 bodů). Tak velký
         # rozchod appky modelu s trhem appka bere jako podezření na chybu
         # ve VSTUPNÍCH datech (např. jeden extrémní výsledek v posledních 10
-        # zápasech, co appce zkreslí průměr xG), ne jako geniální přehlédnutou
-        # příležitost — appka takového kandidáta radši rovnou zahodí. MAX_MODEL_
-        # MARKET_GAP (viz výš) totiž jen omezuje edge/vklad u kandidáta, co už
-        # appka vybrala — appku SAMOTNOU volbu favorita (např. u výhry zápasu)
-        # to vůbec nechrání, proto appka potřebuje samostatnou pojistku tady.
-        def passes_sanity_gap(c: SelectionCandidate) -> bool:
-            if c.market_probability is None:
-                return True  # bez appky tržní ceny appka nemá s čím srovnat
-            return abs(c.model_probability - c.market_probability) <= SUSPICIOUS_MODEL_MARKET_GAP
+        # zápasech, co appce zkreslí průměr xG) — a taková chyba (špatné xG)
+        # kazí VŠECHNY trhy na daný zápas, ne jen ten jeden, kde appka
+        # zrovna narazila na velký rozchod s trhem. Appka to PRVNĚ appce
+        # udělala jen na úrovni jednotlivého kandidáta (dvojtip appce
+        # klidně prošel dál, i když appka appka výhru už vyřadila) — appka
+        # appce narazila, že appce appku takhle appka appce pořád nabízela
+        # STEJNÝ podezřelý zápas přes jiný trh (uživatel: "jaktoze zase
+        # nabizis esterlu"). Appka teď kontroluje CELÝ zápas najednou —
+        # jakmile JEDEN kandidát appky přeskočí práh, appka zahodí úplně
+        # všechny kandidáty pro ten zápas. MAX_MODEL_MARKET_GAP (viz výš)
+        # totiž jen omezuje edge/vklad u kandidáta, co už appka vybrala —
+        # appku SAMOTNOU volbu (např. u výhry zápasu) to vůbec nechrání,
+        # proto appka potřebuje tuhle samostatnou pojistku.
+        match_has_suspicious_gap = any(
+            c.market_probability is not None
+            and abs(c.model_probability - c.market_probability) > SUSPICIOUS_MODEL_MARKET_GAP
+            for c in candidates
+        )
+        if match_has_suspicious_gap:
+            return []
 
         return [
             c for c in candidates
             if c.model_probability >= effective_min_prob(c) and c.probability >= effective_min_prob(c)
-            and passes_odds_filter(c) and passes_sanity_gap(c)
+            and passes_odds_filter(c)
         ]
 
     @staticmethod
