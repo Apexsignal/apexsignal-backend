@@ -6890,6 +6890,8 @@ def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: 
                 "market_probability_pct": round(c.market_probability * 100, 1) if c.market_probability is not None else None,
                 "odds": c.odds,
                 "edge_pct": round(c.edge * 100, 1) if c.edge is not None else None,
+                "reasoning": c.reasoning,
+                "data_quality": c.data_quality,
             }
             for c in pool
         ],
