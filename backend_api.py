@@ -7876,37 +7876,6 @@ def _prepare_signal_prompt(data):
     return "Převypravuj tyhle data o sázení do plynulého českého textu (čistě informativní, bez rad).\n\nData: " + json.dumps(data)
 
 
-@app.get("/admin/_debug-generate-safe-only")
-def _debug_generate_safe_only(request: Request, time_frame_days: int = 1):
-    """Dočasné: appka sestaví tiket jen z Vítěze/Dvojtipu (bez Nad gólů),
-    bez vylučování uživatelovy uložené historie."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    safe_markets = [MarketType.MATCH_WINNER, MarketType.DOUBLE_CHANCE]
-    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
-    matches = _filter_future_matches(matches, buffer_minutes=5)
-    result = ticket_generator.generate(matches, 20, DAILY_TICKETS_SPORTS, safe_markets, time_frame_days)
-    ticket = result["safe"]
-    if ticket is None:
-        return {"status": "nepovedlo se sestavit", "matches_count": len(matches)}
-    return {
-        "status": "ok",
-        "total_odds": ticket.total_odds,
-        "combined_probability": round(ticket.combined_probability, 4),
-        "selections": [
-            {
-                "home_team": s.home_team, "away_team": s.away_team, "league": s.league,
-                "market_type": s.market_type.value, "selection": s.selection,
-                "odds": s.odds, "model_probability": round(s.model_probability, 3),
-                "market_probability": round(s.market_probability, 3) if s.market_probability is not None else None,
-                "probability": round(s.probability, 3),
-            }
-            for s in ticket.selections
-        ],
-    }
-
 
 
 
