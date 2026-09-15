@@ -8005,6 +8005,39 @@ def admin_weekly_calibration_alert(request: Request):
     return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
 
 
+@app.get("/admin/_debug-generate-today")
+def _debug_generate_today(request: Request, time_frame_days: int = 2):
+    """Dočasné: appka sestaví aktuálně nejlepší dostupný tiket bez
+    vylučování uživatelovy historie."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+    result = ticket_generator.generate(matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, time_frame_days)
+    ticket = result["safe"]
+    if ticket is None:
+        return {"status": "nepovedlo se sestavit", "matches_count": len(matches)}
+    return {
+        "status": "ok",
+        "total_odds": ticket.total_odds,
+        "combined_probability": round(ticket.combined_probability, 4),
+        "selections": [
+            {
+                "match_id": s.match_id,
+                "home_team": s.home_team, "away_team": s.away_team, "league": s.league, "country": s.country,
+                "market_type": s.market_type.value, "selection": s.selection,
+                "odds": s.odds, "model_probability": round(s.model_probability, 3),
+                "market_probability": round(s.market_probability, 3) if s.market_probability is not None else None,
+                "probability": round(s.probability, 3),
+                "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
+            }
+            for s in ticket.selections
+        ],
+    }
+
+
 
 
 
