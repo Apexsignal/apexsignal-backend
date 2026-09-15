@@ -275,6 +275,17 @@ MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) př
                               # 28.6 % (2/7), zatímco match_winner je jinde
                               # skoro všude 85-100 %.
 
+TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
+                              # "Fakel je ruska liga neni na tipsportu..z ni
+                              # uz nevybirat") — na rozdíl od kalibračních
+                              # výluk výše (OVER_GOALS_EXCLUDED_COUNTRIES
+                              # atd., jedna liga/trh s prokazatelně špatnou
+                              # úspěšností) tohle appka aplikuje na VŠECHNY
+                              # trhy najednou a bez ohledu na kalibraci —
+                              # ruské zápasy appka reálně nejde vsadit na
+                              # Tipsportu, takže je appka nemá nabízet
+                              # vůbec, ať appka vydělává na čemkoliv.
+
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
                               # zadal už 2026-08-06 ("Chci aby over tipy se
@@ -1011,6 +1022,9 @@ class MarketEvaluator:
         jen ty, jejichž model_probability >= min_prob (filtrace).
         """
         candidates: list[SelectionCandidate] = []
+
+        if match.country in TIPSPORT_UNAVAILABLE_COUNTRIES:
+            return candidates
 
         if match.sport in (Sport.FOOTBALL, Sport.HOCKEY):
             # Góly modelované Poissonem — pro tyto dva sporty to dává smysl
