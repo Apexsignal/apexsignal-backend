@@ -1512,18 +1512,31 @@ def _ticket_type_for_risk_level(risk_level: int) -> str:
 
 
 H2H_BLOWOUT_MARGIN = 3  # rozdíl gólů, od kterého appka vzájemný zápas počítá jako "blowout"
+H2H_BLOWOUT_MIN_COUNT = 2  # appka (2026-09-16, uživatelovo přání "zmírnit")
+                              # vyžaduje aspoň TOLIK blowoutů z posledních
+                              # 6 vzájemných zápasů, ne jeden jediný — viz
+                              # get_h2h_blowout_count. Jeden ojedinělý
+                              # výbuch appce zbytečně zahazoval i jinak
+                              # zdravé favority (dnešní příklad: Hapoel
+                              # Tel Aviv i Rapid Vienna appka vyřadila jen
+                              # kvůli jednomu starému výsledku), opakovaný
+                              # vzorec (2+) ale pořád appce chytí přesně
+                              # ten typ nevyrovnané dvojice, co appku
+                              # 2026-09-05 praštil do očí (Waldhof
+                              # Mannheim).
 
 
 def _filter_h2h_volatile_candidates(pool: list[SelectionCandidate]) -> list[SelectionCandidate]:
     """
     Vyřadí MATCH_WINNER/DOUBLE_CHANCE kandidáty, jejichž poslední vzájemné
-    zápasy obsahují výrazný "blowout" (rozdíl gólů >= H2H_BLOWOUT_MARGIN) —
-    přidáno 2026-09-05 po živém případu (Waldhof Mannheim 1X, model 75 %,
-    ve skutečnosti prohráli): appka model počítá jen z aktuální formy/xG,
-    ne z toho, jak nevyrovnaně tihle dva konkrétní týmy proti sobě
-    historicky hráli (5:2, 1:3 vedle řady remíz) — takový zápas je
-    nepředvídatelnější, než číslo samo ukazuje. Over góly/BTTS appka
-    schválně nezahrnuje, tam volatilita skóre není na škodu.
+    zápasy obsahují ASPOŇ H2H_BLOWOUT_MIN_COUNT výrazných "blowoutů"
+    (rozdíl gólů >= H2H_BLOWOUT_MARGIN) — přidáno 2026-09-05 po živém
+    případu (Waldhof Mannheim 1X, model 75 %, ve skutečnosti prohráli):
+    appka model počítá jen z aktuální formy/xG, ne z toho, jak nevyrovnaně
+    tihle dva konkrétní týmy proti sobě historicky hráli (5:2, 1:3 vedle
+    řady remíz) — takový zápas je nepředvídatelnější, než číslo samo
+    ukazuje. Over góly/BTTS appka schválně nezahrnuje, tam volatilita
+    skóre není na škodu.
     """
     provider = data_provider.get_provider(Sport.FOOTBALL)
     volatile_match_ids: dict[int, bool] = {}
@@ -1539,8 +1552,8 @@ def _filter_h2h_volatile_candidates(pool: list[SelectionCandidate]) -> list[Sele
                 teams = fixture.get("teams", {})
                 home_id, away_id = teams.get("home", {}).get("id"), teams.get("away", {}).get("id")
                 if home_id and away_id:
-                    margin = provider.get_h2h_max_margin(home_id, away_id)
-                    is_volatile = margin is not None and margin >= H2H_BLOWOUT_MARGIN
+                    blowout_count = provider.get_h2h_blowout_count(home_id, away_id, margin_threshold=H2H_BLOWOUT_MARGIN)
+                    is_volatile = blowout_count is not None and blowout_count >= H2H_BLOWOUT_MIN_COUNT
             except Exception:
                 is_volatile = False  # appka radši propustí kandidáta, než aby kvůli tomu selhalo celé generování
             volatile_match_ids[c.match_id] = is_volatile

@@ -2515,16 +2515,24 @@ class APIFootballProvider(SportsDataProvider):
             pass
         return data
 
-    def get_h2h_max_margin(self, team1_id: int, team2_id: int, last: int = 6) -> Optional[int]:
+    def get_h2h_blowout_count(self, team1_id: int, team2_id: int, last: int = 6, margin_threshold: int = 3) -> Optional[int]:
         """
-        Nejvyšší rozdíl gólů v posledních `last` vzájemných zápasech dvou
-        týmů. Přidáno 2026-09-05 — uživatel živě narazil na doporučenou
-        dvojtip sázku (Waldhof Mannheim 1X), co model spočítal na 75 %
-        čistě z formy/xG, bez ohledu na to, že mezi týmy padaly i vysoké
-        výsledky (5:2) — appka tohle používá jako dodatečný varovný
-        signál pro MATCH_WINNER/DOUBLE_CHANCE (viz backend_api.py).
+        Počet vzájemných zápasů (z posledních `last`) s rozdílem gólů
+        >= margin_threshold. Přidáno 2026-09-05 jako get_h2h_max_margin
+        (uživatel živě narazil na doporučenou dvojtip sázku Waldhof
+        Mannheim 1X, co model spočítal na 75 % čistě z formy/xG, bez
+        ohledu na to, že mezi týmy padaly i vysoké výsledky 5:2) —
+        appka tohle používá jako dodatečný varovný signál pro
+        MATCH_WINNER/DOUBLE_CHANCE (viz backend_api.py).
+
+        2026-09-16 (uživatelovo přání "zmírnit") appka přešla z
+        "nejvyšší rozdíl v historii" (jeden ojedinělý blowout stačil k
+        vyřazení) na POČET blowoutů — appka teď vyžaduje aspoň DVA, ne
+        jeden, ať appce jeden náhodný výsledek zbytečně nezahazuje
+        jinak zdravého favorita. Vrací počet, ne bool, ať appka volbu
+        prahu (kolik blowoutů appka toleruje) nechá na volajícím.
         """
-        cache_key = f"h2h_margin:{team1_id}-{team2_id}"
+        cache_key = f"h2h_blowout_count:{team1_id}-{team2_id}:{margin_threshold}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -2532,13 +2540,16 @@ class APIFootballProvider(SportsDataProvider):
             response = self._get("/fixtures/headtohead", {"h2h": f"{team1_id}-{team2_id}", "last": last})
         except Exception:
             return None
-        margins = []
+        blowouts = 0
+        matches_with_score = 0
         for fixture in response:
             goals = fixture.get("goals", {})
             home_goals, away_goals = goals.get("home"), goals.get("away")
             if home_goals is not None and away_goals is not None:
-                margins.append(abs(home_goals - away_goals))
-        result = max(margins) if margins else None
+                matches_with_score += 1
+                if abs(home_goals - away_goals) >= margin_threshold:
+                    blowouts += 1
+        result = blowouts if matches_with_score > 0 else None
         self._cache.set(cache_key, result)
         return result
 
