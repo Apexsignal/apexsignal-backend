@@ -284,19 +284,40 @@ NEAR_MISS_TOLERANCE_STEPS = (0.01, 0.02, 0.03)  # appka (2026-09-16, uživatel:
                               # TicketGenerator.generate), zkouší postupně
                               # od nejmenší odchylky k největší.
 
-TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia", "Israel"}  # appka (2026-09-15,
-                              # uživatel: "Fakel je ruska liga neni na
-                              # tipsportu..z ni uz nevybirat"; 2026-09-16
-                              # doplněno o Izrael, uživatel poslal
-                              # screenshot Tipsportu: "Hapoel tel aviv neni
-                              # na tipsportu") — na rozdíl od kalibračních
+TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
+                              # "Fakel je ruska liga neni na tipsportu..z ni
+                              # uz nevybirat") — na rozdíl od kalibračních
                               # výluk výše (OVER_GOALS_EXCLUDED_COUNTRIES
                               # atd., jedna liga/trh s prokazatelně špatnou
                               # úspěšností) tohle appka aplikuje na VŠECHNY
                               # trhy najednou a bez ohledu na kalibraci —
-                              # appka tyhle zápasy reálně nejde vsadit na
-                              # Tipsportu, takže je nemá nabízet vůbec, ať
-                              # appka vydělává na čemkoliv.
+                              # ruské zápasy appka reálně nejde vsadit na
+                              # Tipsportu, takže je appka nemá nabízet
+                              # vůbec, ať appka vydělává na čemkoliv.
+                              #
+                              # 2026-09-16: appka zkusila stejným způsobem
+                              # vyřadit celý Izrael (uživatel poslal
+                              # screenshot Tipsportu k Hapoel Tel Aviv), ale
+                              # uživatel upřesnil, že šlo jen o TENHLE jeden
+                              # konkrétní zápas (Izraelský pohár), ne o celou
+                              # zemi/ligu — jiné izraelské zápasy (Ligat
+                              # Ha'al) na Tipsportu běžně jsou. Appka to
+                              # proto řeší přesněji, přes TIPSPORT_UNAVAILABLE_MATCH_IDS
+                              # níže, ne přes celou zemi.
+
+TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508}  # appka (2026-09-16, uživatel:
+                              # "Hapoel tel aviv neni na tipsportu", screenshot
+                              # Tipsportu bez nadcházejících zápasů) — na
+                              # rozdíl od TIPSPORT_UNAVAILABLE_COUNTRIES appka
+                              # tohle vyřazuje jen po JEDNOTLIVÝCH zápasech
+                              # (konkrétní match_id appky data_provider), ne
+                              # po celé zemi/lize — appka totiž nemá důkaz, že
+                              # by celá izraelská liga chyběla, jen tenhle
+                              # konkrétní pohárový zápas appka na Tipsportu
+                              # nenašla. Jde o ID konkrétního fixture z
+                              # API-Football, ne o tým — po odehrání appka
+                              # tenhle záznam může smazat, další zápas Hapoel
+                              # Tel Aviv dostane jiné match_id.
 
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
@@ -1035,7 +1056,7 @@ class MarketEvaluator:
         """
         candidates: list[SelectionCandidate] = []
 
-        if match.country in TIPSPORT_UNAVAILABLE_COUNTRIES:
+        if match.country in TIPSPORT_UNAVAILABLE_COUNTRIES or match.match_id in TIPSPORT_UNAVAILABLE_MATCH_IDS:
             return candidates
 
         if match.sport in (Sport.FOOTBALL, Sport.HOCKEY):
