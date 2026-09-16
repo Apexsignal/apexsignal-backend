@@ -5377,11 +5377,27 @@ def _debug_generate_today(request: Request, email: str, risk_level: int = 20):
     if not user:
         raise HTTPException(status_code=404, detail="Účet s tímhle e-mailem appka nenašla")
 
+    # DOČASNÁ diagnostika (2026-09-16) — přímo replikuje kus pipeline,
+    # ať appka vidí, kde přesně tolerance-pool zamítne.
+    exclude_ids = repo.get_all_saved_match_ids(user["id"])
+    all_wider = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 4)
+    all_wider = [m for m in all_wider if m.match_id not in exclude_ids]
+    all_wider = _filter_future_matches(all_wider, buffer_minutes=5)
+    matches = _filter_within_days(all_wider, 4)
+    diag = {"matches_count": len(matches), "exclude_ids_count": len(exclude_ids)}
+    gen = ticket_generator
+    tol_pool = gen._build_filtered_pool(matches, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, min_prob=0.65)
+    diag["raw_65pct_pool"] = [f"{c.home_team}-{c.away_team}:{c.market_type.value}:{c.selection} odds={c.odds}" for c in tol_pool]
+    filtered_by_h2h = _filter_h2h_volatile_candidates(tol_pool)
+    diag["after_h2h_filter"] = [f"{c.home_team}-{c.away_team}:{c.market_type.value}:{c.selection} odds={c.odds}" for c in filtered_by_h2h]
+    tol_applied = [c for c in filtered_by_h2h if _passes_edge_tolerance(c, 0.03)]
+    diag["after_tolerance_003"] = [f"{c.home_team}-{c.away_team}:{c.market_type.value}:{c.selection} odds={c.odds}" for c in tol_applied]
+
     ticket = _generate_one_ticket_for_cron(
         user["id"], risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4, max_widen_days=0,
     )
     if ticket is None:
-        return {"status": "no_valid_combination"}
+        return {"status": "no_valid_combination", "diag": diag}
 
     ticket_id = repo.save_ticket(user["id"], ticket)
     telegram_status = "skipped"
