@@ -5377,31 +5377,6 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
-@app.get("/admin/_debug-fixtures-by-date")
-def _debug_fixtures_by_date(request: Request, date: str, teams: str = ""):
-    """DOČASNÝ debug endpoint — appka dohledá skutečné výsledky zápasů
-    k danému datu (filtrováno podle jmen týmů, čárkou oddělené), ať appka
-    ověří pravdivý výsledek bez uloženého tiketu. Po použití appka tenhle
-    endpoint zase smaže."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    fixtures = provider._get("/fixtures", {"date": date})
-    needles = [t.strip().lower() for t in teams.split(",") if t.strip()]
-    results = []
-    for f in fixtures:
-        home = f.get("teams", {}).get("home", {}).get("name", "")
-        away = f.get("teams", {}).get("away", {}).get("name", "")
-        if needles and not any(n in home.lower() or n in away.lower() for n in needles):
-            continue
-        results.append({
-            "home": home, "away": away,
-            "status": f.get("fixture", {}).get("status", {}).get("short"),
-            "goals": f.get("goals", {}),
-        })
-    return {"date": date, "count": len(results), "results": results}
 
 
 def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
