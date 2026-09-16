@@ -275,6 +275,15 @@ MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) př
                               # 28.6 % (2/7), zatímco match_winner je jinde
                               # skoro všude 85-100 %.
 
+NEAR_MISS_TOLERANCE_STEPS = (0.01, 0.02, 0.03)  # appka (2026-09-16, uživatel:
+                              # "dal bych nejakou rozumnou toleranci kdyz
+                              # bude jeden nebo dva nebo tri [procentni
+                              # body] tak uzije zapas na tiketu") — appka
+                              # tohle používá JEN jako úplně poslední
+                              # záchrannou síť u krátkého tiketu (viz
+                              # TicketGenerator.generate), zkouší postupně
+                              # od nejmenší odchylky k největší.
+
 TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
                               # "Fakel je ruska liga neni na tipsportu..z ni
                               # uz nevybirat") — na rozdíl od kalibračních
@@ -1224,12 +1233,11 @@ class MarketEvaluator:
         # ve VSTUPNÍCH datech (např. jeden extrémní výsledek v posledních 10
         # zápasech, co appce zkreslí průměr xG) — a taková chyba (špatné xG)
         # kazí VŠECHNY trhy na daný zápas, ne jen ten jeden, kde appka
-        # zrovna narazila na velký rozchod s trhem. Appka to PRVNĚ appce
-        # udělala jen na úrovni jednotlivého kandidáta (dvojtip appce
-        # klidně prošel dál, i když appka appka výhru už vyřadila) — appka
-        # appce narazila, že appce appku takhle appka appce pořád nabízela
-        # STEJNÝ podezřelý zápas přes jiný trh (uživatel: "jaktoze zase
-        # nabizis esterlu"). Appka teď kontroluje CELÝ zápas najednou —
+        # zrovna narazila na velký rozchod s trhem. Appka to PRVNĚ udělala
+        # jen na úrovni jednotlivého kandidáta (dvojtip klidně prošel dál,
+        # i když výhru už vyřadila) — narazila na to, že takhle appka
+        # pořád nabízela STEJNÝ podezřelý zápas přes jiný trh (uživatel:
+        # "jaktoze zase nabizis esterlu"). Appka teď kontroluje CELÝ zápas najednou —
         # jakmile JEDEN kandidát appky přeskočí práh, appka zahodí úplně
         # všechny kandidáty pro ten zápas. MAX_MODEL_MARKET_GAP (viz výš)
         # totiž jen omezuje edge/vklad u kandidáta, co už appka vybrala —
@@ -1434,6 +1442,17 @@ def edge_capped_model_probability(selection: "SelectionCandidate") -> float:
     return min(selection.model_probability, selection.market_probability + MAX_MODEL_MARKET_GAP)
 
 
+def _passes_edge_tolerance(selection: "SelectionCandidate", tolerance: float) -> bool:
+    """Stejný reálný test jako require_positive_edge (edge_capped_model_probability
+    * kurz > 1.0), jen appka dovolí podkročení až o `tolerance` (v procentních
+    bodech pravděpodobnosti) — používá se výhradně v NEAR_MISS_TOLERANCE_STEPS
+    záchranné síti, ne v běžném filtru."""
+    if selection.market_probability is None:
+        return True
+    required_probability = 1.0 / selection.odds
+    return edge_capped_model_probability(selection) >= required_probability - tolerance
+
+
 class TicketGenerator:
     """
     Sestavuje kombinované tikety z poolu kandidátů (SelectionCandidate),
@@ -1604,6 +1623,35 @@ class TicketGenerator:
                 if ticket is not None:
                     print(f"[{ticket_key}] Tiket sestaven záchrannou sítí (70%+, kladný individuální edge, bez kombinovaného Kelly)")
             gc.collect()
+
+        # Úplně poslední, nejvolnější záchranná síť (2026-09-16, uživatelovo
+        # přání: "dal bych nejakou rozumnou toleranci kdyz bude jeden nebo
+        # dva nebo tri [procentni body] tak uzije zapas na tiketu"). Na
+        # rozdíl od všeho výš appka tady VĚDOMĚ pustí i kandidáty, co
+        # standardní reálný test (model_probability * kurz > 1.0) těsně
+        # nesplní — ale jen o pár procentních bodů (NEAR_MISS_TOLERANCE_STEPS),
+        # a jen když appka nenašla nic ani přes všechny přísnější pokusy
+        # výš. Appka zkouší od nejmenší odchylky (1 pb) k největší (3 pb),
+        # ať dá přednost "jistější" verzi, kdykoli by stačila. Kandidáty
+        # použité jen díky téhle toleranci appka označí v reasoning, ať je
+        # jasně vidět, které nohy mají prokázanou výhodu a které ne.
+        if ticket is None and ticket_key == "kratky":
+            for tolerance in NEAR_MISS_TOLERANCE_STEPS:
+                tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.65)
+                if pool_filter is not None:
+                    tolerance_pool = pool_filter(tolerance_pool)
+                tolerance_pool = [c for c in tolerance_pool if _passes_edge_tolerance(c, tolerance)]
+                for c in tolerance_pool:
+                    if c.market_probability is not None and edge_capped_model_probability(c) * c.odds <= 1.0:
+                        shortfall_pb = round((1.0 / c.odds - edge_capped_model_probability(c)) * 100, 1)
+                        c.reasoning = (c.reasoning + f" ★ V TOLERANCI — appka model o {shortfall_pb} pb pod standardním prahem proti kurzu, uživatel to vědomě přijímá.").strip()
+
+                if tolerance_pool:
+                    ticket = self._build_ticket(tolerance_pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
+                    if ticket is not None:
+                        print(f"[{ticket_key}] Tiket sestaven s tolerancí {int(tolerance*100)} pb")
+                        break
+                gc.collect()
 
         if ticket is None:
             counts_str = ", ".join(f"{pct}%={n}" for pct, n in sorted(candidate_counts.items(), reverse=True))

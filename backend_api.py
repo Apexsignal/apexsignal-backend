@@ -5349,10 +5349,9 @@ def _generate_one_ticket_for_cron(
 
 @app.post("/admin/send-ticket-to-telegram")
 def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
-    """Appka appce pošle KONKRÉTNÍ uložený tiket appce na appčin vlastní
-    Telegram (TELEGRAM_CHAT_ID) — appka to appce hodí, kdykoliv appka
-    chce appce jednorázově něco poslat mimo appčin pravidelný denní
-    cron (viz run_daily_tickets)."""
+    """Pošle KONKRÉTNÍ uložený tiket na appčin vlastní Telegram
+    (TELEGRAM_CHAT_ID) — appka to použije, kdykoliv chce jednorázově
+    něco poslat mimo pravidelný denní cron (viz run_daily_tickets)."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
