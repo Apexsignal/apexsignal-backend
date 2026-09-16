@@ -284,16 +284,19 @@ NEAR_MISS_TOLERANCE_STEPS = (0.01, 0.02, 0.03)  # appka (2026-09-16, uživatel:
                               # TicketGenerator.generate), zkouší postupně
                               # od nejmenší odchylky k největší.
 
-TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
-                              # "Fakel je ruska liga neni na tipsportu..z ni
-                              # uz nevybirat") — na rozdíl od kalibračních
+TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia", "Israel"}  # appka (2026-09-15,
+                              # uživatel: "Fakel je ruska liga neni na
+                              # tipsportu..z ni uz nevybirat"; 2026-09-16
+                              # doplněno o Izrael, uživatel poslal
+                              # screenshot Tipsportu: "Hapoel tel aviv neni
+                              # na tipsportu") — na rozdíl od kalibračních
                               # výluk výše (OVER_GOALS_EXCLUDED_COUNTRIES
                               # atd., jedna liga/trh s prokazatelně špatnou
                               # úspěšností) tohle appka aplikuje na VŠECHNY
                               # trhy najednou a bez ohledu na kalibraci —
-                              # ruské zápasy appka reálně nejde vsadit na
-                              # Tipsportu, takže je appka nemá nabízet
-                              # vůbec, ať appka vydělává na čemkoliv.
+                              # appka tyhle zápasy reálně nejde vsadit na
+                              # Tipsportu, takže je nemá nabízet vůbec, ať
+                              # appka vydělává na čemkoliv.
 
 OVER_GOALS_MIN_TEAM_ATTACK_RATE = 1.4  # góly/zápas — appka pod tímhle
                               # tým nepovažuje za "útočný". Uživatel tohle
