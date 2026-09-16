@@ -275,6 +275,18 @@ MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) př
                               # 28.6 % (2/7), zatímco match_winner je jinde
                               # skoro všude 85-100 %.
 
+NEAR_MISS_DISPLAY_MIN_PROB = 0.55  # appka (2026-09-16, uživatel: "rozšiř to,
+                              # líbí se mi to appka to napíše, ale sestaví
+                              # tiket") — appky NEJVOLNĚJŠÍ dno pro
+                              # zobrazovanou (tržní) pravděpodobnost,
+                              # používá se JEN v úplně poslední záchranné
+                              # síti (viz TicketGenerator.generate), pod
+                              # standardní appky 65% zárukou pro klienty.
+                              # Stejné dno jako appky BOOST tier, appka ho
+                              # tu bere jako rozumnou spodní hranici, pod
+                              # kterou by appka věrohodnost tiketu už
+                              # nechtěla riskovat.
+
 NEAR_MISS_TOLERANCE_STEPS = (0.01, 0.02, 0.03)  # appka (2026-09-16, uživatel:
                               # "dal bych nejakou rozumnou toleranci kdyz
                               # bude jeden nebo dva nebo tri [procentni
@@ -1676,6 +1688,33 @@ class TicketGenerator:
                         print(f"[{ticket_key}] Tiket sestaven s tolerancí {int(tolerance*100)} pb")
                         break
                 gc.collect()
+
+        # Ještě o krok volnější (2026-09-16, uživatelovo přání "rozšiř to,
+        # líbí se mi to appka to napíše, ale sestaví tiket") — appka tady
+        # navíc pustí i kandidáty POD appčinu standardní 65% zobrazovací
+        # hranici (až na NEAR_MISS_DISPLAY_MIN_PROB), spolu se stejnou
+        # edge tolerancí jako výš. Tohle je appky NEJVOLNĚJŠÍ stupeň — běží,
+        # jen když appka nenašla nic přes VŠECHNO výš. Appka takové nohy
+        # v reasoning vždycky jasně označí (buď že jsou pod zobrazovací
+        # hranicí, nebo že mají edge jen v toleranci), ať appka klientovi
+        # nikdy tiše netvrdí "65%+ jistota", když to reálně neplatí.
+        if ticket is None and ticket_key == "kratky":
+            display_tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=NEAR_MISS_DISPLAY_MIN_PROB)
+            if pool_filter is not None:
+                display_tolerance_pool = pool_filter(display_tolerance_pool)
+            display_tolerance_pool = [c for c in display_tolerance_pool if _passes_edge_tolerance(c, NEAR_MISS_TOLERANCE_STEPS[-1])]
+            for c in display_tolerance_pool:
+                if c.probability < 0.65:
+                    c.reasoning = (c.reasoning + " ★ POD STANDARDNÍ HRANICÍ 65 % — appka ho nabízí jen díky rozšířené toleranci na zobrazovanou pravděpodobnost.").strip()
+                elif c.market_probability is not None and edge_capped_model_probability(c) * c.odds <= 1.0:
+                    shortfall_pb = round((1.0 / c.odds - edge_capped_model_probability(c)) * 100, 1)
+                    c.reasoning = (c.reasoning + f" ★ V TOLERANCI — appka model o {shortfall_pb} pb pod standardním prahem proti kurzu.").strip()
+
+            if display_tolerance_pool:
+                ticket = self._build_ticket(display_tolerance_pool, odds_range, ticket_key, risk_level, require_positive_edge=False)
+                if ticket is not None:
+                    print(f"[{ticket_key}] Tiket sestaven s rozšířenou tolerancí (pod 65% zobrazovací hranicí)")
+            gc.collect()
 
         if ticket is None:
             counts_str = ", ".join(f"{pct}%={n}" for pct, n in sorted(candidate_counts.items(), reverse=True))

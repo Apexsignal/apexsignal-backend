@@ -5388,6 +5388,7 @@ def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
                 "league": s.league, "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
                 "odds": s.odds, "probability": s.probability, "selection": s.selection,
                 "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                "reasoning": s.reasoning,
             }
             for s in ticket.selections
         ],

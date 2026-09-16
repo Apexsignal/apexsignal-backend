@@ -74,8 +74,26 @@ TICKET_CAPTION_LABELS = {
 def build_ticket_caption(ticket: dict) -> str:
     label = TICKET_CAPTION_LABELS.get(ticket.get("ticket_type", ""), "Tiket")
     total_odds = ticket.get("total_odds", 0)
+
+    # appka (2026-09-16, uživatelovo přání "appka to napíše, ale sestaví
+    # tiket") — pokud appka do tiketu zapojila nohu jen díky rozšířené
+    # toleranci (NEAR_MISS_TOLERANCE_STEPS / NEAR_MISS_DISPLAY_MIN_PROB v
+    # probability_model.py, poznat podle "★" v selection.reasoning),
+    # appka to musí být vidět rovnou v Telegram zprávě — ne jen appce v
+    # detailu appky, jinak by appka klientovi tiše poslala tiket pod
+    # vlastní 65% hranicí, aniž by to appka řekla.
+    tolerance_notes = [
+        s.get("reasoning", "").split("★", 1)[1].strip()
+        for s in ticket.get("selections", [])
+        if "★" in s.get("reasoning", "")
+    ]
+    tolerance_block = ""
+    if tolerance_notes:
+        tolerance_block = "\n⚠️ " + "\n⚠️ ".join(tolerance_notes) + "\n"
+
     return (
-        f"🎫 {label} · kurz {total_odds:.2f}\n\n"
+        f"🎫 {label} · kurz {total_odds:.2f}\n"
+        f"{tolerance_block}\n"
         "Appka jen doporučuje — sázku si klikáš sám, kde chceš (Tipsport, Fortuna...).\n\n"
         "Není to jistota. 18+, sázej jen to, co si můžeš dovolit prohrát."
     )
