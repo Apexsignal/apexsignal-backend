@@ -7697,15 +7697,23 @@ def admin_export_db(request: Request, tables: str = ""):
 def showcase_tickets(limit: int = 20):
     """
     Veřejná "výkladní skříň" appky — bez přihlášení appka vrátí poslední
-    VYHRANÉ tikety appčiných dvou vlastních automatických účtů
-    (DAILY_TICKETS_USER_ID a TRANSPARENCY_USER_ID), NIKDY tikety běžných
-    uživatelů appky. U obou účtů appka posílá skutečně uložený
-    actual_stake_amount/actual_profit_loss — u TRANSPARENCY_USER_ID je to
-    vždy pevných 2000 Kč (viz TRANSPARENCY_STAKE), u DAILY_TICKETS_USER_ID
-    částka náhodně vybraná z DAILY_TICKETS_STAKE_CHOICES (viz komentář
-    tam) — appka appka NEVYMÝŠLÍ číslo za běhu, appka jen posílá to, co už
-    má uložené v DB. Slouží jako sociální důkaz na hlavní obrazovce appky
-    pro nové návštěvníky.
+    VYHODNOCENÉ (výhra i prohra) tikety appčiných dvou vlastních
+    automatických účtů (DAILY_TICKETS_USER_ID a TRANSPARENCY_USER_ID),
+    NIKDY tikety běžných uživatelů appky. U obou účtů appka posílá
+    skutečně uložený actual_stake_amount/actual_profit_loss — u
+    TRANSPARENCY_USER_ID je to vždy pevných 2000 Kč (viz
+    TRANSPARENCY_STAKE), u DAILY_TICKETS_USER_ID částka náhodně vybraná
+    z DAILY_TICKETS_STAKE_CHOICES (viz komentář tam) — appka nevymýšlí
+    číslo za běhu, jen posílá to, co už má uložené v DB.
+    Slouží jako sociální důkaz na hlavní obrazovce appky pro nové
+    návštěvníky.
+
+    appka (2026-09-17, uživatelovo přání "měli bychom být transparentní")
+    — dřív posílala jen výhry, zdůvodněné jako "sociální důkaz", ale
+    reálně tím appka tajila skutečnou úspěšnost a byla v rozporu
+    s vlastním étosem transparentnosti (viz terms.html, /vysledky).
+    Appka teď posílá obojí — prohry frontend zobrazí výrazně jinak
+    (červeně), ne aby appka je schovávala.
     """
     limit = max(1, min(limit, 50))
     target_ids = [
@@ -7718,20 +7726,21 @@ def showcase_tickets(limit: int = 20):
     if not target_ids:
         return {"tickets": []}
 
-    won_rows = []
+    settled_rows = []
     for target_user_id in target_ids:
         rows = repo.get_saved_tickets(target_user_id)
-        won_rows.extend(r for r in rows if r["status"] == "won")
-    won_rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
-    won_rows = won_rows[:limit]
+        settled_rows.extend(r for r in rows if r["status"] in ("won", "lost"))
+    settled_rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
+    settled_rows = settled_rows[:limit]
 
     tickets = []
-    for r in won_rows:
+    for r in settled_rows:
         ticket = r["ticket"]
         created_at = r.get("created_at")
         tickets.append({
             "ticket_id": r["ticket_id"],
             "ticket_type": ticket.ticket_type,
+            "status": r["status"],
             "total_odds": ticket.total_odds,
             "stake": r.get("actual_stake_amount"),
             "profit": r.get("actual_profit_loss"),
@@ -7747,6 +7756,65 @@ def showcase_tickets(limit: int = 20):
             ],
         })
     return {"tickets": tickets}
+
+
+SHOWCASE_STATS_SINCE = "2026-08-23"  # appka stejné datum použila i při
+                              # čištění transparentního účtu (smazala vše
+                              # starší jako mimo rozsah aktuálních
+                              # pravidel, viz dnešní historie session).
+                              # Schválně pevné, ne "od úplného začátku" —
+                              # ať appka sedí se vším, co appka jinde na
+                              # webu i v appce ukazuje.
+
+
+@app.get("/showcase/stats")
+def showcase_stats():
+    """
+    Veřejná agregovaná čísla z transparentního účtu (TRANSPARENCY_USER_ID)
+    od SHOWCASE_STATS_SINCE — bez přihlášení appka ukáže, kolik tiketů
+    vyhodnotila, úspěšnost a hypotetický zisk/ztrátu při flat sázce
+    1000/5000 Kč na tiket. Stejný výpočet appka dřív dělala jen ručně
+    (viz /admin/win-loss-report), tady je veřejně a bez admin klíče, ať
+    to jde zobrazit na landing page.
+    """
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        return {"available": False}
+    target_user_id = int(target_user_id_raw)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT status, total_odds FROM tickets WHERE user_id = %s AND status IN ('won','lost') "
+            "AND created_at >= %s",
+            (target_user_id, SHOWCASE_STATS_SINCE),
+        )
+        rows = cur.fetchall()
+
+    won = sum(1 for r in rows if r["status"] == "won")
+    lost = sum(1 for r in rows if r["status"] == "lost")
+    total = won + lost
+
+    def _flat_stake_pnl(stake: float) -> float:
+        pnl = 0.0
+        for r in rows:
+            if r["status"] == "won":
+                pnl += stake * (float(r["total_odds"]) - 1)
+            else:
+                pnl -= stake
+        return round(pnl, 2)
+
+    return {
+        "available": total > 0,
+        "since": SHOWCASE_STATS_SINCE,
+        "total_tickets": total,
+        "won": won,
+        "lost": lost,
+        "win_rate_pct": round(won / total * 100, 1) if total else None,
+        "example_pnl": {
+            "1000": _flat_stake_pnl(1000),
+            "5000": _flat_stake_pnl(5000),
+        },
+    }
 
 
 @app.get("/showcase/ticket-image/{ticket_id}")
