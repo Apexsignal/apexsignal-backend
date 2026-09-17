@@ -196,6 +196,12 @@ CREATE TABLE IF NOT EXISTS redeem_code_uses (
     PRIMARY KEY (code, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS referral_link_clicks (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(16) NOT NULL,
+    clicked_at TIMESTAMP DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS stripe_events (
     event_id VARCHAR(255) PRIMARY KEY,
     processed_at TIMESTAMP DEFAULT now()
@@ -1488,6 +1494,23 @@ def get_user_id_by_referral_code(code: str) -> Optional[int]:
         cur.execute("SELECT id FROM users WHERE referral_code = %s", (code.strip().upper(),))
         row = cur.fetchone()
         return row["id"] if row else None
+
+
+def record_referral_link_click(code: str) -> None:
+    """appka (2026-09-17, uživatelovo přání) zaloguje, že appka viděla
+    landing page s ?ref=KÓD v URL — appka appce tím umí ukázat referrerovi
+    nejen kolik lidí se ZAREGISTROVALO, ale i kolik jich vůbec odkaz
+    OTEVŘELO (viz get_referral_link_click_count) — appka appce nekontroluje
+    platnost kódu, appka to bere jako čistou analytiku bez dopadu na peníze."""
+    with get_cursor() as cur:
+        cur.execute("INSERT INTO referral_link_clicks (code) VALUES (%s)", (code.strip().upper(),))
+
+
+def get_referral_link_click_count(code: str) -> int:
+    with get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM referral_link_clicks WHERE code = %s", (code.strip().upper(),))
+        row = cur.fetchone()
+        return row["c"] if row else 0
 
 
 def set_referred_by(user_id: int, referrer_user_id: int) -> bool:

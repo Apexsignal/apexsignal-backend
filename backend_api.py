@@ -587,6 +587,27 @@ def get_my_referral_code(user_id: int = Depends(get_current_user_id)):
     return {"code": code, "link": f"{frontend_url}/?ref={code}"}
 
 
+class TrackReferralClickRequest(BaseModel):
+    code: str
+
+
+@app.post("/referral/track-click")
+def track_referral_click(req: TrackReferralClickRequest):
+    """appka (2026-09-17, uživatelovo přání "appka neví, jestli sdílený
+    odkaz vůbec někdo otevřel") — appka tohle volá landing page SAMA, hned
+    při načtení stránky s ?ref=KÓD v URL, ať appka referrerovi umí ukázat
+    nejen kolik lidí se ZAREGISTROVALO, ale i kolik jich odkaz OTEVŘELO
+    (viz /referral/membership-progress → link_clicks). Záměrně bez
+    přihlášení (návštěvník landing page se ještě nepřihlásil) a záměrně
+    appka mlčky nic neudělá u neznámého kódu — appka to bere jako čistou
+    analytiku, ne appka appce nechce přes tenhle endpoint dovolit
+    zjišťovat, jaké kódy appka vůbec zná."""
+    code = req.code.strip().upper()
+    if code and db.get_user_id_by_referral_code(code) is not None:
+        db.record_referral_link_click(code)
+    return {"status": "ok"}
+
+
 class DeclarationRequest(BaseModel):
     has_ico: bool
     ico: Optional[str] = None
@@ -628,6 +649,7 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
     earnings = db.get_referral_membership_earnings(user_id)
     invited = db.get_invited_summary(user_id)
     declaration = db.get_referral_declaration(user_id)
+    referral_code = db.get_or_create_referral_code(user_id)
     return {
         "total_kc": totals["total_kc"],
         "paid_out_kc": totals["paid_out_kc"],
@@ -635,6 +657,7 @@ def get_membership_referral_progress(user_id: int = Depends(get_current_user_id)
         "commission_pct": REFERRAL_MEMBERSHIP_COMMISSION_PCT,
         "earnings": earnings,
         "has_pending_payout_request": db.has_pending_payout_request(user_id),
+        "link_clicks": db.get_referral_link_click_count(referral_code),
         "registered_total": invited["registered_total"],
         "paying_total": invited["paying_total"],
         "active_now": invited["active_now"],
