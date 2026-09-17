@@ -5377,6 +5377,47 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.get("/admin/_debug-find-duplicate-tickets")
+def _debug_find_duplicate_tickets(request: Request, since: str):
+    """DOČASNÝ debug endpoint — najde tikety se STEJNOU sadou zápasů+výběrů
+    (bez ohledu na účet), appka na to už dřív narazila (viz CLAUDE.md,
+    duplicity ze dvou souběžných volání cronu). Po použití appka tenhle
+    endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, user_id, status, total_odds, created_at FROM tickets "
+            "WHERE status IN ('won','lost') AND created_at >= %s ORDER BY created_at",
+            (since,),
+        )
+        tickets = cur.fetchall()
+
+        signatures: dict[tuple, list[dict]] = {}
+        for t in tickets:
+            cur.execute(
+                "SELECT match_id, market_type, selection FROM ticket_selections WHERE ticket_id = %s ORDER BY match_id, market_type, selection",
+                (t["id"],),
+            )
+            sel_rows = cur.fetchall()
+            sig = tuple((s["match_id"], s["market_type"], s["selection"]) for s in sel_rows)
+            signatures.setdefault(sig, []).append({
+                "ticket_id": t["id"], "user_id": t["user_id"], "status": t["status"],
+                "total_odds": float(t["total_odds"]), "created_at": t["created_at"].isoformat(),
+            })
+
+    duplicate_groups = [group for group in signatures.values() if len(group) > 1]
+    extra_tickets_count = sum(len(g) - 1 for g in duplicate_groups)
+    return {
+        "since": since, "total_settled": len(tickets),
+        "duplicate_groups_count": len(duplicate_groups),
+        "extra_duplicate_tickets": extra_tickets_count,
+        "duplicate_groups": duplicate_groups,
+    }
+
+
 
 
 
