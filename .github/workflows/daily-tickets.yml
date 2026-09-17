@@ -1,29 +1,29 @@
-# Appka dřív neměla ŽÁDNÉ automatické spouštění denních tiketů — historie
-# ukazovala nepravidelné časy vzniku (12:53, 22:00, 08:55...), což je
-# vzorec ručního volání, ne cronu. Pro placený kanál (2 500 Kč/měsíc) je
-# tohle kritická díra: zaplacený a spárovaný zákazník by nedostal nic, dokud
-# by appka ručně nezavolala admin endpointy.
-#
-# 05:00 UTC = 7:00 v Praze v létě (CEST), 6:00 v zimě (CET) — appka tenhle
-# roční posun o hodinu bere jako přijatelný, přesnost na minutu tu nehraje
-# roli. Kroky jdou za sebou v jednom běhu, ne jako samostatné naplánované
-# úlohy, ať appka nemusí řešit, jestli některý krok náhodou neběží dřív
-# než ten, na kterém závisí.
-#
-# Veřejná transparentní stránka (TRANSPARENCY_USER_ID) je SAMOSTATNÝ účet,
-# oddělený od placeného kanálu (DAILY_TICKETS_USER_ID) — má vlastní
-# generovací krok níže (/admin/transparency-daily-tickets), appka na něj
-# dřív žádný cron neměla zapojený, což byl skutečný důvod, proč stránka
-# ukazovala starou/tenkou historii (ověřeno 2026-07-30).
+# appka (2026-09-17, uživatelovo přání: "telegram kanál už neběží.. a
+# střední tiket přeci už také není.. pojďme to změnit, aby appka hledala
+# alespoň 3x denně vhodné kandidáty a neopakovala se") — appka tenhle
+# workflow zjednodušila:
+# - JEDEN generátor běh (DAILY_TICKETS_USER_ID, appka ho drží jako
+#   "master" zdroj, i bez placených odběratelů) — appka to stejnou
+#   kombinaci pak jen KOPÍRUJE na transparentní účet i na d.voves, místo
+#   aby appka hledala nezávisle 2-3× a náhodně narážela na stejný
+#   nejlepší tip vícekrát (to appku dřív stálo desítky "duplicitních"
+#   tiketů při zpětné kontrole ROI).
+# - Appka to zkouší 3× denně (6/12/18 UTC), ne jen jednou — appka na
+#   tenký kandidátský pool už narazila mnohokrát; run_daily_tickets sám
+#   hlídá "dnes už mám", takže vícenásobné spuštění nic nezdvojí, jen
+#   appce dá víc šancí najít kandidáta, kdyby ráno nic nebylo.
+# - appka smazala appčin vlastní test3 krok (bez odběratelů appka nemá
+#   důvod ho dál generovat) a zmínky o "středním" tiketu (appka ho
+#   dávno přestala nabízet, viz probability_model.py).
 #
 # Vyžaduje repozitářový secret ADMIN_TASK_KEY (Settings → Secrets and
 # variables → Actions → New repository secret) se stejnou hodnotou, jakou
 # appka má na Renderu v proměnné ADMIN_TASK_KEY.
-name: Denní tikety pro placený kanál
+name: Denní tikety (master generátor + kopie)
 
 on:
   schedule:
-    - cron: "0 5 * * *"
+    - cron: "0 6,12,18 * * *"
   workflow_dispatch: {}  # appka umožní i ruční spuštění z záložky Actions
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
       # appka to tenkrát musela appce (uživateli) hlásit jako selhání a
       # čekat na ruční opakování. Teď appka sama zkusí ještě jednou po
       # 3 minutách, dřív než appka cokoliv appce nahlásí jako selhání.
-      - name: Vygenerovat dnešní tikety (kratky/stredni, okno 2 dny na 70%)
+      - name: Vygenerovat dnešní tiket (master, kratky) — appka pošle i na vlastní Telegram
         run: |
           for pokus in 1 2; do
             if curl -sf -X POST https://apexsignal-backend.onrender.com/admin/daily-tickets \
@@ -50,31 +50,19 @@ jobs:
           done
           exit 1
 
-      - name: Vygenerovat dnesni tikety na test3 (2x kratky, 2x stredni, sazka 1000 Kc)
-        run: |
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/test3-daily-tickets \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
-
-      - name: Zkopirovat dnesni kanalovy tiket na transparentni ucet (2000 Kc, misto nezavisleho generovani)
-        # appka (2026-09-17, uzivatelovo prani "ukladej tikety z generovani
-        # tam i tam") predtim generovala pro transparentni ucet UPLNE
-        # NEZAVISLE (/admin/transparency-daily-tickets) - dva samostatne
-        # bezy generatoru casto narazily na STEJNY realny nejlepsi tip a
-        # ulozily ho 2x (jednou na kanal, jednou na transparentni ucet),
-        # coz appka objevila jako desitky "duplicitnich" tiketu pri zpetne
-        # kontrole ROI. Misto druheho nezavisleho generovani appka teď jen
-        # ZKOPIRUJE to, co uz vygenerovala pro kanal - stejna volba, jen
-        # jina sazka, zadna duplicita.
+      - name: Zkopirovat dnesni tiket na transparentni ucet (2000 Kc)
         run: |
           curl -sf -X POST https://apexsignal-backend.onrender.com/admin/copy-daily-tickets-to-user \
             -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"target_user_id": 2, "stake_amount": 2000}'
 
-      - name: Vygenerovat dnesni tikety na d.voves@seznam.cz (2x kratky, 1x stredni, sazka 2000 Kc)
+      - name: Zkopirovat dnesni tiket na d.voves@seznam.cz (2000 Kc)
         run: |
-          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/dvoves-daily-tickets \
-            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}"
+          curl -sf -X POST https://apexsignal-backend.onrender.com/admin/copy-daily-tickets-to-user \
+            -H "X-Admin-Key: ${{ secrets.ADMIN_TASK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"target_user_id": 60, "stake_amount": 2000}'
 
       - name: Upozornit na Telegram, ze dnesni tiket ceka na schvaleni
         # appka tenhle krok dřív posílala VŽDY, i když se tiket nevygeneroval
