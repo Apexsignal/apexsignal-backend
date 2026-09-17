@@ -7693,6 +7693,38 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
+@app.get("/admin/_debug-api-quotas")
+def _debug_api_quotas(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    import requests as _requests
+    result = {}
+    try:
+        r = _requests.get(
+            "https://api.the-odds-api.com/v4/sports",
+            params={"apiKey": os.environ.get("ODDSAPI_KEY", "")},
+            timeout=10,
+        )
+        result["odds_api"] = {
+            "status_code": r.status_code,
+            "requests_used": r.headers.get("x-requests-used"),
+            "requests_remaining": r.headers.get("x-requests-remaining"),
+        }
+    except Exception as e:
+        result["odds_api"] = {"error": str(e)}
+    try:
+        r2 = _requests.get(
+            "https://v3.football.api-sports.io/status",
+            headers={"x-apisports-key": os.environ.get("APISPORTS_KEY", "")},
+            timeout=10,
+        )
+        result["api_football"] = r2.json().get("response", {}).get("requests")
+    except Exception as e:
+        result["api_football"] = {"error": str(e)}
+    return result
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
