@@ -5377,6 +5377,67 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.post("/admin/_debug-copy-unique-tickets-to-transparency")
+def _debug_copy_unique_tickets_to_transparency(request: Request, since: str):
+    """DOČASNÝ debug endpoint — appka najde všechny appkou vyhodnocené
+    (won/lost) tikety od daného data napříč VŠEMI účty, sloučí duplicity
+    (stejná sada zápasů+výběrů appka appce kopíruje na víc svých vlastních
+    účtů) a chybějící unikátní kopie appka doplní na TRANSPARENCY_USER_ID
+    se zachovaným datem i výsledkem — ať appka na /vysledky ukazuje přesně
+    tu množinu, co appka počítala appce do ROI. Tikety, co appka na
+    transparentním účtu už má, appka přeskočí (nezdvojí). Po použití appka
+    tenhle endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id = int(os.environ["TRANSPARENCY_USER_ID"])
+
+    def _signature(ticket_obj: Ticket) -> tuple:
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket_obj.selections))
+
+    all_rows = db.fetch_ticket_rows()
+    settled_rows = [r for r in all_rows if r["status"] in ("won", "lost") and r["created_at"] and r["created_at"].isoformat() >= since]
+
+    existing_on_target = {
+        _signature(r["ticket"]) for r in settled_rows if r["user_id"] == target_user_id
+    }
+
+    seen_signatures: set = set(existing_on_target)
+    copied, skipped_duplicate, skipped_already_there = 0, 0, 0
+
+    for r in settled_rows:
+        sig = _signature(r["ticket"])
+        if r["user_id"] == target_user_id:
+            continue  # appka to už tam má, appka ho jen počítala do existing_on_target
+        if sig in seen_signatures:
+            skipped_duplicate += 1
+            continue
+        seen_signatures.add(sig)
+
+        ticket_obj = r["ticket"]
+        new_ticket_id = repo.save_ticket(target_user_id, ticket_obj, created_at=r["created_at"])
+        repo.set_actual_stake(new_ticket_id, r["actual_stake_amount"] or 2000.0, ticket_obj.total_odds)
+        repo.set_ticket_status(new_ticket_id, r["status"])
+
+        new_row = db.fetch_ticket_rows(ticket_id=new_ticket_id)
+        if new_row:
+            new_selection_ids = [s.get("id") for s in new_row[0].get("selections", [])]
+            old_results = [s.get("result", "pending") for s in r["selections"]]
+            for sid, result in zip(new_selection_ids, old_results):
+                if sid is not None and result in ("won", "lost"):
+                    db.update_selection_result(sid, result)
+        copied += 1
+
+    return {
+        "since": since, "target_user_id": target_user_id,
+        "total_settled_considered": len(settled_rows),
+        "already_on_transparency": len(existing_on_target),
+        "copied": copied,
+        "skipped_as_duplicate_of_another_copy": skipped_duplicate,
+    }
+
+
 
 
 
