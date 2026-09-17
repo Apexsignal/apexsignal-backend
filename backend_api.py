@@ -5377,25 +5377,28 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
-@app.get("/admin/_debug-find-duplicate-tickets")
-def _debug_find_duplicate_tickets(request: Request, since: str):
-    """DOČASNÝ debug endpoint — najde tikety se STEJNOU sadou zápasů+výběrů
-    (bez ohledu na účet), appka na to už dřív narazila (viz CLAUDE.md,
-    duplicity ze dvou souběžných volání cronu). Po použití appka tenhle
-    endpoint zase smaže."""
+@app.get("/admin/_debug-dedup-flat-stake-pnl")
+def _debug_dedup_flat_stake_pnl(request: Request, since: str, flat_stake: float = 1000.0):
+    """DOČASNÝ debug endpoint — stejné jako flat-stake P&L, ale appka
+    napřed sloučí tikety se STEJNOU sadou zápasů+výběrů (appka stejný
+    denní tiket kopíruje na víc svých vlastních účtů — kanál, transparentní
+    účet, sledovací účet — takže syrové počítání by tu samou appčinu volbu
+    počítalo vícekrát) — appka z každé skupiny duplicit vezme jen JEDNU
+    kopii. Po použití appka tenhle endpoint zase smaže."""
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT id, user_id, status, total_odds, created_at FROM tickets "
+            "SELECT id, status, total_odds, created_at FROM tickets "
             "WHERE status IN ('won','lost') AND created_at >= %s ORDER BY created_at",
             (since,),
         )
         tickets = cur.fetchall()
 
-        signatures: dict[tuple, list[dict]] = {}
+        seen_signatures: set = set()
+        unique_rows = []
         for t in tickets:
             cur.execute(
                 "SELECT match_id, market_type, selection FROM ticket_selections WHERE ticket_id = %s ORDER BY match_id, market_type, selection",
@@ -5403,18 +5406,28 @@ def _debug_find_duplicate_tickets(request: Request, since: str):
             )
             sel_rows = cur.fetchall()
             sig = tuple((s["match_id"], s["market_type"], s["selection"]) for s in sel_rows)
-            signatures.setdefault(sig, []).append({
-                "ticket_id": t["id"], "user_id": t["user_id"], "status": t["status"],
-                "total_odds": float(t["total_odds"]), "created_at": t["created_at"].isoformat(),
-            })
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            unique_rows.append(t)
 
-    duplicate_groups = [group for group in signatures.values() if len(group) > 1]
-    extra_tickets_count = sum(len(g) - 1 for g in duplicate_groups)
+    total_pnl = 0.0
+    won, lost = 0, 0
+    for r in unique_rows:
+        if r["status"] == "won":
+            total_pnl += flat_stake * (float(r["total_odds"]) - 1)
+            won += 1
+        else:
+            total_pnl -= flat_stake
+            lost += 1
+
     return {
-        "since": since, "total_settled": len(tickets),
-        "duplicate_groups_count": len(duplicate_groups),
-        "extra_duplicate_tickets": extra_tickets_count,
-        "duplicate_groups": duplicate_groups,
+        "since": since, "flat_stake": flat_stake,
+        "total_settled_raw": len(tickets), "unique_after_dedup": len(unique_rows),
+        "won": won, "lost": lost,
+        "total_staked": flat_stake * len(unique_rows),
+        "total_pnl": round(total_pnl, 2),
+        "roi_pct": round(total_pnl / (flat_stake * len(unique_rows)) * 100, 1) if unique_rows else None,
     }
 
 
