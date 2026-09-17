@@ -5430,6 +5430,40 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.post("/admin/_debug-generate-today")
+def _debug_generate_today(request: Request, email: str, risk_level: int = 20):
+    """DOČASNÝ debug endpoint — appka spustí reálný ticket_generator.generate()
+    pro dnešek na zadaný účet, čerstvě s novým ODDSAPI_KEY. Po použití
+    appka tenhle endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Účet s tímhle e-mailem appka nenašla")
+
+    ticket = _generate_one_ticket_for_cron(
+        user["id"], risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4, max_widen_days=0,
+    )
+    if ticket is None:
+        return {"status": "no_valid_combination"}
+
+    ticket_id = repo.save_ticket(user["id"], ticket)
+    telegram_status = "skipped"
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+        try:
+            ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+            telegram_status = "sent"
+        except Exception as e:
+            telegram_status = f"error: {e}"
+
+    return {
+        "status": "saved", "ticket_id": ticket_id, "telegram": telegram_status, "total_odds": ticket.total_odds,
+        "selections": [{"match": f"{s.home_team} - {s.away_team}", "market": s.market_type.value, "selection": s.selection} for s in ticket.selections],
+    }
+
+
 
 
 
