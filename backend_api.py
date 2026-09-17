@@ -5377,43 +5377,6 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
-@app.get("/admin/_debug-flat-stake-pnl")
-def _debug_flat_stake_pnl(request: Request, since: str, flat_stake: float = 1000.0):
-    """DOČASNÝ debug endpoint — appka spočítá hypotetický zisk/ztrátu,
-    kdyby uživatel vsadil STEJNOU (flat) částku na každý appkou
-    vyhodnocený tiket od daného data. Po použití appka tenhle endpoint
-    zase smaže."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT id, status, total_odds, created_at FROM tickets "
-            "WHERE status IN ('won','lost') AND created_at >= %s ORDER BY created_at",
-            (since,),
-        )
-        rows = cur.fetchall()
-
-    total_pnl = 0.0
-    won, lost = 0, 0
-    for r in rows:
-        if r["status"] == "won":
-            total_pnl += flat_stake * (float(r["total_odds"]) - 1)
-            won += 1
-        else:
-            total_pnl -= flat_stake
-            lost += 1
-
-    return {
-        "since": since, "flat_stake": flat_stake, "count": len(rows),
-        "won": won, "lost": lost,
-        "total_staked": flat_stake * len(rows),
-        "total_pnl": round(total_pnl, 2),
-        "roi_pct": round(total_pnl / (flat_stake * len(rows)) * 100, 1) if rows else None,
-    }
-
-
 
 
 
