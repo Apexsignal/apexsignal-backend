@@ -275,16 +275,20 @@ MATCH_WINNER_EXCLUDED_LEAGUES = {"FNL", "Ekstraklasa"}  # appka (2026-08-13) př
                               # 28.6 % (2/7), zatímco match_winner je jinde
                               # skoro všude 85-100 %.
 
-NEAR_MISS_DISPLAY_MIN_PROB = 0.55  # appka (2026-09-16, uživatel: "rozšiř to,
+NEAR_MISS_DISPLAY_MIN_PROB = 0.60  # appka (2026-09-16, uživatel: "rozšiř to,
                               # líbí se mi to appka to napíše, ale sestaví
                               # tiket") — appky NEJVOLNĚJŠÍ dno pro
                               # zobrazovanou (tržní) pravděpodobnost,
                               # používá se JEN v úplně poslední záchranné
                               # síti (viz TicketGenerator.generate), pod
                               # standardní appky 65% zárukou pro klienty.
-                              # Stejné dno jako appky BOOST tier, appka ho
-                              # tu bere jako rozumnou spodní hranici, pod
-                              # kterou by appka věrohodnost tiketu už
+                              # 2026-09-17: appka zvedla z 0.55 na 0.60 —
+                              # uživatel živě dostal automatický tiket
+                              # (#852) s nohou na 57 % přes appky nový 3×
+                              # denní cron a označil to jako moc nízké na
+                              # to, aby appka posílala tiket sama, bez
+                              # lidského pohledu. 60 % appka bere jako
+                              # rozumnou spodní hranici, pod kterou by
                               # nechtěla riskovat.
 
 NEAR_MISS_TOLERANCE_STEPS = (0.01, 0.02, 0.03)  # appka (2026-09-16, uživatel:
