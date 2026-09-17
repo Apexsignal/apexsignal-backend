@@ -5407,6 +5407,22 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.get("/admin/_debug-list-codes")
+def _debug_list_codes(request: Request, prefix: str = ""):
+    """DOČASNÝ debug endpoint — appka vypíše všechny redeem kódy (volitelně
+    filtrované prefixem), ať appka zjistí, proč appce vyšlo neočekávané
+    chování při uplatnění kódu. Po použití appka tenhle endpoint zase
+    smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM redeem_codes WHERE code LIKE %s ORDER BY code", (f"{prefix}%",))
+        rows = cur.fetchall()
+    return {"count": len(rows), "codes": [dict(r) for r in rows]}
+
+
 
 
 
