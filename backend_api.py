@@ -5377,6 +5377,28 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.get("/admin/_debug-list-old-transparency-tickets")
+def _debug_list_old_transparency_tickets(request: Request, before: str):
+    """DOČASNÝ debug endpoint — appka vypíše tikety na TRANSPARENCY_USER_ID
+    starší než dané datum, ať appka ověří rozsah PŘED smazáním. Po použití
+    appka tenhle endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id = int(os.environ["TRANSPARENCY_USER_ID"])
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, status, total_odds, created_at FROM tickets WHERE user_id = %s AND created_at < %s ORDER BY created_at",
+            (target_user_id, before),
+        )
+        rows = cur.fetchall()
+    return {
+        "target_user_id": target_user_id, "before": before, "count": len(rows),
+        "tickets": [{"id": r["id"], "status": r["status"], "total_odds": float(r["total_odds"]), "created_at": r["created_at"].isoformat()} for r in rows],
+    }
+
+
 
 
 
