@@ -5430,6 +5430,30 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.get("/admin/_debug-oddsapi-quota")
+def _debug_oddsapi_quota(request: Request):
+    """DOČASNÝ debug endpoint — appka zavolá the-odds-api nejlevnější
+    endpoint (/sports, appka za něj neplatí kredity) jen kvůli hlavičkám
+    appky odpovědi (x-requests-remaining/x-requests-used appka tam
+    posílá appce), ať appka zjistí skutečný aktuální tarif/zůstatek. Po
+    použití appka tenhle endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    api_key = os.environ.get("ODDSAPI_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ODDSAPI_KEY není nastavené")
+
+    resp = requests.get("https://api.the-odds-api.com/v4/sports", params={"apiKey": api_key})
+    return {
+        "status_code": resp.status_code,
+        "requests_used": resp.headers.get("x-requests-used"),
+        "requests_remaining": resp.headers.get("x-requests-remaining"),
+        "requests_last": resp.headers.get("x-requests-last"),
+    }
+
+
 
 
 
