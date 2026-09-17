@@ -5377,28 +5377,6 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
-@app.post("/admin/_debug-delete-old-transparency-tickets")
-def _debug_delete_old_transparency_tickets(request: Request, before: str):
-    """DOČASNÝ debug endpoint — smaže VŠECHNY tikety na TRANSPARENCY_USER_ID
-    starší než dané datum (uživatelovo přání: appka na /vysledky má mít
-    historii jen od 23.8., ať appka souhlasí s čísly, co appka právě
-    spočítala). Po použití appka tenhle endpoint zase smaže."""
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    target_user_id = int(os.environ["TRANSPARENCY_USER_ID"])
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT id FROM tickets WHERE user_id = %s AND created_at < %s",
-            (target_user_id, before),
-        )
-        ids = [r["id"] for r in cur.fetchall()]
-
-    for ticket_id in ids:
-        db.delete_ticket(ticket_id)
-
-    return {"target_user_id": target_user_id, "before": before, "deleted_count": len(ids)}
 
 
 
