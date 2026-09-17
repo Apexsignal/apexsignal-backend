@@ -5429,6 +5429,26 @@ def _debug_list_codes(request: Request, prefix: str = ""):
     return {"count": len(rows), "codes": [dict(r) for r in rows], "uses": [dict(u) for u in uses]}
 
 
+@app.post("/admin/_debug-set-code-max-uses")
+def _debug_set_code_max_uses(request: Request, code: str, max_uses: int):
+    """DOČASNÝ debug endpoint — appka přenastaví max_uses appky uloženého
+    redeem kódu (per-účet omezení appka hlídá zvlášť, přes
+    redeem_code_uses PRIMARY KEY, tohle je jen strop na CELKOVÝ počet
+    RŮZNÝCH účtů, co appka kód pustí). Po použití appka tenhle endpoint
+    zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE redeem_codes SET max_uses = %s WHERE code = %s", (max_uses, code.strip().upper()))
+        cur.execute("SELECT * FROM redeem_codes WHERE code = %s", (code.strip().upper(),))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Kód nenalezen")
+    return dict(row)
+
+
 
 
 
