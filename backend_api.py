@@ -5420,7 +5420,13 @@ def _debug_list_codes(request: Request, prefix: str = ""):
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM redeem_codes WHERE code LIKE %s ORDER BY code", (f"{prefix}%",))
         rows = cur.fetchall()
-    return {"count": len(rows), "codes": [dict(r) for r in rows]}
+        cur.execute(
+            "SELECT rcu.code, rcu.user_id, u.email, rcu.used_at FROM redeem_code_uses rcu "
+            "JOIN users u ON u.id = rcu.user_id WHERE rcu.code LIKE %s ORDER BY rcu.used_at",
+            (f"{prefix}%",),
+        )
+        uses = cur.fetchall()
+    return {"count": len(rows), "codes": [dict(r) for r in rows], "uses": [dict(u) for u in uses]}
 
 
 
