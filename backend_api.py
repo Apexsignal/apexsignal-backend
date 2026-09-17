@@ -7693,6 +7693,55 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
+@app.get("/admin/_debug-list-all-settled")
+def _debug_list_all_settled(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    target_ids = [
+        int(v) for v in (
+            os.environ.get("DAILY_TICKETS_USER_ID"),
+            os.environ.get("TRANSPARENCY_USER_ID"),
+        )
+        if v
+    ]
+    out = []
+    for target_user_id in target_ids:
+        rows = repo.get_saved_tickets(target_user_id)
+        for r in rows:
+            if r["status"] not in ("won", "lost"):
+                continue
+            ticket = r["ticket"]
+            out.append({
+                "ticket_id": r["ticket_id"],
+                "user_id": target_user_id,
+                "status": r["status"],
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                "selections": [
+                    {
+                        "home": s.home_team, "away": s.away_team,
+                        "market": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                        "sel": s.selection,
+                    }
+                    for s in ticket.selections
+                ],
+            })
+    out.sort(key=lambda r: r["created_at"] or "", reverse=True)
+    return {"tickets": out}
+
+
+@app.post("/admin/_debug-delete-tickets")
+def _debug_delete_tickets(ticket_ids: list[int], request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    deleted = []
+    for tid in ticket_ids:
+        db.delete_ticket(tid)
+        deleted.append(tid)
+    return {"deleted": deleted}
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
