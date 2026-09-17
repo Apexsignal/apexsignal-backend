@@ -5377,6 +5377,54 @@ def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
     return {"status": "sent", "ticket_id": ticket_id}
 
 
+@app.post("/admin/_debug-copy-transparency-to-testik")
+def _debug_copy_transparency_to_testik(request: Request):
+    """DOČASNÝ debug endpoint — zkopíruje VŠECHNY tikety z TRANSPARENCY_USER_ID
+    (/vysledky) na testik@test.cz, se zachovaným datem/výsledkem, přeskočí
+    duplicity (stejná sada zápasů, co už testik má). Po použití appka
+    tenhle endpoint zase smaže."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    source_user_id = int(os.environ["TRANSPARENCY_USER_ID"])
+    target_user = db.get_user_by_email("testik@test.cz")
+    if not target_user:
+        raise HTTPException(status_code=404, detail="testik@test.cz nenalezen")
+    target_user_id = target_user["id"]
+
+    def _signature(ticket_obj: Ticket) -> tuple:
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket_obj.selections))
+
+    all_rows = db.fetch_ticket_rows()
+    source_rows = [r for r in all_rows if r["user_id"] == source_user_id]
+    existing_on_target = {_signature(r["ticket"]) for r in all_rows if r["user_id"] == target_user_id}
+
+    copied, skipped = 0, 0
+    for r in source_rows:
+        sig = _signature(r["ticket"])
+        if sig in existing_on_target:
+            skipped += 1
+            continue
+        existing_on_target.add(sig)
+
+        ticket_obj = r["ticket"]
+        new_ticket_id = repo.save_ticket(target_user_id, ticket_obj, created_at=r["created_at"])
+        repo.set_actual_stake(new_ticket_id, r["actual_stake_amount"] or 2000.0, ticket_obj.total_odds)
+        repo.set_ticket_status(new_ticket_id, r["status"])
+
+        new_row = db.fetch_ticket_rows(ticket_id=new_ticket_id)
+        if new_row:
+            new_selection_ids = [s.get("id") for s in new_row[0].get("selections", [])]
+            old_results = [s.get("result", "pending") for s in r["selections"]]
+            for sid, result in zip(new_selection_ids, old_results):
+                if sid is not None and result in ("won", "lost"):
+                    db.update_selection_result(sid, result)
+        copied += 1
+
+    return {"source_user_id": source_user_id, "target_user_id": target_user_id, "copied": copied, "skipped_duplicate": skipped}
+
+
 
 
 
