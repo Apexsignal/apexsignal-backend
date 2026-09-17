@@ -1073,6 +1073,11 @@ class TicketResponse(BaseModel):
 class TicketPairResponse(BaseModel):
     safe: Optional[TicketResponse]
     aggressive: Optional[TicketResponse]
+    more_candidates_available: bool = False  # appka (2026-09-17) appce naznačí,
+    # že po uložení tohohle tiketu ještě zbývají kandidáti na další —
+    # appka to appce ukáže jako proaktivní nabídku "vygenerovat další"
+    # (viz _run_generate_job), appka defaultuje na False, ať to endpointy,
+    # co ho nepočítají (regenerate, replace-selection...), neřeší.
 
 
 # =====================================================================
@@ -3713,6 +3718,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         matches = _filter_within_days(matches, req.time_frame_days)
 
         horizon_note = None
+        pool_for_peek, time_frame_for_peek, markets_for_peek = matches, req.time_frame_days, req.market_types
         result = ticket_generator.generate(
             matches, req.risk_level, req.sports, req.market_types, req.time_frame_days,
             pool_filter=_pool_filter_for_risk(req.risk_level),
@@ -3750,6 +3756,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
             gc.collect()
             if wider_result["safe"] is not None:
                 result = wider_result
+                pool_for_peek, time_frame_for_peek = all_wider_matches, wider_days
                 horizon_note = (
                     f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
                     f"{'den' if req.time_frame_days == 1 else 'dny'}) nenašla žádnou kombinaci s dostatečnou "
@@ -3772,6 +3779,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
                     gc.collect()
                     if markets_result["safe"] is not None:
                         result = markets_result
+                        pool_for_peek, time_frame_for_peek, markets_for_peek = all_wider_matches, wider_days, all_markets
                         horizon_note = (
                             f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
                             f"{'den' if req.time_frame_days == 1 else 'dny'}) a zvolených trzích nenašla žádnou "
@@ -3786,9 +3794,31 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         if result["safe"] is not None:
             _charge_tokens_for_ticket(user_id, result["safe"].ticket_type)
 
+        # appka (2026-09-17, uživatelovo přání: appka v pozadí ví, jestli
+        # zbyli další kandidáti, tak ať appka proaktivně nabídne další
+        # generování) — appka "nakoukne", jestli by ze ZBYLÝCH zápasů (po
+        # odečtení právě nalezeného tiketu) šla poskládat ještě jedna
+        # kombinace. Žádné nové síťové volání — appka jen znovu pustí
+        # generátor (čistě CPU) na už stažená a obohacená data, takže tenhle
+        # "peek" appku nic nestojí na API-Football/the-odds-api rozpočtu.
+        more_candidates_available = False
+        if result["safe"] is not None:
+            try:
+                remaining_matches = [m for m in pool_for_peek if m.match_id not in used_ids]
+                peek_result = ticket_generator.generate(
+                    remaining_matches, req.risk_level, req.sports, markets_for_peek, time_frame_for_peek,
+                    pool_filter=_pool_filter_for_risk(req.risk_level),
+                    allow_relaxed_min_odds=True,
+                )
+                more_candidates_available = peek_result["safe"] is not None
+            except Exception:
+                more_candidates_available = False
+            gc.collect()
+
         return TicketPairResponse(
             safe=TicketResponse.from_domain(result["safe"], horizon_note=horizon_note) if result["safe"] else None,
             aggressive=TicketResponse.from_domain(result["aggressive"], horizon_note=horizon_note) if result["aggressive"] else None,
+            more_candidates_available=more_candidates_available,
         )
     except Exception:
         raise
