@@ -7693,6 +7693,48 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
+@app.get("/admin/_debug-relaxed-daily-test")
+def _debug_relaxed_daily_test(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    target_user_id = int(target_user_id_raw) if target_user_id_raw else 0
+    exclude_ids = repo.get_all_saved_match_ids(target_user_id)
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 4)
+    matches = [m for m in matches if m.match_id not in exclude_ids]
+    matches = _filter_future_matches(matches, buffer_minutes=5)
+
+    def _summarize(result):
+        ticket = result["safe"]
+        if ticket is None:
+            return None
+        return {
+            "total_odds": ticket.total_odds,
+            "combined_probability": ticket.combined_probability,
+            "legs": [
+                f"{s.home_team} - {s.away_team} ({s.market_type.value if hasattr(s.market_type,'value') else s.market_type}/{s.selection}, {s.odds}, model {s.model_probability:.1%}, trh {s.market_probability:.1%})"
+                if s.market_probability is not None else
+                f"{s.home_team} - {s.away_team} ({s.market_type.value if hasattr(s.market_type,'value') else s.market_type}/{s.selection}, {s.odds}, model {s.model_probability:.1%})"
+                for s in ticket.selections
+            ],
+        }
+
+    strict = ticket_generator.generate(
+        matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
+        pool_filter=_pool_filter_for_risk(20),
+    )
+    relaxed = ticket_generator.generate(
+        matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
+        pool_filter=_pool_filter_for_risk(20), allow_relaxed_min_odds=True,
+    )
+    return {
+        "strict_1_90_result": _summarize(strict),
+        "relaxed_1_80_result": _summarize(relaxed),
+    }
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
