@@ -7776,7 +7776,12 @@ def _debug_draw_backtest(request: Request, custom_date: str, top_n: int = 5):
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
     provider = data_provider.get_provider(Sport.FOOTBALL)
-    raw_items = provider.get_upcoming_matches(Sport.FOOTBALL, 0, custom_date=custom_date)
+    # get_upcoming_matches filtruje jen NEODEHRANÉ zápasy (is_upcoming) —
+    # pro zpětný test na už DOHRANÝ den appka sáhne rovnou po surových
+    # fixtures, obejde ten filtr, ale nechá je projít stejným enrichment
+    # pipeline (_build_football_matches) jako běžné generování.
+    raw_items = provider._get("/fixtures", {"date": custom_date})
+    raw_items = [f for f in raw_items if f.get("league", {}).get("id") in data_provider.TIPSPORT_LEAGUE_IDS]
     matches = _build_football_matches(provider, raw_items)
 
     picks = []
