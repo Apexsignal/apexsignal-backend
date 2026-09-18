@@ -1518,7 +1518,10 @@ class TicketGenerator:
         # tiket a chce další, appka pustí krátký kurz od 1.80 místo 1.90
         # (2026-08-25, uživatelovo přání). Pro PRVNÍ tiket appka pořád drží
         # tvrdé dno 1.90 — appka slevuje jen na "druhý a další" příležitost.
-        RELAXED_MIN_ODDS_HARD = {"kratky": 1.80}
+        RELAXED_MIN_ODDS_HARD = {"kratky": 1.75}  # appka (2026-09-18) snížila
+        # z 1.80 na 1.75 — reálný případ (Rapid Vienna 1.33 × Novi Pazar 1.35 =
+        # 1.7955) by i uvolněných 1.80 pořád odmítlo, přestože oba kandidáti
+        # měli obě čísla nad 65 %.
 
         # Podle risk_level vyber jaký tiket postavit — "stredni" appka
         # přestala nabízet úplně (30denní vzorek: 14,3 % úspěšnost, −37 % ROI,
