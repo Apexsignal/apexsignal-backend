@@ -7769,6 +7769,20 @@ def admin_draw_picks_send(request: Request, time_frame_days: int = 4, top_n: int
     return {"picks": top_picks, "message": message}
 
 
+@app.get("/admin/_debug-find-match")
+def _debug_find_match(request: Request, q: str, time_frame_days: int = 4):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    q_lower = q.lower()
+    return [
+        {"match_id": m.match_id, "match": f"{m.home_team} - {m.away_team}", "league": m.league, "country": m.country, "kickoff_date": m.kickoff_date, "kickoff_time": m.kickoff_time}
+        for m in matches
+        if q_lower in m.home_team.lower() or q_lower in m.away_team.lower()
+    ]
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
