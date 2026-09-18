@@ -7764,6 +7764,33 @@ def _debug_ht_goals_backtest(request: Request, custom_date: str, ht_threshold: f
     }
 
 
+@app.get("/admin/_debug-list-pending")
+def _debug_list_pending(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    target_ids = {
+        "kanál (DAILY_TICKETS_USER_ID)": int(os.environ.get("DAILY_TICKETS_USER_ID", "0")),
+        "osobní sledovací (PERSONAL_TRACKING_USER_ID)": int(os.environ.get("PERSONAL_TRACKING_USER_ID", "0")),
+    }
+    out = []
+    for label, uid in target_ids.items():
+        if not uid:
+            continue
+        for r in repo.get_saved_tickets(uid):
+            if r["status"] != "pending":
+                continue
+            ticket = r["ticket"]
+            out.append({
+                "source": label, "user_id": uid, "ticket_id": r["ticket_id"],
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                "total_odds": ticket.total_odds,
+                "selections": [f"{s.home_team} - {s.away_team}" for s in ticket.selections],
+            })
+    out.sort(key=lambda r: r["created_at"] or "", reverse=True)
+    return out
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
