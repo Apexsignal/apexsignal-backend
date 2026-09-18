@@ -7706,69 +7706,6 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
-@app.post("/admin/draw-picks-send")
-def admin_draw_picks_send(request: Request, time_frame_days: int = 4, top_n: int = 3):
-    """
-    Appka na uživatelovo přání (2026-09-18: "tri kandidaty tri tikety kde
-    je nejpravdepodobnejsi remiza") posílá appčinu vlastnímu Telegramu
-    (TELEGRAM_CHAT_ID) přehled zápasů s NEJVYŠŠÍ appky spočtenou
-    pravděpodobností remízy — ŽÁDNÝ edge/kurz appka tady nekontroluje
-    (uživatel to výslovně nechtěl: "Nechci kladny edge atd"), jen appky
-    vlastní Poisson/Dixon-Coles odhad. Čistě informativní report, appka
-    NIC neukládá jako tiket ani neposílá odběratelům.
-    Appka zachovává stejnou základní kontrolu spolehlivosti dat jako
-    u ostatních trhů (forma týmu appce známá, appka nemá podezřele
-    rozdílný model/trh na tenhle zápas) — jinak nic.
-    """
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
-    matches = _filter_future_matches(matches, buffer_minutes=5)
-
-    picks = []
-    for m in matches:
-        if m.country in TIPSPORT_UNAVAILABLE_COUNTRIES or m.match_id in TIPSPORT_UNAVAILABLE_MATCH_IDS:
-            continue
-        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
-        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
-        if not (home_reliable and away_reliable):
-            continue
-        winner_probs = MarketEvaluator.match_winner_probabilities(m.home_expected_goals, m.away_expected_goals)
-        picks.append({
-            "match": f"{m.home_team} - {m.away_team}",
-            "league": m.league, "country": m.country,
-            "kickoff_date": m.kickoff_date, "kickoff_time": m.kickoff_time,
-            "draw_probability": winner_probs["draw"],
-            "home_xg": m.home_expected_goals, "away_xg": m.away_expected_goals,
-        })
-
-    picks.sort(key=lambda p: -p["draw_probability"])
-    top_picks = picks[:top_n]
-
-    lines = [f"🤝 TOP {len(top_picks)} remízy dne (appka, bez edge/kurzu — čistě model):"]
-    for i, p in enumerate(top_picks, 1):
-        lines.append(
-            f"{i}. {p['match']} ({p['league']}, {p['country']}) — {p['kickoff_date']} {p['kickoff_time']}\n"
-            f"   Remíza: {p['draw_probability']:.1%} (xG {p['home_xg']:.2f} : {p['away_xg']:.2f})"
-        )
-    if not top_picks:
-        lines.append("Dnes appka nemá žádný zápas se spolehlivými daty na odhad remízy.")
-    message = "\n".join(lines)
-
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if bot_token and chat_id:
-        requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            data={"chat_id": chat_id, "text": message},
-            timeout=15,
-        )
-
-    return {"picks": top_picks, "message": message}
-
-
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
