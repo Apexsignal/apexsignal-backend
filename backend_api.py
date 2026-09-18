@@ -7706,12 +7706,42 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
-@app.get("/admin/_debug-cards-ht-calibration")
-def _debug_cards_ht_calibration(request: Request, days_back: int = 5, cards_threshold: float = 3.5, ht_threshold: float = 0.5):
+_CARDS_HT_CALIBRATION_RESULTS: dict[str, dict] = {}
+_CARDS_HT_CALIBRATION_LOCK = threading.Lock()
+
+
+def _run_cards_ht_calibration_job(job_id: str, days_back: float, cards_threshold: float, ht_threshold: float) -> None:
+    try:
+        result = _compute_cards_ht_calibration(days_back, cards_threshold, ht_threshold)
+        with _CARDS_HT_CALIBRATION_LOCK:
+            _CARDS_HT_CALIBRATION_RESULTS[job_id] = {"status": "done", "result": result}
+    except Exception as e:
+        with _CARDS_HT_CALIBRATION_LOCK:
+            _CARDS_HT_CALIBRATION_RESULTS[job_id] = {"status": "error", "detail": str(e)}
+
+
+@app.post("/admin/_debug-cards-ht-calibration-start")
+def _debug_cards_ht_calibration_start(request: Request, days_back: int = 5, cards_threshold: float = 3.5, ht_threshold: float = 0.5):
     admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    job_id = secrets.token_urlsafe(8)
+    with _CARDS_HT_CALIBRATION_LOCK:
+        _CARDS_HT_CALIBRATION_RESULTS[job_id] = {"status": "processing"}
+    threading.Thread(target=_run_cards_ht_calibration_job, args=(job_id, days_back, cards_threshold, ht_threshold), daemon=True).start()
+    return {"status": "started", "job_id": job_id}
 
+
+@app.get("/admin/_debug-cards-ht-calibration-result")
+def _debug_cards_ht_calibration_result(request: Request, job_id: str):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    with _CARDS_HT_CALIBRATION_LOCK:
+        return _CARDS_HT_CALIBRATION_RESULTS.get(job_id, {"status": "unknown"})
+
+
+def _compute_cards_ht_calibration(days_back: int, cards_threshold: float, ht_threshold: float) -> dict:
     provider = data_provider.get_provider(Sport.FOOTBALL)
     today = datetime.now(ZoneInfo("Europe/Prague")).date()
 
