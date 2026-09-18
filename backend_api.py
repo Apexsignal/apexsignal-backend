@@ -7699,11 +7699,7 @@ def _debug_relaxed_daily_test(request: Request):
     if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
-    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
-    target_user_id = int(target_user_id_raw) if target_user_id_raw else 0
-    exclude_ids = repo.get_all_saved_match_ids(target_user_id)
     matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, 4)
-    matches = [m for m in matches if m.match_id not in exclude_ids]
     matches = _filter_future_matches(matches, buffer_minutes=5)
 
     def _summarize(result):
@@ -7725,13 +7721,28 @@ def _debug_relaxed_daily_test(request: Request):
         matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
         pool_filter=_pool_filter_for_risk(20),
     )
-    relaxed = ticket_generator.generate(
+    relaxed_180 = ticket_generator.generate(
         matches, 20, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
         pool_filter=_pool_filter_for_risk(20), allow_relaxed_min_odds=True,
     )
+    relaxed_175 = None
+    try:
+        # Nejjednodušší bezpečná cesta: zavolat _build_ticket appky přímo
+        # s vlastním odds_range (1.75-3.0), obejít generate() wrapper úplně,
+        # jen pro tenhle jednorázový test.
+        pool_71 = ticket_generator._build_filtered_pool(matches, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, min_prob=0.65)
+        pool_71 = _pool_filter_for_risk(20)(pool_71) if _pool_filter_for_risk(20) else pool_71
+        t175 = ticket_generator._build_ticket(pool_71, (1.75, 3.0), "kratky", 20, require_positive_edge=True, min_odds_hard_override=1.75)
+        if t175:
+            relaxed_175 = {"safe": t175}
+    except Exception as e:
+        relaxed_175 = {"safe": None, "error": str(e)}
+
     return {
+        "candidate_count_65pct": len(ticket_generator._build_filtered_pool(matches, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, min_prob=0.65)),
         "strict_1_90_result": _summarize(strict),
-        "relaxed_1_80_result": _summarize(relaxed),
+        "relaxed_1_80_result": _summarize(relaxed_180),
+        "relaxed_1_75_result": _summarize(relaxed_175) if relaxed_175 else None,
     }
 
 
