@@ -42,6 +42,7 @@ from probability_model import (
     TicketGenerator, MatchInput, Sport, MarketType, Ticket, SelectionCandidate, evaluate_selection_outcome,
     MarketEvaluator, SPORT_MARKETS, MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS,
     edge_capped_model_probability, kelly_stake_fraction, set_calibration_curve,
+    TIPSPORT_UNAVAILABLE_COUNTRIES, TIPSPORT_UNAVAILABLE_MATCH_IDS,
 )
 import data_provider
 import ai_reviewer
