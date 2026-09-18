@@ -7772,6 +7772,8 @@ def _debug_list_pending(request: Request):
     target_ids = {
         "kanál (DAILY_TICKETS_USER_ID)": int(os.environ.get("DAILY_TICKETS_USER_ID", "0")),
         "osobní sledovací (PERSONAL_TRACKING_USER_ID)": int(os.environ.get("PERSONAL_TRACKING_USER_ID", "0")),
+        "d.voves": 60,
+        "transparentní (TRANSPARENCY_USER_ID)": int(os.environ.get("TRANSPARENCY_USER_ID", "0")),
     }
     out = []
     for label, uid in target_ids.items():
