@@ -321,7 +321,7 @@ TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
                               # proto řeší přesněji, přes TIPSPORT_UNAVAILABLE_MATCH_IDS
                               # níže, ne přes celou zemi.
 
-TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508}  # appka (2026-09-16, uživatel:
+TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508, 1638819}  # appka (2026-09-16, uživatel:
                               # "Hapoel tel aviv neni na tipsportu", screenshot
                               # Tipsportu bez nadcházejících zápasů) — na
                               # rozdíl od TIPSPORT_UNAVAILABLE_COUNTRIES appka
@@ -331,6 +331,13 @@ TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508}  # appka (2026-09-16, uživatel:
                               # by celá izraelská liga chyběla, jen tenhle
                               # konkrétní pohárový zápas appka na Tipsportu
                               # nenašla. Jde o ID konkrétního fixture z
+                              #
+                              # 2026-09-18: appka stejně přidala Worcester City
+                              # – Stratford Town (FA Cup, match_id 1638819,
+                              # uživatel: "Stratford neni na tipsportu") —
+                              # anglické neligové kvalifikační kolo FA Cupu,
+                              # zase jen tenhle konkrétní zápas, ne celý FA
+                              # Cup ani celá Anglie.
                               # API-Football, ne o tým — po odehrání appka
                               # tenhle záznam může smazat, další zápas Hapoel
                               # Tel Aviv dostane jiné match_id.
