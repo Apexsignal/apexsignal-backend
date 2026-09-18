@@ -7769,59 +7769,6 @@ def admin_draw_picks_send(request: Request, time_frame_days: int = 4, top_n: int
     return {"picks": top_picks, "message": message}
 
 
-@app.get("/admin/_debug-draw-backtest")
-def _debug_draw_backtest(request: Request, custom_date: str, top_n: int = 5):
-    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
-    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
-        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
-
-    provider = data_provider.get_provider(Sport.FOOTBALL)
-    # get_upcoming_matches filtruje jen NEODEHRANÉ zápasy (is_upcoming) —
-    # pro zpětný test na už DOHRANÝ den appka sáhne rovnou po surových
-    # fixtures, obejde ten filtr, ale nechá je projít stejným enrichment
-    # pipeline (_build_football_matches) jako běžné generování.
-    raw_items = provider._get("/fixtures", {"date": custom_date})
-    raw_items = [f for f in raw_items if f.get("league", {}).get("id") in data_provider.TIPSPORT_LEAGUE_IDS]
-    matches = _build_football_matches(provider, raw_items)
-
-    picks = []
-    for m in matches:
-        if m.country in TIPSPORT_UNAVAILABLE_COUNTRIES or m.match_id in TIPSPORT_UNAVAILABLE_MATCH_IDS:
-            continue
-        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
-        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
-        if not (home_reliable and away_reliable):
-            continue
-        winner_probs = MarketEvaluator.match_winner_probabilities(m.home_expected_goals, m.away_expected_goals)
-        picks.append({
-            "match_id": m.match_id, "match": f"{m.home_team} - {m.away_team}",
-            "league": m.league, "country": m.country,
-            "draw_probability": winner_probs["draw"],
-            "home_xg": m.home_expected_goals, "away_xg": m.away_expected_goals,
-        })
-
-    picks.sort(key=lambda p: -p["draw_probability"])
-    top_picks = picks[:top_n]
-
-    for p in top_picks:
-        try:
-            result = provider.get_fixture_result(str(p["match_id"]))
-            status = result.get("fixture", {}).get("status", {}).get("short")
-            goals = result.get("goals", {})
-            home_goals, away_goals = goals.get("home"), goals.get("away")
-            if status in ("FT", "AET", "PEN") and home_goals is not None and away_goals is not None:
-                p["final_score"] = f"{home_goals}:{away_goals}"
-                p["actual_result"] = "draw" if home_goals == away_goals else ("home" if home_goals > away_goals else "away")
-            else:
-                p["final_score"] = None
-                p["actual_result"] = f"nedohráno/status={status}"
-        except Exception as e:
-            p["final_score"] = None
-            p["actual_result"] = f"chyba: {e}"
-
-    return {"date": custom_date, "candidate_count": len(picks), "top_picks": top_picks}
-
-
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
