@@ -7706,6 +7706,64 @@ def admin_export_db(request: Request, tables: str = ""):
     return json.loads(json.dumps(dump, default=str))
 
 
+@app.get("/admin/_debug-ht-goals-backtest")
+def _debug_ht_goals_backtest(request: Request, custom_date: str, ht_threshold: float = 0.5):
+    """Jen JEDEN den (appka OOM spadla na víc dnech + statistikách karet
+    dohromady) — čistě poločasové góly, model proti realitě, bez statistik
+    karet a bez dalších dnů."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    raw_items = provider._get("/fixtures", {"date": custom_date})
+    raw_items = [f for f in raw_items if f.get("league", {}).get("id") in data_provider.TIPSPORT_LEAGUE_IDS]
+    matches = _build_football_matches(provider, raw_items)
+
+    rows = []
+    for m in matches:
+        if m.country in TIPSPORT_UNAVAILABLE_COUNTRIES or m.match_id in TIPSPORT_UNAVAILABLE_MATCH_IDS:
+            continue
+        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
+        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
+        if not (home_reliable and away_reliable):
+            continue
+        if not (m.home_expected_goals_ht and m.away_expected_goals_ht):
+            continue
+        try:
+            result = data_provider.adapt_fixture_result(provider.get_fixture_result(str(m.match_id)))
+        except Exception as e:
+            continue
+        if not result["is_finished"] or result["ht_home_goals"] is None:
+            continue
+        model_prob = MarketEvaluator.ht_over_goals_probability(m.home_expected_goals_ht, m.away_expected_goals_ht, ht_threshold)
+        actual_ht_total = result["ht_home_goals"] + result["ht_away_goals"]
+        rows.append({
+            "match": f"{m.home_team} - {m.away_team}", "league": m.league,
+            "model_prob": round(model_prob, 4),
+            "ht_xg": f"{m.home_expected_goals_ht:.2f}:{m.away_expected_goals_ht:.2f}",
+            "actual_ht_score": f"{result['ht_home_goals']}:{result['ht_away_goals']}",
+            "hit": actual_ht_total > ht_threshold,
+        })
+    del matches, raw_items
+    gc.collect()
+
+    rows.sort(key=lambda r: -r["model_prob"])
+
+    def _summarize(min_prob):
+        eligible = [r for r in rows if r["model_prob"] >= min_prob]
+        hits = sum(1 for r in eligible if r["hit"])
+        return {"pocet": len(eligible), "trefeno": hits, "uspesnost_pct": round(hits / len(eligible) * 100, 1) if eligible else None}
+
+    return {
+        "date": custom_date, "ht_threshold": ht_threshold,
+        "total_candidates": len(rows),
+        "nad_65pct": _summarize(0.65),
+        "nad_71pct": _summarize(0.71),
+        "vsechny": rows,
+    }
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
