@@ -1674,6 +1674,22 @@ class TicketGenerator:
                     print(f"[{ticket_key}] Tiket sestaven záchrannou sítí (70%+, kladný individuální edge, bez kombinovaného Kelly)")
             gc.collect()
 
+        # --- 2026-09-20: OBĚ NÍŽE UVEDENÉ ZÁCHRANNÉ SÍTĚ VYPNUTY ---
+        # David na porovnání /admin/win-loss-report potvrdil propad: 6.-16.9.
+        # (před zavedením 16.9.) win_rate tiketů 70,8 % / ROI +66,2 %, zatímco
+        # 10.-20.9. (po zavedení) jen 46,1 % / ROI +2,0 %; match_winner sám
+        # spadl ze 100 % na 72,3 %. Rozhodnutí: appka se vrací k "radši žádný
+        # tiket, než tiket bez prokázané výhody" — přesně jako u_stredni tiketu
+        # dřív (#48, propad na 0 % výher). Kód NEODSTRANĚN (David: nikdy
+        # neodstraňovat existující funkce) — jen deaktivován přes `if False`,
+        # ať jde v budoucnu snadno zase zapnout, kdyby to šlo udělat bezpečněji
+        # (např. jen pro BOOST, ne pro kratky, nebo s jasným labelem pro klienta).
+        #
+        # Appka tak teď kratky tiket bez ověřené kombinované Kelly výhody
+        # ukončí už na fallbacku výš (min_prob=0.70, individuální edge>0,
+        # cca 2026-08-27) — pokud ani ten nic nenajde, appka daný den prostě
+        # kratky tiket nevygeneruje.
+
         # Úplně poslední, nejvolnější záchranná síť (2026-09-16, uživatelovo
         # přání: "dal bych nejakou rozumnou toleranci kdyz bude jeden nebo
         # dva nebo tri [procentni body] tak uzije zapas na tiketu"). Na
@@ -1685,7 +1701,7 @@ class TicketGenerator:
         # ať dá přednost "jistější" verzi, kdykoli by stačila. Kandidáty
         # použité jen díky téhle toleranci appka označí v reasoning, ať je
         # jasně vidět, které nohy mají prokázanou výhodu a které ne.
-        if ticket is None and ticket_key == "kratky":
+        if False and ticket is None and ticket_key == "kratky":
             for tolerance in NEAR_MISS_TOLERANCE_STEPS:
                 tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.65)
                 if pool_filter is not None:
@@ -1712,7 +1728,7 @@ class TicketGenerator:
         # v reasoning vždycky jasně označí (buď že jsou pod zobrazovací
         # hranicí, nebo že mají edge jen v toleranci), ať appka klientovi
         # nikdy tiše netvrdí "65%+ jistota", když to reálně neplatí.
-        if ticket is None and ticket_key == "kratky":
+        if False and ticket is None and ticket_key == "kratky":
             display_tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=NEAR_MISS_DISPLAY_MIN_PROB)
             if pool_filter is not None:
                 display_tolerance_pool = pool_filter(display_tolerance_pool)
