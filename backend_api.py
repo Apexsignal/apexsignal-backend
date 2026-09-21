@@ -7710,7 +7710,17 @@ def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
 
     rows = [r for r in repo.get_saved_tickets(source_user_id) if _created_at_utc(r) >= today_start_utc]
 
-    seen_signatures = set()
+    # appka (2026-09-21) tady našla skutečnou příčinu dnodenně narůstajících
+    # duplicit na transparentním/d.voves účtu — dedup dřív hlídal jen kopie
+    # V RÁMCI JEDNOHO volání, ale ne napříč několika voláními stejný den
+    # (cron tenhle endpoint volá 3×/den) — třetí a čtvrtý běh cronu tak
+    # klidně zkopíroval STEJNÝ zdrojový tiket znovu, protože ho na cílovém
+    # účtu nikdy nezkontroloval. Appka teď navíc načte i to, co na cílovém
+    # účtu DNES UŽ je, a takovou signaturu přeskočí i napříč voláními.
+    already_on_target_rows = [
+        r for r in repo.get_saved_tickets(req.target_user_id) if _created_at_utc(r) >= today_start_utc
+    ]
+    seen_signatures = {_signature(r["ticket"]) for r in already_on_target_rows}
     copied = []
     for row in rows:
         sig = _signature(row["ticket"])
