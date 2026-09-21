@@ -1741,17 +1741,94 @@ class OddsPapiProvider:
 
 
 # API-Football league_id -> OddsPapi tournamentId — explicitní mapování,
-# appka ho živě ověřila jen pro tyhle dvě soutěže (2026-08-05). Stejná
-# mezera appka zjistila u the-odds-api (viz komentář u SPORT_KEYS výše —
-# Rumunsko, Česko, Turecko, Chorvatsko, Srbsko, Maďarsko, Slovensko,
-# Kypr, Izrael, Uruguay, Kolumbie, Peru, Japonsko, Austrálie, Saúdská
-# Arábie, mezinárodní kvalifikace appce v the-odds-api chybí). Doplň
-# další ID, jak appka ověří další chybějící ligy — tournamentId najdeš
-# přes OddsPapiProvider.find_tournament_candidates(country, league) nebo
-# GET /admin/test-oddspapi.
+# appka ho rozšířila 2026-09-21 z původních 2 (Česko, Peru) na 76 lig —
+# skoro celé appčino TIPSPORT_LEAGUE_IDS (94 lig), kromě mezinárodních
+# kvalifikací/přátelských zápasů appka radši nechala bez mapování (nejistá
+# shoda, appka je ověří later). Spárováno automaticky (jméno ligy + země),
+# ale appka RUČNĚ opravila desítky chybných párů, co fuzzy shoda spletla
+# (zkratky jako "1. SNL" appka dřív omylem spárovala s "3. SNL", jihoamerické
+# ligy appka měla dřív slité pod jednu "Kostarika", protože appka jméno
+# země parsovala ze závorky u jednotlivé ligy, ne z nadpisu bloku).
+# Doplň další ID, jak appka ověří další chybějící ligy — tournamentId
+# najdeš přes OddsPapiProvider.find_tournament_candidates(country, league)
+# nebo GET /admin/test-oddspapi.
 ODDSPAPI_TOURNAMENT_IDS: dict[int, int] = {
-    345: 172,  # Chance Liga (ČR) -> OddsPapi "1. Liga" (Czechia)
-    281: 406,  # Primera División (Peru) -> OddsPapi "Liga 1" (Peru)
+    2: 7,  # Champions League (Evropské poháry)
+    3: 679,  # Europa League (Evropské poháry)
+    39: 17,  # Premier League (Anglie)
+    40: 18,  # Championship (Anglie)
+    41: 24,  # League One (Anglie)
+    42: 25,  # League Two (Anglie)
+    45: 19,  # FA Cup (Anglie)
+    48: 21,  # EFL Cup (Anglie)
+    61: 34,  # Ligue 1 (Francie)
+    62: 182,  # Ligue 2 (Francie)
+    66: 335,  # Coupe de France (Francie)
+    71: 325,  # Brasileirao Serie A (Brazílie)
+    72: 390,  # Brasileirao Serie B (Brazílie)
+    78: 35,  # Bundesliga (Německo)
+    79: 44,  # 2. Bundesliga (Německo)
+    80: 491,  # 3. Liga (Německo)
+    81: 217,  # DFB Pokal (Německo)
+    88: 37,  # Eredivisie (Holandsko)
+    89: 131,  # Eerste Divisie (Holandsko)
+    94: 238,  # Primeira Liga (Portugalsko)
+    95: 239,  # Segunda Liga (Portugalsko)
+    98: 196,  # J1 League (Japonsko)
+    103: 20,  # Eliteserien (Norsko)
+    104: 22,  # 1. divisjon (Norsko)
+    106: 202,  # Ekstraklasa (Polsko)
+    113: 40,  # Allsvenskan (Švédsko)
+    114: 46,  # Superettan (Švédsko)
+    119: 39,  # Superliga (Dánsko)
+    128: 155,  # Primera Division / Primera LPF (Argentina)
+    129: 703,  # Primera B Nacional / Primera Nacional (Argentina)
+    135: 23,  # Serie A (Itálie)
+    136: 53,  # Serie B (Itálie)
+    137: 328,  # Coppa Italia (Itálie)
+    140: 8,  # La Liga (Španělsko)
+    141: 54,  # La Liga 2 (Španělsko)
+    143: 329,  # Copa del Rey (Španělsko)
+    144: 38,  # Jupiler Pro League (Belgie)
+    164: 188,  # Úrvalsdeild / Besta deild (Island)
+    172: 247,  # First League / Parva Liga (Bulharsko)
+    179: 36,  # Scottish Premiership / Premiership (Skotsko)
+    188: 136,  # A-League (Austrálie)
+    197: 185,  # Super League (Řecko)
+    203: 52,  # Süper Lig / Super Lig (Turecko)
+    207: 215,  # Swiss Super League (Švýcarsko)
+    210: 170,  # HNL (Chorvatsko)
+    218: 45,  # Bundesliga (Rakousko)
+    219: 135,  # 2. Liga (Rakousko)
+    233: 808,  # Premier League (Egypt)
+    235: 203,  # Premier League (Rusko)
+    239: 241,  # Primera A (Kolumbie)
+    242: 240,  # Liga Pro / LigaPro Primera A (Ekvádor)
+    244: 41,  # Veikkausliiga (Finsko)
+    250: 27098,  # División Profesional - Apertura (Paraguay)
+    252: 27100,  # División Profesional - Clausura (Paraguay)
+    253: 242,  # MLS (USA/Kanada)
+    255: 28163,  # USL Championship (USA/Kanada)
+    262: 27464,  # Liga MX - Apertura (Mexiko) — sezóna appka řeší ručně, viz níže
+    265: 244,  # Primera División (Chile)
+    268: 278,  # Primera División - Apertura -> "Primera Division" nedělené (Uruguay)
+    270: 278,  # Primera División - Clausura -> "Primera Division" nedělené (Uruguay)
+    271: 187,  # OTP Bank Liga / NB I (Maďarsko)
+    281: 406,  # Primera División / Liga 1 (Peru)
+    283: 152,  # Liga 1 -> OddsPapi "Superliga" (Rumunsko — appčino "Liga 1" je jen appčin popisek, skutečný název je Superliga)
+    286: 210,  # Super Liga / Superliga (Srbsko)
+    292: 410,  # K League 1 (Jižní Korea)
+    318: 171,  # First Division (Kypr)
+    332: 211,  # Super Liga / Superliga (Slovensko)
+    344: 866,  # Primera División / Liga Profesional (Bolívie)
+    345: 172,  # Chance Liga -> OddsPapi "1. Liga" (Česko)
+    346: 205,  # Chance Národní Liga -> OddsPapi "FNL" (Česko)
+    357: 192,  # Premier Division (Irsko)
+    373: 212,  # 1. SNL -> OddsPapi "PrvaLiga" (Slovinsko)
+    383: 266,  # Ligat Ha'al -> OddsPapi "Premier League" (Izrael)
+    384: 370,  # State Cup (Izrael)
+    531: 465,  # UEFA Super Cup (Evropské poháry)
+    848: 34480,  # Conference League (Evropské poháry)
 }
 
 
