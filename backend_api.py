@@ -5354,3 +5354,2986 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
     return {
         "zkontrolovano_vyberu": checked,
         "nelze_overi
+t": unverifiable,
+        "pocet_neshod": len(mismatches),
+        "neshody": mismatches,
+    }
+
+
+# =====================================================================
+# Automatické denní generování tiketů (cron) — appka denně v 9:00 SEČ/SELČ
+# vygeneruje 1 tiket — hlavně kratky, jen každý třetí den appka navíc
+# zkusí stredni (pošle ho, jen když má hodnotu) — uloží ho do historie
+# zadaného účtu a pošle ho jako obrázek do Telegramu.
+# Volá se z vnějšku (naplánovaná úloha), ne appka sama ze sebe — proto
+# appka autorizaci řeší sdíleným tajným klíčem (ADMIN_TASK_KEY), ne
+# přihlašovacím tokenem konkrétního uživatele.
+# =====================================================================
+DAILY_TICKETS_MARKETS = [MarketType.MATCH_WINNER, MarketType.OVER_GOALS, MarketType.UNDER_GOALS, MarketType.BTTS]
+DAILY_TICKETS_SPORTS = [Sport.FOOTBALL]
+# Kč — appka tohle zaznamená jako "reálně vsazeno" u KAŽDÉHO auto-generovaného
+# tiketu. Rozpětí (ne pevná částka) appka volí náhodně, ať výkladní skříň
+# (viz /showcase/tickets) vypadá jako opravdové sázení různých lidí, ne jako
+# jeden bot se stále stejnou částkou.
+DAILY_TICKETS_STAKE_CHOICES = [200, 300, 500, 800, 1000, 1500, 2000, 3000, 5000]
+
+
+def _generate_one_ticket_for_cron(
+    user_id: int, risk_level: int, sports: list[Sport], market_types: list[MarketType], time_frame_days: int,
+    max_widen_days: int = 3,
+) -> Optional[Ticket]:
+    """Stejná logika jako /tickets/generate (fetch → vyluč už použité →
+    vyfiltruj minulé zápasy → fallback na širší horizont, pokud je málo
+    zápasů NEBO se z nich nepovede sestavit tiket), jen bez závislosti na
+    přihlášeném uživateli z requestu. max_widen_days řídí, o kolik dní appka
+    smí couvnout do širšího okna, když je úzké okno prázdné/nepoužitelné —
+    0 znamená appka couvnout vůbec nesmí (radši nic než starý/vzdálený zápas,
+    viz DAILY_TICKETS_USER_ID, kde má appka posílat jen zápasy na dnes/zítra)."""
+    exclude_ids = repo.get_all_saved_match_ids(user_id)
+
+    # Appka stáhne a obohatí širší okno JEDNOU (viz stejná poznámka u
+    # /tickets/generate) — užší okno je jeho podmnožina.
+    all_wider_matches = _fetch_candidate_matches(sports, time_frame_days + max_widen_days)
+    all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
+    all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+
+    matches = _filter_within_days(all_wider_matches, time_frame_days)
+    if len(matches) < 3 and max_widen_days > 0:
+        matches = all_wider_matches
+
+    result = ticket_generator.generate(
+        matches, risk_level, sports, market_types, time_frame_days,
+        pool_filter=_pool_filter_for_risk(risk_level),
+    )
+
+    if result["safe"] is None:
+        result = ticket_generator.generate(
+            all_wider_matches, risk_level, sports, market_types, time_frame_days,
+            pool_filter=_pool_filter_for_risk(risk_level),
+        )
+
+    # Poslední záchranná síť (2026-09-18, uživatelovo přání: appka má
+    # PŘEDNOSTNĚ stavět tiket v plném rozsahu 1.90-3.0, ale když se to ani
+    # s near-miss tolerancí nepovede, radši poslat tiket s nižším kurzem
+    # (dolní hranice 1.75, viz RELAXED_MIN_ODDS_HARD) než neposlat nic —
+    # oba kandidáti pořád musí mít obě čísla (model i trh) nad 65 %, appka
+    # slevuje jen z kurzu, ne z kvality/jistoty výběrů.
+    if result["safe"] is None:
+        result = ticket_generator.generate(
+            all_wider_matches, risk_level, sports, market_types, time_frame_days,
+            pool_filter=_pool_filter_for_risk(risk_level), allow_relaxed_min_odds=True,
+        )
+
+    return result["safe"]
+
+
+@app.post("/admin/send-ticket-to-telegram")
+def admin_send_ticket_to_telegram(request: Request, ticket_id: int):
+    """Pošle KONKRÉTNÍ uložený tiket na appčin vlastní Telegram
+    (TELEGRAM_CHAT_ID) — appka to použije, kdykoliv chce jednorázově
+    něco poslat mimo pravidelný denní cron (viz run_daily_tickets)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    row = rows[0]
+    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(row["ticket"], row["ticket_id"]))
+    return {"status": "sent", "ticket_id": ticket_id}
+
+
+
+
+
+
+
+
+def _ticket_to_telegram_dict(ticket: Ticket, ticket_id: int) -> dict:
+    return {
+        "ticket_id": ticket_id,
+        "ticket_type": ticket.ticket_type,
+        "total_odds": ticket.total_odds,
+        "selections": [
+            {
+                "home_team": s.home_team, "away_team": s.away_team,
+                "league": s.league, "kickoff_date": s.kickoff_date, "kickoff_time": s.kickoff_time,
+                "odds": s.odds, "probability": s.probability, "selection": s.selection,
+                "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                "reasoning": s.reasoning,
+            }
+            for s in ticket.selections
+        ],
+    }
+
+
+# Appka historii měla 5x duplicitní pár tiketů (stejný účet, stejný typ,
+# STEJNÉ zápasy) — vždy vznikly ze dvou volání téhož admin/*-daily-tickets
+# endpointu pár vteřin od sebe (ruční test spuštěný podruhé, než appka
+# stihla dokončit první běh). Uvicorn appka pouští bez --workers (viz
+# render.yaml — jeden proces), ale FastAPI SYNCHRONNÍ endpointy i tak
+# pouští na vlákně, takže dvě souběžná volání klidně obě přečtou "zatím
+# nic dnes uloženo" DŘÍV, než první stihne cokoli uložit. Prostý zámek
+# v paměti (per proces, žádná DB tabulka navíc) tohle appce stačí vyřešit
+# — druhé souběžné volání appka rovnou odmítne, místo aby duplikovalo.
+_GENERATION_LOCKS = {
+    "daily_tickets": threading.Lock(),
+    "transparency_daily_tickets": threading.Lock(),
+    "test3_daily_tickets": threading.Lock(),
+    "dvoves_daily_tickets": threading.Lock(),
+    "personal_tracking_daily_tickets": threading.Lock(),
+}
+
+
+@app.post("/admin/daily-tickets")
+def run_daily_tickets(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+        # Appka nejdřív zkusí dosettlovat staré 'pending' tikety na tomhle
+        # účtu — nikdo se na něj nepřihlašuje (je to appky vlastní účet pro
+        # denní automatiku a výkladní skříň /showcase/tickets), takže bez
+        # tohohle kroku by settlement (viz jinak /tickets/saved) nikdy
+        # neproběhl a tikety by navěky zůstaly "nevyhodnocené".
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        # DAILY_TICKETS_USER_ID je zdroj pro PLACENÝ Telegram kanál
+        # (_todays_client_picks/client-tickets-send) — appka posílá JEDEN
+        # tiket denně, žádnou "výkladní skříň" navíc (na tu appka má
+        # samostatný účet, viz TEST3_USER_ID níže). BOOST i STŘEDNÍ appka
+        # přestala nabízet úplně — jejich nízká úspěšnost (viz historie,
+        # střední −37 % ROI na 30denním vzorku) neodpovídala kvalitativní
+        # laťce, co appka drží u kratky. Appka teď posílá výhradně kratky.
+        #
+        # Okno rozšířeno z 2 na 4 dny (2026-08-27, uživatelovo přání) —
+        # appka narazila na den, kdy 2denní okno dalo jen kandidáty nalepené
+        # na MODEL_HIGH_CONFIDENCE_CAP (75 %) a/nebo ze stejné ligy/dne
+        # (korelační sleva), takže žádná kombinace nedala kladný kombinovaný
+        # edge (viz /admin/candidate-pool-detail diagnostika). Širší okno
+        # appce dá víc různorodých zápasů (jiné ligy, jiné dny), což snižuje
+        # šanci na tenhle kolaps, aniž by appka slevovala ze samotné edge
+        # kontroly. Appka schválně NEsahá na MAX_MODEL_MARKET_GAP ani na
+        # MIN_ODDS_HARD — ty appka nechává, appka je přidala po reálných
+        # problémech (viz probability_model.py). max_widen_days zůstává 0 —
+        # 4 dny je appce nastavený strop, dál appka couvat nesmí (odběratel
+        # má dostat tip na příštích pár dní, ne na zápas za týden).
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+
+        results = []
+        generated_today: list[tuple[Ticket, int]] = []
+        already_today = db.count_tickets_since(target_user_id, "kratky", today_start_utc_naive)
+        if already_today > 0:
+            results.append({"type": "daily_pick", "status": "already_generated_today", "count": already_today})
+        else:
+            candidates = (("kratky", 20),)
+
+            ticket, label = None, None
+            for candidate_label, risk_level in candidates:
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, 4,
+                        max_widen_days=0,
+                    )
+                except Exception as e:
+                    print(f"[daily-tickets] {candidate_label}: generování selhalo: {e}")
+                    ticket = None
+                if ticket is not None:
+                    label = candidate_label
+                    break
+
+            if ticket is None:
+                results.append({"type": "daily_pick", "status": "failed_to_generate"})
+            else:
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                stake = random.choice(DAILY_TICKETS_STAKE_CHOICES)
+                repo.set_actual_stake(ticket_id, stake, ticket.total_odds)
+                generated_today.append((ticket, ticket_id))
+
+                telegram_status = "skipped"
+                if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                    try:
+                        ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                        telegram_status = "sent"
+                    except Exception as e:
+                        telegram_status = f"error: {e}"
+
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": stake, "telegram": telegram_status})
+
+        # Appka navíc denně pošle výběr TOP 4 (podle nejvyšší kombinované
+        # pravděpodobnosti ze všech dnes vygenerovaných) na druhý, samostatně
+        # nastavený Telegram chat (TELEGRAM_CHAT_ID_WIFE) — appka posílá jen
+        # kopii nejlepších tiketů, nic v appce se kvůli tomu jinak nemění.
+        wife_chat_id = os.environ.get("TELEGRAM_CHAT_ID_WIFE")
+        if wife_chat_id and os.environ.get("TELEGRAM_BOT_TOKEN") and generated_today:
+            top4 = sorted(generated_today, key=lambda t: t[0].combined_probability, reverse=True)[:4]
+
+            for ticket, ticket_id in top4:
+                try:
+                    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id), chat_id=wife_chat_id)
+                    results.append({"type": "top4_wife", "status": "sent", "ticket_id": ticket_id})
+                except Exception as e:
+                    results.append({"type": "top4_wife", "status": f"error: {e}", "ticket_id": ticket_id})
+
+        # Odběratelům z Telegram webhooku appka NEPOSÍLÁ nic automaticky —
+        # per rozhodnutí appka nejdřív čeká na ruční schválení (viz
+        # /admin/client-tickets-preview a /admin/client-tickets-send níže),
+        # ať jde vždycky zkontrolovat, co se klientovi pošle, PŘED odesláním.
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["daily_tickets"].release()
+
+
+TRANSPARENCY_STAKE = 2000.0
+
+
+@app.post("/admin/transparency-daily-tickets")
+def run_transparency_daily_tickets(request: Request):
+    """
+    Appka na samostatném, veřejně čitelném účtu (TRANSPARENCY_USER_ID)
+    denně vygeneruje 2 kratky tikety, na každý appka
+    automaticky vsadí pevných 2000 Kč — appka tenhle účet nikdy nemaskuje
+    ani neupravuje, jde čistě o transparentní ukázku appčina výkonu (viz
+    GET /public/transparency). Odděleno od DAILY_TICKETS_USER_ID (appky
+    vlastní účet pro Telegram/showcase) — appka tenhle nový účet nemíchá
+    s tím starým. Každý vygenerovaný tiket appka navíc pošle na appčin
+    vlastní Telegram (TELEGRAM_CHAT_ID), stejně jako u run_daily_tickets.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["transparency_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/transparency-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="TRANSPARENCY_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+        # Nikdo se na tenhle účet nepřihlašuje, takže appka musí dosettlovat
+        # stará pending sama — jinak by se tikety navěky nevyhodnotily
+        # (viz stejná poznámka u run_daily_tickets výše).
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        # Horizont rozšířen z 2 na 4 dny stejně jako u run_daily_tickets výš —
+        # viz komentář tam.
+        plan = [("kratky", 20, 4, 2)]
+
+        results = []
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[transparency-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, TRANSPARENCY_STAKE, ticket.total_odds)
+
+                telegram_status = "skipped"
+                if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                    try:
+                        ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                        telegram_status = "sent"
+                    except Exception as e:
+                        telegram_status = f"error: {e}"
+
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TRANSPARENCY_STAKE, "telegram": telegram_status})
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["transparency_daily_tickets"].release()
+
+
+DVOVES_STAKE = 2000.0
+DVOVES_EMAIL = "d.voves@seznam.cz"
+
+
+@app.post("/admin/dvoves-daily-tickets")
+def run_dvoves_daily_tickets(request: Request):
+    """
+    Appka na testovacím účtu d.voves@seznam.cz denně vygeneruje 2 kratky +
+    stejný plán jako u transparentního účtu (run_transparency_daily_tickets),
+    jen na jiném účtu a bez env var (appka ho hledá přes e-mail, protože
+    tohle je běžný registrovaný uživatel appky, ne appčin vlastní systémový
+    účet s DVOVES_USER_ID). Generování jde mimo tokenový systém stejně jako
+    u appčiných ostatních cronových účtů.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["dvoves_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/dvoves-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user = db.get_user_by_email(DVOVES_EMAIL)
+        if not target_user:
+            raise HTTPException(status_code=500, detail=f"Účet {DVOVES_EMAIL} v appce neexistuje")
+        target_user_id = target_user["id"]
+
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 4, 2)]
+
+        results = []
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[dvoves-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, DVOVES_STAKE, ticket.total_odds)
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": DVOVES_STAKE})
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["dvoves_daily_tickets"].release()
+
+
+TEST3_STAKE = 1000.0
+
+
+@app.post("/admin/test3-daily-tickets")
+def run_test3_daily_tickets(request: Request):
+    """
+    Appka na účtu TEST3_USER_ID (appky vlastní testovací/kontrolní účet)
+    denně vygeneruje 2 kratky tikety, na každý appka
+    automaticky vsadí pevných 1000 Kč. Odděleno od DAILY_TICKETS_USER_ID
+    (placený Telegram kanál, přesně 1 kratky, žádný boost/stredni) i od
+    TRANSPARENCY_USER_ID (veřejná appka /public/transparency) — appka
+    tenhle účet nemíchá s žádným z nich.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if not _GENERATION_LOCKS["test3_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/test3-daily-tickets už běží, tohle appka přeskočila."}
+
+    try:
+        target_user_id_raw = os.environ.get("TEST3_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="TEST3_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 4, 2)]
+
+        results = []
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                    )
+                except Exception as e:
+                    print(f"[test3-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, TEST3_STAKE, ticket.total_odds)
+                results.append({"type": label, "status": "saved", "ticket_id": ticket_id, "stake": TEST3_STAKE})
+
+        return {"date": today_prague.isoformat(), "settled": settled_count, "results": results}
+    finally:
+        _GENERATION_LOCKS["test3_daily_tickets"].release()
+
+
+PERSONAL_TRACKING_STAKE = 1000.0
+
+
+def _run_personal_tracking_daily_tickets_job(target_user_id: int) -> None:
+    """
+    Appka tohle spouští na SAMOSTATNÉM vlákně (viz /admin/personal-tracking-daily-tickets
+    níže) — stejný důvod jako u _start_generation_job pro /tickets/generate:
+    appka tenhle běh (settlement + 3x sekvenční generování + Telegram) naživo
+    naměřila na 10+ minut, a když appka tohle dřív dělala PŘÍMO uvnitř
+    request handleru, appka tím na tu dobu držela otevřené HTTP spojení —
+    naživo appka takhle jednou shodila celý web (appka nedokázala jistě
+    dohledat, jestli to způsobil vyčerpaný threadpool, GIL, nebo náhodný
+    výpadek DB spojení uprostřed, ale ať je příčina jakákoli, appka radši
+    request handler drží na milisekundy, ne na minuty).
+    """
+    try:
+        provider = data_provider.get_provider(Sport.FOOTBALL)
+        pending_rows = [row for row in repo.get_saved_tickets(target_user_id) if row["status"] == "pending"]
+        settled_count = 0
+        for row in pending_rows:
+            selection_ids = [s.get("id") for s in row.get("selections", [])]
+            new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+            if new_status is not None:
+                repo.set_ticket_status(row["ticket_id"], new_status)
+                repo.set_live_alert(row["ticket_id"], None)
+                settled_count += 1
+
+        today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+        today_start_utc_naive = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        plan = [("kratky", 20, 2, 2)]
+
+        results = []
+        saved_count = 0
+        for label, risk_level, days, target_count in plan:
+            already_today = db.count_tickets_since(target_user_id, label, today_start_utc_naive)
+            to_generate = target_count - already_today
+            saved_count += min(already_today, target_count)
+            if to_generate <= 0:
+                results.append({"type": label, "status": "already_generated_today", "count": already_today})
+                continue
+
+            for _ in range(to_generate):
+                try:
+                    # max_widen_days=0 — appka to nechala stejně přísné jako
+                    # /admin/daily-tickets (viz tam), NE výchozí +3 dny. Appka
+                    # tenhle cron naživo shodila kvůli OOM (Render starter
+                    # plán, limit 512 MB) — širší okno = mnohonásobně víc
+                    # kandidátních zápasů v paměti najednou, a appka to tu
+                    # navíc dělá 3x po sobě v jednom requestu (2 kratky +
+                    # 1 stredni). Bez max_widen_days=0 appka riskuje, že
+                    # denní cron zítra v 8:00 znovu shodí celý web pro
+                    # platící odběratele, ne jen tenhle testovací účet.
+                    ticket = _generate_one_ticket_for_cron(
+                        target_user_id, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, days,
+                        max_widen_days=0,
+                    )
+                except Exception as e:
+                    print(f"[personal-tracking-daily-tickets] {label}: generování selhalo: {e}")
+                    results.append({"type": label, "status": "generation_error", "error": str(e)})
+                    break
+                if ticket is None:
+                    results.append({"type": label, "status": "failed_to_generate"})
+                    break
+
+                ticket_id = repo.save_ticket(target_user_id, ticket)
+                repo.set_actual_stake(ticket_id, PERSONAL_TRACKING_STAKE, ticket.total_odds)
+                telegram_status = "skipped"
+                if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                    try:
+                        ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(ticket, ticket_id))
+                        telegram_status = "sent"
+                    except Exception as e:
+                        telegram_status = f"error: {e}"
+                results.append({
+                    "type": label, "status": "saved", "ticket_id": ticket_id,
+                    "stake": PERSONAL_TRACKING_STAKE, "telegram": telegram_status,
+                })
+                saved_count += 1
+                # Appka mezi jednotlivými tikety uvolní paměť po velkém
+                # kandidátním poolu (viz OOM výše) — s max_widen_days=0 by to
+                # nemuselo být nutné, appka to tam ale radši nechává jako
+                # levnou další pojistku.
+                gc.collect()
+
+        # Appka chtěla 2 kratky + 1 stredni = 3 celkem. Ať appka pozná
+        # "málo nebo žádné" hned, ne až se na to appka majitel sám zeptá.
+        if saved_count < 3:
+            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            if chat_id and bot_token:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        data={
+                            "chat_id": chat_id,
+                            "text": (
+                                f"⚠️ Osobní sledovací tikety dnes appka vygenerovala jen {saved_count}/3 "
+                                f"(2 krátké + 1 střední). Zkontroluj /admin/personal-tracking-daily-tickets."
+                            ),
+                        },
+                        timeout=15,
+                    )
+                except Exception as e:
+                    print(f"[personal-tracking-daily-tickets] Upozornění na málo tiketů se nepodařilo poslat: {e}")
+
+        print(f"[personal-tracking-daily-tickets] Hotovo: date={today_prague.isoformat()} settled={settled_count} saved_count={saved_count} results={results}")
+    except Exception as e:
+        print(f"[personal-tracking-daily-tickets] Běh na pozadí selhal: {e}")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if chat_id and bot_token:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": f"⚠️ Osobní sledovací tikety dnes úplně selhaly na chybu: {e}",
+                    },
+                    timeout=15,
+                )
+            except Exception:
+                pass
+    finally:
+        _GENERATION_LOCKS["personal_tracking_daily_tickets"].release()
+
+
+class AdminResendTicketTelegramRequest(BaseModel):
+    ticket_id: int
+    user_id: int
+
+
+@app.post("/admin/resend-ticket-telegram")
+def admin_resend_ticket_telegram(req: AdminResendTicketTelegramRequest, request: Request):
+    """
+    Appka tohle přidala kvůli tiketu #386 z /admin/personal-tracking-daily-tickets
+    — appka ho uložila do DB, ale proces appku hned poté OOM killnul (viz
+    oprava výše), takže se Telegram zpráva vůbec neodeslala. Appka tímhle
+    umí doposlat KONKRÉTNÍ už uložený tiket, beze změny stavu/vsazené
+    částky — jen znovu pošle Telegram zprávu.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    rows = repo.get_saved_tickets(req.user_id)
+    row = next((r for r in rows if r["ticket_id"] == req.ticket_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Tiket {req.ticket_id} pro user_id={req.user_id} nenalezen")
+
+    ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(row["ticket"], req.ticket_id))
+    return {"status": "sent", "ticket_id": req.ticket_id}
+
+
+class AdminDeleteAccountRequest(BaseModel):
+    email: str
+
+
+@app.post("/admin/delete-account")
+def admin_delete_account(req: AdminDeleteAccountRequest, request: Request):
+    """
+    Appka tímhle maže testovací/vlastní účty rovnou přes ADMIN_TASK_KEY,
+    bez nutnosti se přihlásit a znát heslo (na rozdíl od self-service
+    DELETE /account) — pro reálné platící uživatele appka tohle nemá
+    používat, jen pro appčiny vlastní testovací účty. Cascade smaže i
+    tikety/tokeny/transakce stejně jako db.delete_user.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    user = db.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"Účet {req.email} neexistuje")
+    db.delete_user(user["id"])
+    return {"status": "deleted", "email": req.email, "user_id": user["id"]}
+
+
+@app.post("/admin/personal-tracking-daily-tickets")
+def run_personal_tracking_daily_tickets(request: Request):
+    """
+    Appka na účtu PERSONAL_TRACKING_USER_ID (appkou majitele vlastní
+    osobní sledovací účet, oddělený od placeného kanálu i od appky
+    vlastních test/transparency účtů) denně vygeneruje 2 kratky tikety,
+    na každý appka vsadí pevných 1000 Kč a POŠLE MU JE i na Telegram
+    (TELEGRAM_CHAT_ID) — na rozdíl od test3/transparency appka tohle posílá
+    appce majiteli přímo. Když se appce nepovede vygenerovat všechny 3,
+    appka o tom appce majiteli pošle zvlášť upozornění na Telegram.
+
+    Samotná práce běží na SAMOSTATNÉM vlákně (_run_personal_tracking_daily_tickets_job)
+    — endpoint se vrací HNED, ne až po 10+ minutách, viz komentář u té
+    funkce. Výsledek appka nikam nevrací HTTP odpovědí (cron na ni stejně
+    nekouká), appka ho pošle přímo na Telegram.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="PERSONAL_TRACKING_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    if not _GENERATION_LOCKS["personal_tracking_daily_tickets"].acquire(blocking=False):
+        return {"status": "already_running", "detail": "Jiné volání /admin/personal-tracking-daily-tickets už běží, tohle appka přeskočila."}
+
+    threading.Thread(target=_run_personal_tracking_daily_tickets_job, args=(target_user_id,), daemon=True).start()
+    return {"status": "started", "detail": "Generování běží na pozadí, výsledek appka pošle na Telegram."}
+
+
+@app.post("/admin/transparency-backfill-results")
+def transparency_backfill_results(request: Request):
+    """
+    Veřejný transparentní účet (TRANSPARENCY_USER_ID) měl desítky tiketů
+    z období PŘED tím, než appka vůbec začala per-výběr výsledek
+    (won/lost) ukládat vedle celkového statusu tiketu — appka jim tak
+    neuměla ukázat, jestli prohra byla "o jednu nohu", nebo nevyšlo skoro
+    nic (viz _selection_row v transparency_page.py). Stejná logika jako
+    appce vlastní /admin/backfill-results (appka ji tam má vázanou na
+    přihlášení), jen tady přes ADMIN_TASK_KEY — na tenhle účet se nikdo
+    nepřihlašuje. Bezpečně opakovatelné, appka jen znovu dotáhne skóre a
+    přepíše, co už má.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="TRANSPARENCY_USER_ID není nastavené")
+    target_user_id = int(target_user_id_raw)
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    checked = 0
+    status_changed = 0
+    for row in repo.get_saved_tickets(target_user_id):
+        selection_ids = [s.get("id") for s in row.get("selections", [])]
+        if not selection_ids:
+            continue
+        checked += 1
+        new_status = _try_settle_ticket(provider, row["ticket"], selection_ids)
+        if new_status is not None and row["status"] != new_status:
+            repo.set_ticket_status(row["ticket_id"], new_status)
+            status_changed += 1
+
+    return {"tickets_checked": checked, "status_changed": status_changed}
+
+
+def _ticket_units(total_odds: Optional[float], status: str) -> float:
+    """
+    Výsledek jednoho tiketu při jednotkovém vkladu: výhra vynese kurz
+    mínus vsazená jednotka, prohra sebere celou jednotku. Appka na tomhle
+    staví veřejně vykazovaná čísla místo korun — viz poznámka u
+    profit_units v public_transparency.
+    """
+    if status == "won":
+        return round((total_odds or 0) - 1.0, 2)
+    return -1.0
+
+
+@app.get("/public/transparency")
+def public_transparency(limit: int = 100):
+    """
+    Zcela veřejný, bez přihlášení dostupný přehled appčina transparentního
+    účtu (TRANSPARENCY_USER_ID) — appka ukazuje ÚPLNĚ VŠECHNY tikety, i
+    prohrané (na rozdíl od /showcase/tickets, co ukazuje jen výhry) —
+    smysl je transparentnost, ne reklama. Appka u tiketů, co ještě nejsou
+    vyhodnocené (pending/live), ukazuje ZÁPASY hned (tým, soupeř, liga),
+    ale market_type/selection/odds u každého výběru posílá jako None —
+    samotnou sázku appka odhalí natrvalo, až tiket vyhodnotí. Appka tohle
+    dělá, aby nikdo nemohl z appky "okopírovat" tip dřív, než appka sama
+    rozhodne o výsledku, ale zápasy appka zveřejňuje předem a natrvalo,
+    ať appka nemůže zpětně tvrdit něco jiného, než na co vsadila.
+    """
+    limit = max(1, min(limit, 200))
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        return {"tickets": [], "stats": None}
+    target_user_id = int(target_user_id_raw)
+
+    rows = repo.get_saved_tickets(target_user_id)
+    rows.sort(key=lambda r: r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    rows = rows[:limit]
+
+    tickets = []
+    for r in rows:
+        ticket = r["ticket"]
+        created_at = r.get("created_at")
+        status = r["status"]
+        resolved = status in ("won", "lost")
+        entry = {
+            "ticket_id": r["ticket_id"],
+            "ticket_type": ticket.ticket_type,
+            "status": status,
+            "total_odds": ticket.total_odds,
+            # Výsledek appka veřejně vykazuje v JEDNOTKÁCH, ne v korunách:
+            # každý tiket = 1 jednotka vkladu. Uložené actual_stake_amount
+            # jsou u automaticky generovaných tiketů náhodně přiřazené
+            # částky (viz DAILY_TICKETS_STAKE_CHOICES), ne skutečně vsazené
+            # peníze — publikovat je jako reálný vklad by bylo tvrzení,
+            # které neodpovídá skutečnosti. Úspěšnost a ROI přitom zůstávají
+            # nedotčené, protože jsou vlastností VÝBĚRŮ, ne velikosti sázky.
+            "profit_units": _ticket_units(ticket.total_odds, status) if resolved else None,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "selection_count": len(ticket.selections),
+        }
+        if resolved:
+            # r["selections"] appka natahuje samostatně (viz db.fetch_ticket_rows)
+            # a obsahuje "result" (won/lost/pending) PER VÝBĚR — na rozdíl od
+            # ticket.selections (Ticket objekt), kde tohle pole není. Appka
+            # veřejně chce ukázat, jestli prohra tiketu byla "o jednu nohu",
+            # nebo jestli nevyšlo skoro nic, takže appka obě sady spáruje
+            # POZIČNĚ (obě appka staví ze stejného seznamu DB řádků, ve
+            # stejném pořadí — viz db.fetch_ticket_rows).
+            raw_selections = r.get("selections") or []
+            entry["selections"] = [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                    "selection": s.selection, "odds": s.odds,
+                    "league": s.league, "country": s.country,
+                    "result": raw_selections[i]["result"] if i < len(raw_selections) else None,
+                }
+                for i, s in enumerate(ticket.selections)
+            ]
+        else:
+            # Appka teď zápas ukazuje HNED, i u nevyhodnoceného tiketu —
+            # skrytá zůstává jen samotná sázka (trh, konkrétní výběr a
+            # kurz té jedné nohy), dokud appka tiket nevyhodnotí. Appka
+            # market_type/selection/odds schválně posílá jako None místo
+            # toho, aby appka výběry vynechala úplně — díky tomu appka
+            # DOPŘEDU a NATRVALO zveřejní, na jaké zápasy vsadila (nejde
+            # zpětně dopsat), a zároveň nikdo neví PŘESNĚ na co, dokud
+            # appka tiket sama neodhalí.
+            entry["selections"] = [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": None, "selection": None, "odds": None,
+                    "league": s.league, "country": s.country,
+                    "result": None,
+                }
+                for s in ticket.selections
+            ]
+        tickets.append(entry)
+
+    resolved_rows = [r for r in rows if r["status"] in ("won", "lost") and r["ticket"].total_odds]
+    won_rows = [r for r in resolved_rows if r["status"] == "won"]
+
+    # Křivka kumulativního zisku pro graf — appka ji staví CHRONOLOGICKY
+    # (rows jsou seřazené od nejnovějšího), aby šla vykreslit zleva doprava.
+    equity_curve = []
+    cumulative = 0.0
+    for r in sorted(resolved_rows, key=lambda x: x["created_at"]):
+        cumulative += _ticket_units(r["ticket"].total_odds, r["status"])
+        created_at = r["created_at"]
+        equity_curve.append({
+            "date": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "units": round(cumulative, 2),
+        })
+
+    stats = {
+        "resolved_count": len(resolved_rows),
+        "won_count": len(won_rows),
+        "win_rate_pct": round(len(won_rows) / len(resolved_rows) * 100, 1) if resolved_rows else None,
+        # Zisk i ROI při jednotkovém vkladu na každý tiket — ROI je tedy
+        # přímo průměrný výnos na vsazenou jednotku.
+        "units_profit": round(cumulative, 2),
+        "roi_pct": round(cumulative / len(resolved_rows) * 100, 1) if resolved_rows else None,
+    }
+    return {"tickets": tickets, "stats": stats, "equity_curve": equity_curve}
+
+
+@app.get("/transparentni-ucet", response_class=HTMLResponse)
+def transparency_html():
+    """
+    Appka tuhle stránku (s grafem equity curve, statistikami a historií
+    tiketů) mezi 2026-08-01 a 2026-08-18 přestala zobrazovat (nahrazeno
+    obyčejným redirectem na hlavní stránku — rozhodnutí "appka teď vede
+    prodejně přes hlavní stránku") — uživatel si ale 2026-08-18 vyžádal
+    zpátky přesně tuhle původní stránku ("chci tu původní..stranku kde
+    byl i graf"), takže appka redirect zrušila a stránku znovu renderuje.
+    Data appka bere ze stejné logiky jako /public/transparency (JSON),
+    jen navíc vyrenderované přes transparency_page.render_page().
+    """
+    data = public_transparency(limit=100)
+    html = transparency_page.render_page(
+        tickets=data["tickets"],
+        stats=data["stats"],
+        equity_curve=data.get("equity_curve"),
+        app_equivalent_kc=_app_equivalent_monthly_kc(),
+        app_generation_enabled=CLIENT_TICKET_GENERATION_ENABLED,
+    )
+    return HTMLResponse(content=html)
+
+
+def _app_equivalent_monthly_kc() -> int:
+    """
+    Kolik by stálo přes appku/tokeny vygenerovat to samé, co appka posílá
+    v placeném kanálu za měsíc — appka posílá jen 1 tiket denně, hlavně
+    kratky, jen každý třetí den appka navíc zkusí stredni (viz
+    run_daily_tickets). Appka pro srovnání počítá s cenou kratky, protože
+    to je typ, co appka posílá naprostou většinu dní. Appka to počítá
+    živě z TOKEN_COSTS/TOKEN_KC_VALUE, ne jako pevné číslo v textu
+    landing page, ať se srovnání samo opraví, když se ceník někdy změní.
+    """
+    days_per_month = 30
+    daily_kc = TOKEN_COSTS["kratky"] * TOKEN_KC_VALUE
+    return daily_kc * days_per_month
+
+
+def _ticket_still_sendable(ticket: Ticket, buffer_minutes: int = 30) -> bool:
+    """Appka nepošle jako 'dnešní tip' tiket, kde už kterýkoli výběr vykopl
+    (nebo vykopne za míň než buffer_minutes) — appka tikety generuje ráno
+    s filtrem na BUDOUCÍ zápasy (viz _filter_future_matches), ale odeslání
+    může appka spustit později (ruční doběh, nový odběratel se spáruje až
+    večer...) a mezitím už zápas může běžet nebo být odehraný. Poslat
+    takový "tip" by bylo zavádějící — appka slibuje kurz předem, ne
+    komentář k živému/skončenému zápasu."""
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(minutes=buffer_minutes)
+    for s in ticket.selections:
+        try:
+            kickoff_dt = datetime.fromisoformat(f"{s.kickoff_date}T{s.kickoff_time}:00+00:00")
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if kickoff_dt <= cutoff:
+            return False
+    return True
+
+
+def _todays_client_picks(target_user_id: int) -> list[dict]:
+    """Vybere z dnešních uložených tiketů appkina automatického účtu
+    (target_user_id) 1 nejlepší kratky — stejný výběr pro náhled i pro
+    odeslání. Appka BOOST i STŘEDNÍ už negeneruje ani nenabízí (viz
+    run_daily_tickets)."""
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        # repo.get_saved_tickets appka vrací created_at jako tz-aware (UTC) —
+        # na rozdíl od run_daily_tickets výše appka tady srovnává přímo v
+        # Pythonu (ne v SQL), takže obě strany musí mít stejnou "aware"
+        # podobu, jinak Python porovnání spadne (naive vs aware).
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    rows = [r for r in repo.get_saved_tickets(target_user_id) if _created_at_utc(r) >= today_start_utc]
+
+    def _best(ticket_type):
+        candidates = [
+            r for r in rows
+            if r["ticket"].ticket_type == ticket_type and _ticket_still_sendable(r["ticket"])
+        ]
+        return max(candidates, key=lambda r: r["ticket"].combined_probability) if candidates else None
+
+    return [p for p in (_best("kratky"),) if p is not None]
+
+
+def _todays_all_sendable_tickets(target_user_id: int) -> list[dict]:
+    """Na rozdíl od _todays_client_picks (jen NEJLEPŠÍ jeden kratky) appka
+    vrátí VŠECHNY dnešní uložené tikety daného účtu, co jsou ještě
+    poslatelné — appka to potřebuje pro účty s VÍCE tikety denně (viz
+    PERSONAL_TRACKING_USER_ID, 2× kratky + 1× střední)."""
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    rows = [r for r in repo.get_saved_tickets(target_user_id) if _created_at_utc(r) >= today_start_utc]
+    return [r for r in rows if _ticket_still_sendable(r["ticket"])]
+
+
+_YIELD_TEST_RESULTS: dict[str, dict] = {}
+_YIELD_TEST_LOCK = threading.Lock()
+
+
+def _run_generate_yield_test_job(job_id: str) -> None:
+    try:
+        results = []
+        for label, risk_level in (("kratky", 20),):
+            for time_frame_days in (1, 2, 3):
+                matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+                matches = _filter_future_matches(matches, buffer_minutes=5)
+                matches = _filter_within_days(matches, time_frame_days)
+
+                result = ticket_generator.generate(
+                    matches, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, time_frame_days,
+                    pool_filter=_pool_filter_for_risk(risk_level),
+                )
+                outcome = "narrow_window"
+                if result["safe"] is None:
+                    wider_days = time_frame_days + 3
+                    all_wider_matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, wider_days)
+                    all_wider_matches = _filter_future_matches(all_wider_matches, buffer_minutes=5)
+                    wider_result = ticket_generator.generate(
+                        all_wider_matches, risk_level, DAILY_TICKETS_SPORTS, DAILY_TICKETS_MARKETS, wider_days,
+                        pool_filter=_pool_filter_for_risk(risk_level),
+                    )
+                    if wider_result["safe"] is not None:
+                        result = wider_result
+                        outcome = f"widened_to_{wider_days}d"
+                    else:
+                        all_markets = _all_markets_for_sports(DAILY_TICKETS_SPORTS)
+                        markets_result = ticket_generator.generate(
+                            all_wider_matches, risk_level, DAILY_TICKETS_SPORTS, all_markets, wider_days,
+                            pool_filter=_pool_filter_for_risk(risk_level),
+                        )
+                        if markets_result["safe"] is not None:
+                            result = markets_result
+                            outcome = f"widened_to_{wider_days}d_all_markets"
+                        else:
+                            outcome = "failed"
+
+                ticket = result["safe"]
+                results.append({
+                    "type": label,
+                    "requested_time_frame_days": time_frame_days,
+                    "outcome": outcome,
+                    "found": ticket is not None,
+                    "total_odds": ticket.total_odds if ticket else None,
+                    "combined_probability": ticket.combined_probability if ticket else None,
+                    "first_kickoff": min((s.kickoff_date for s in ticket.selections), default=None) if ticket else None,
+                    "last_kickoff": max((s.kickoff_date for s in ticket.selections), default=None) if ticket else None,
+                })
+                # Appka mezi jednotlivými kombinacemi uvolní paměť po širokém
+                # kandidátním poolu — stejná pojistka jako u OOM opravy výše,
+                # tenhle endpoint dělá až 6 širokých generování za sebou.
+                gc.collect()
+
+        with _YIELD_TEST_LOCK:
+            _YIELD_TEST_RESULTS[job_id] = {"status": "done", "results": results}
+    except Exception as e:
+        print(f"[generate-yield-test] selhalo: {e}")
+        with _YIELD_TEST_LOCK:
+            _YIELD_TEST_RESULTS[job_id] = {"status": "error", "detail": str(e)}
+
+
+@app.post("/admin/generate-yield-test")
+def generate_yield_test(request: Request):
+    """
+    Appka tímhle simuluje reálné zákaznické generování (/tickets/generate)
+    — VČETNĚ rozšiřování okna (+3 dny) a fallbacku na ostatní trhy, viz
+    _run_generate_job — pro pár typických voleb time_frame_days, u
+    kratky (20) i stredni (50). Na rozdíl od skutečného volání appka nic
+    NEUKLÁDÁ, NESTRHÁVÁ tokeny ani NEPOSÍLÁ Telegram, jen reportuje, jestli
+    by appka reálně něco vrátila a na kolik dní musela couvnout. Appka to
+    přidala, aby šlo ověřit typický "úlovek" bez dopadu na tokeny/historii
+    testovacích účtů — viz otázka "budou zákazníci s neomezeným tarifem
+    spokojení, když appka najde jen 1 tiket za pár dní?".
+
+    Běží na pozadí (stejný důvod jako u OOM opravy výše — až 6 širokých
+    generování za sebou by appka jinak držela na jednom HTTP requestu
+    klidně 10+ minut) — appka vrací job_id, výsledek appka pollne přes
+    GET /admin/generate-yield-test-result?job_id=...
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    job_id = secrets.token_urlsafe(8)
+    with _YIELD_TEST_LOCK:
+        _YIELD_TEST_RESULTS[job_id] = {"status": "processing"}
+    threading.Thread(target=_run_generate_yield_test_job, args=(job_id,), daemon=True).start()
+    return {"status": "started", "job_id": job_id}
+
+
+@app.get("/admin/generate-yield-test-result")
+def generate_yield_test_result(job_id: str, request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    with _YIELD_TEST_LOCK:
+        return _YIELD_TEST_RESULTS.get(job_id, {"status": "unknown"})
+
+
+@app.get("/admin/test-odds-markets")
+def test_odds_markets(
+    request: Request, sport_key: str = "soccer_epl", markets: str = "h2h,totals,double_chance,totals_h1",
+    event_id: Optional[str] = None,
+):
+    """
+    Jednorázová diagnostika (2026-08-05) — appka zjišťuje, jestli
+    the-odds-api pro evropské bookmakery (region eu) vůbec vrací
+    double_chance a totals_h1 (poločasové góly) trhy, než appka postaví
+    celou funkci kolem nich. Dokumentace the-odds-api appce jasně
+    neřekla, jestli tyhle "rozšířené" trhy pokrývají i EU bookmakery (jen
+    že US sporty ano) — appka to radši ověří živě na jedné lize (pár
+    kreditů), než aby stavěla dvojtip/poločas na datech, co appka
+    nedostane. NIC neukládá, jen appce ukáže syrovou odpověď.
+
+    event_id appka nepovinně přidá — pak volá endpoint NA KONKRÉTNÍ zápas
+    (/events/{id}/odds), kde dokumentace tvrdí, že appka dostane přístup
+    ke VŠEM dostupným trhům (na rozdíl od hromadného /odds, který appka
+    zkusila jako první a dostala INVALID_MARKET).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        odds_provider = data_provider.OddsAPIProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    import requests as _requests
+    url = (
+        f"{odds_provider.BASE_URL}/sports/{sport_key}/events/{event_id}/odds"
+        if event_id else f"{odds_provider.BASE_URL}/sports/{sport_key}/odds"
+    )
+    resp = _requests.get(
+        url,
+        params={"apiKey": odds_provider.api_key, "regions": "eu", "markets": markets, "oddsFormat": "decimal"},
+        timeout=15,
+    )
+    if not resp.ok:
+        return {"status": resp.status_code, "detail": resp.text[:500]}
+
+    if event_id:
+        return resp.json()
+
+    events = resp.json()
+    market_key_counts: dict[str, int] = {}
+    sample_event = None
+    for event in events:
+        found_markets = set()
+        for bm in event.get("bookmakers", []):
+            for m in bm.get("markets", []):
+                found_markets.add(m["key"])
+        for mk in found_markets:
+            market_key_counts[mk] = market_key_counts.get(mk, 0) + 1
+        if sample_event is None and found_markets:
+            sample_event = event
+
+    return {
+        "sport_key": sport_key,
+        "events_total": len(events),
+        "market_key_counts": market_key_counts,
+        "remaining_requests": resp.headers.get("x-requests-remaining"),
+        "used_requests": resp.headers.get("x-requests-used"),
+        "sample_event": sample_event,
+    }
+
+
+@app.get("/admin/test-sportmonks")
+def test_sportmonks(
+    request: Request, day: Optional[str] = None, home_team: Optional[str] = None,
+    away_team: Optional[str] = None,
+):
+    """
+    Jednorázová diagnostika (2026-08-05) — první živé ověření SportMonks
+    tokenu, jakmile ho uživatel založí a pošle (appka SPORTMONKS_KEY jako
+    nový zdroj kurzů zkouší doplnit tam, kde API-Football ani the-odds-api
+    reálnou tržní cenu nemají — viz komentář v data_provider.py u
+    SportMonksProvider). NEUKLÁDÁ nic, jen appce ukáže syrovou odpověď,
+    ať se dá ověřit skutečný JSON tvar (market_description/label/value
+    konstanty v adapt_sportmonks_odds jsou zatím jen odhad z veřejné
+    dokumentace, ne z reálného callu).
+
+    Bez home_team/away_team appka vrátí jen syrový seznam zápasů daného
+    dne (day, default dnes) — pro rychlou kontrolu, že appka vůbec vidí
+    očekávanou ligu (Fortuna liga, Peru Liga 1). S oběma appka navíc
+    zkusí fuzzy spárování a rovnou spočítá adapt_sportmonks_odds.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        sm_provider = data_provider.SportMonksProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    from datetime import date as _date
+    target_day = _date.fromisoformat(day) if day else _date.today()
+
+    if home_team and away_team:
+        match = sm_provider.find_matching_fixture(target_day, home_team, away_team)
+        if match is None:
+            return {"status": "no_match", "day": target_day.isoformat(), "home_team": home_team, "away_team": away_team}
+        return {"status": "matched", "raw_fixture": match, "adapted_odds": data_provider.adapt_sportmonks_odds(match)}
+
+    fixtures = sm_provider.get_fixtures_by_date(target_day)
+    return {
+        "day": target_day.isoformat(),
+        "fixtures_total": len(fixtures),
+        "sample_fixtures": [
+            {
+                "id": fx.get("id"),
+                "league_id": fx.get("league_id"),
+                "participants": [
+                    {"name": p.get("name"), "location": p.get("meta", {}).get("location")}
+                    for p in fx.get("participants", [])
+                ],
+                "has_odds": bool(fx.get("odds")),
+            }
+            for fx in fixtures[:20]
+        ],
+    }
+
+
+@app.get("/admin/test-oddspapi")
+def test_oddspapi(
+    request: Request, league_id: Optional[int] = None, home_team: Optional[str] = None,
+    away_team: Optional[str] = None, kickoff_date: Optional[str] = None,
+    country: Optional[str] = None, league_name: Optional[str] = None,
+):
+    """
+    Diagnostika pro živě AKTIVNÍ třetí zdroj kurzů (2026-08-05, na rozdíl
+    od SportMonks výše appka OddsPapi ověřila naostro a zapojila do
+    _enrich_with_oddspapi). Admin-key gated, NIC neukládá.
+
+    Použití:
+    - league_id + home_team + away_team (+ volitelně kickoff_date) —
+      appka projde přesně tu cestu, co používá při generování: najde
+      tournamentId v ODDSPAPI_TOURNAMENT_IDS, spáruje zápas, spočítá
+      adapt_oddspapi_odds. Bez mapování appka vrátí status "no_mapping".
+    - country + league_name (bez league_id) — appka spustí
+      find_tournament_candidates (fuzzy hledání), užitečné při dohledávání
+      DALŠÍHO tournamentId pro rozšíření ODDSPAPI_TOURNAMENT_IDS.
+    - Bez ničeho appka jen ověří, že klíč funguje (GET /account).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        op_provider = data_provider.OddsPapiProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if league_id and home_team and away_team:
+        tournament_id = data_provider.ODDSPAPI_TOURNAMENT_IDS.get(league_id)
+        if tournament_id is None:
+            return {"status": "no_mapping", "league_id": league_id, "known_mappings": data_provider.ODDSPAPI_TOURNAMENT_IDS}
+        fixture = op_provider.find_matching_fixture(tournament_id, home_team, away_team, kickoff_date)
+        if fixture is None:
+            return {"status": "no_match", "tournament_id": tournament_id, "home_team": home_team, "away_team": away_team}
+        raw = op_provider.get_odds(fixture["fixtureId"])
+        return {"status": "matched", "fixture": fixture, "adapted_odds": data_provider.adapt_oddspapi_odds(raw)}
+
+    if country and league_name:
+        candidates = op_provider.find_tournament_candidates(country, league_name)
+        return {"candidates": [{"score": round(s, 3), "tournament": t} for s, t in candidates]}
+
+    import requests as _requests
+    resp = _requests.get(f"{op_provider.BASE_URL}/account", params={"apiKey": op_provider.api_key}, timeout=10)
+    return {"status": resp.status_code, "account": resp.json() if resp.ok else resp.text[:500]}
+
+
+@app.get("/admin/test-dixon-coles")
+def test_dixon_coles(
+    request: Request, league_id: int, season: Optional[int] = None,
+    home_team_id: Optional[int] = None, away_team_id: Optional[int] = None,
+):
+    """
+    Diagnostika (2026-08-06) pro ruční ověření Dixon-Coles fitu PŘED
+    zapnutím DIXON_COLES_ENABLED naostro — appka NIC neukládá a nijak
+    neovlivňuje živé generování, jen appce fituje a rovnou ukáže
+    výsledek. Admin-key gated.
+
+    - Bez home_team_id/away_team_id appka vrátí souhrn: kolik zápasů appka
+      fitovala, jestli fit zkonvergoval, a TOP 5 nejsilnějších/nejslabších
+      týmů podle attack/defense — rychlá "vypadá to rozumně?" kontrola.
+    - S oběma team_id appka navíc spočítá konkrétní DC xG pro ten zápas.
+
+    season appka nechá appce doplnit sama (_season_year_for_league), pokud
+    ho nezadáš.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    try:
+        provider = data_provider.APIFootballProvider()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    from datetime import date as _date
+    resolved_season = season or data_provider._season_year_for_league(league_id, _date.today())
+
+    strengths = data_provider.get_dixon_coles_strengths(provider, league_id, resolved_season)
+    if strengths is None:
+        import probability_model as _pm
+        return {
+            "status": "no_fit", "league_id": league_id, "season": resolved_season,
+            "detail": (
+                f"Appka nemá dost dat (min {_pm.DIXON_COLES_MIN_MATCHES} odehraných zápasů, "
+                f"min {_pm.DIXON_COLES_MIN_TEAMS} týmů) nebo fit selhal — appka by v produkci "
+                "spadla zpátky na starý heuristický odhad."
+            ),
+        }
+
+    teams = strengths["teams"]
+    ranked_attack = sorted(teams.items(), key=lambda kv: kv[1]["attack"], reverse=True)
+    ranked_defense = sorted(teams.items(), key=lambda kv: kv[1]["defense"])  # nižší = lepší obrana
+
+    result = {
+        "status": "fitted",
+        "league_id": league_id,
+        "season": resolved_season,
+        "sample_size": strengths["sample_size"],
+        "converged": strengths["converged"],
+        "league_avg_goals": strengths["league_avg_goals"],
+        "teams_total": len(teams),
+        "top5_attack": ranked_attack[:5],
+        "top5_defense": ranked_defense[:5],
+        "bottom5_attack": ranked_attack[-5:],
+    }
+
+    if home_team_id and away_team_id:
+        dc_xg = data_provider.dixon_coles_expected_goals(home_team_id, away_team_id, strengths)
+        result["match_xg"] = {
+            "home_team_id": home_team_id, "away_team_id": away_team_id,
+            "dixon_coles_xg": dc_xg,
+            "note": "None znamená, že appka pro jeden z týmů nemá zafitovaná čísla (nováček/chybné ID).",
+        }
+
+    return result
+
+
+class DixonColesSettingRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/dixon-coles")
+def get_dixon_coles_setting(user_id: int = Depends(get_current_user_id)):
+    """
+    Appka-interní přepínač (NE admin-key) — appka tenhle endpoint volá
+    přímo z appky (viz frontend tlačítko u generování), přihlášení stačí
+    obyčejným uživatelským tokenem. can_edit appka appce ukáže true jen
+    pro účty z ADMIN_APP_EMAILS (viz výš) — appka tlačítko normálním
+    uživatelům vůbec nezobrazí (frontend se podle can_edit rozhoduje),
+    ale i kdyby appka na frontendu udělala chybu, POST níže si to appka
+    ověří znovu na serveru.
+    """
+    return {"enabled": _is_dixon_coles_enabled(), "can_edit": _is_admin_app_user(user_id)}
+
+
+@app.post("/settings/dixon-coles")
+def set_dixon_coles_setting(payload: DixonColesSettingRequest, user_id: int = Depends(get_current_user_id)):
+    if not _is_admin_app_user(user_id):
+        raise HTTPException(status_code=403, detail="Tenhle přepínač může měnit jen admin účet appky")
+    db.set_setting(DIXON_COLES_SETTING_KEY, "true" if payload.enabled else "false")
+    return {"enabled": payload.enabled}
+
+
+@app.get("/admin/edge-diagnostic")
+def edge_diagnostic(request: Request, time_frame_days: int = 5, min_prob: float = 0.65):
+    """
+    Jednorázová diagnostika (2026-08-05) — appka opakovaně vidí "Tiket se
+    nepovedl" i se stovkami kandidátů, appka to chce reálně vidět na
+    číslech, ne jen předpokládat "appka je opatrná". Vrátí pro každého
+    OVĚŘENÉHO kandidáta (má tržní kurz) appčin model_probability, tržní
+    market_probability, kurz appky pro staking a výsledný edge (kladný/
+    záporný, s kolika procenty). Řazeno od nejlepšího edge, appka vidí
+    hned, jestli je appka jen "těsně pod nulou" (marže bookmakera) nebo
+    appka reálně nikdy nemá šanci.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    pool = []
+    for m in matches:
+        pool.extend([
+            c for c in MarketEvaluator.build_candidates(m, min_prob=min_prob)
+            if c.market_type in DAILY_TICKETS_MARKETS
+        ])
+
+    verified = [c for c in pool if c.market_probability is not None]
+    rows = []
+    for c in verified:
+        edge_prob = edge_capped_model_probability(c)
+        kelly = kelly_stake_fraction(edge_prob, c.odds)
+        rows.append({
+            "match": f"{c.home_team} vs {c.away_team}",
+            "market": c.market_type.value, "selection": c.selection,
+            "model_probability": round(c.model_probability, 4),
+            "market_probability": round(c.market_probability, 4),
+            "edge_capped_model_probability": round(edge_prob, 4),
+            "odds": c.odds,
+            "implied_by_odds": round(1.0 / c.odds, 4),
+            "kelly_stake_fraction": round(kelly, 4),
+            "positive_edge": kelly > 0,
+        })
+    rows.sort(key=lambda r: r["kelly_stake_fraction"], reverse=True)
+
+    return {
+        "time_frame_days": time_frame_days,
+        "total_pool": len(pool),
+        "verified_with_market_odds": len(verified),
+        "positive_edge_count": sum(1 for r in rows if r["positive_edge"]),
+        "top_20_by_edge": rows[:20],
+        "bottom_5_by_edge": rows[-5:] if len(rows) >= 5 else rows,
+    }
+
+
+@app.get("/admin/stripe-account-info")
+def admin_stripe_account_info(request: Request):
+    """Diagnostický endpoint appka appce přidala na jedno ověření — appka
+    přes API nevidí bankovní účet ani karty (Stripe tohle záměrně
+    nezpřístupňuje), jen jméno účtu a historii produktů, ať appka appce
+    pomůže zjistit, jestli appka jede na novém nebo starém Stripe účtu."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Platby zatím nejsou nastavené")
+
+    try:
+        account = stripe.Account.retrieve()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe chyba (Account.retrieve): {e}")
+
+    try:
+        products = stripe.Product.list(limit=100)
+        product_list = [
+            {"id": p["id"], "name": p.get("name"), "created": p.get("created"), "active": p.get("active")}
+            for p in products.get("data", [])
+        ]
+    except Exception as e:
+        product_list = [{"error": str(e)}]
+
+    try:
+        balance = stripe.Balance.retrieve()
+        balance_summary = {
+            "available": [{"amount": b["amount"] / 100, "currency": b["currency"]} for b in balance.get("available", [])],
+            "pending": [{"amount": b["amount"] / 100, "currency": b["currency"]} for b in balance.get("pending", [])],
+        }
+    except Exception as e:
+        balance_summary = {"error": str(e)}
+
+    try:
+        external_accounts = (account.get("external_accounts") or {}).get("data", [])
+        payout_targets = [
+            {
+                "type": ea.get("object"),
+                "bank_name": ea.get("bank_name"),
+                "last4": ea.get("last4"),
+                "currency": ea.get("currency"),
+                "default_for_currency": ea.get("default_for_currency"),
+            }
+            for ea in external_accounts
+        ]
+    except Exception as e:
+        payout_targets = [{"error": str(e)}]
+
+    try:
+        payouts = stripe.Payout.list(limit=10)
+        payout_list = [
+            {"id": p["id"], "amount": p["amount"] / 100, "currency": p["currency"], "status": p["status"], "arrival_date": p["arrival_date"]}
+            for p in payouts.get("data", [])
+        ]
+    except Exception as e:
+        payout_list = [{"error": str(e)}]
+
+    try:
+        customers = stripe.Customer.list(limit=1)
+        customer_count_note = "appka umí jen nahlédnout do posledních záznamů, ne přesný celkový počet bez stránkování"
+    except Exception as e:
+        customers = None
+        customer_count_note = str(e)
+
+    try:
+        webhooks = stripe.WebhookEndpoint.list(limit=20)
+        webhook_list = [{"url": w["url"], "status": w["status"], "enabled_events": w["enabled_events"]} for w in webhooks.get("data", [])]
+    except Exception as e:
+        webhook_list = [{"error": str(e)}]
+
+    return {
+        "account_id": account.get("id"),
+        "business_name": (account.get("business_profile") or {}).get("name"),
+        "email": account.get("email"),
+        "country": account.get("country"),
+        "created": account.get("created"),
+        "charges_enabled": account.get("charges_enabled"),
+        "payouts_enabled": account.get("payouts_enabled"),
+        "balance_kc": balance_summary,
+        "payout_targets": payout_targets,
+        "recent_payouts": payout_list,
+        "customers_note": customer_count_note,
+        "webhook_endpoints": webhook_list,
+        "products": sorted(product_list, key=lambda p: p.get("created", 0)),
+    }
+
+
+@app.get("/admin/probability-distribution")
+def probability_distribution(request: Request, time_frame_days: int = 2):
+    """
+    Appka (2026-08-15) potřebuje vidět, KDE přesně appce mizí kandidáti —
+    /admin/odds-coverage-sample ukázal, že kurzy appka má u VŠECH
+    vzorkovaných zápasů, takže hrdlo lahve musí být v samotném
+    pravděpodobnostním filtrování. Appka tady projede VŠECHNY zápasy dne
+    JEN JEDNOU (min_prob=0, appka si prahy spočítá sama z výsledků —
+    na rozdíl od /admin/candidate-pool-preview, co appka volá
+    build_candidates 6× pro 6 různých prahů, tohle appku stojí jen
+    1/6 výpočtu), a rozdělí kandidáty do bucketů podle probability —
+    appka tak uvidí, jestli je model prostě 'nejistý' (hodně kandidátů
+    pod 50 %), nebo appka přichází o kandidáty těsně pod appčiným
+    prahem (hodně jich je 55-65 %).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+
+    buckets = {"<50%": 0, "50-60%": 0, "60-65%": 0, "65-70%": 0, "70-75%": 0, "75-80%": 0, "80%+": 0}
+    by_market: dict[str, dict] = {}
+
+    def bucket_for(p: float) -> str:
+        if p < 0.50: return "<50%"
+        if p < 0.60: return "50-60%"
+        if p < 0.65: return "60-65%"
+        if p < 0.70: return "65-70%"
+        if p < 0.75: return "70-75%"
+        if p < 0.80: return "75-80%"
+        return "80%+"
+
+    total_raw_candidates = 0
+    for m in matches:
+        for c in MarketEvaluator.build_candidates(m, min_prob=0.0):
+            total_raw_candidates += 1
+            buckets[bucket_for(c.probability)] += 1
+            mstat = by_market.setdefault(c.market_type.value, {"count": 0, "sum_prob": 0.0})
+            mstat["count"] += 1
+            mstat["sum_prob"] += c.probability
+
+    by_market_avg = {
+        k: {"count": v["count"], "avg_probability": round(v["sum_prob"] / v["count"], 3)}
+        for k, v in by_market.items()
+    }
+
+    return {
+        "time_frame_days": time_frame_days,
+        "fixtures_checked": len(matches),
+        "total_raw_candidates_any_probability": total_raw_candidates,
+        "probability_buckets": buckets,
+        "by_market": by_market_avg,
+    }
+
+
+@app.get("/admin/odds-coverage-sample")
+def odds_coverage_sample(request: Request, sample_size: int = 15):
+    """
+    Appka (2026-08-15) potřebuje zjistit, jestli appce chybí kandidáti
+    kvůli tomu, že appka na zápasy ještě nemá kurzy (bookmakeři je prostě
+    ještě nezveřejnili), nebo kvůli bugu ve zpracování. Na rozdíl od
+    /admin/candidate-pool-preview appka tady NEPOČÍTÁ kandidáty přes 6
+    prahů pro VŠECHNY zápasy — appka jen vezme prvních `sample_size`
+    zápasů dne (ze stejné 30min cache, žádné nové drahé volání navíc) a
+    zeptá se appčina PRIMÁRNÍHO zdroje kurzů (API-Football /odds) přímo,
+    kolik z nich má bookmakery. Výrazně levnější, appka tohle klidně
+    zavolá bez rizika, že appce znovu spadne server.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    raw_fixtures = provider.get_upcoming_matches(Sport.FOOTBALL, 1)
+    sample = raw_fixtures[:sample_size]
+
+    results = []
+    for raw in sample:
+        fixture = data_provider.adapt_api_football_fixture(raw)
+        try:
+            odds_raw = provider.get_pre_match_odds(fixture["id"])
+            bookmaker_count = len(odds_raw.get("bookmakers", []))
+        except Exception as e:
+            bookmaker_count = None
+            results.append({
+                "match": f"{fixture['home_team']} - {fixture['away_team']}",
+                "league_id": fixture.get("league_id"), "error": str(e),
+            })
+            continue
+        results.append({
+            "match": f"{fixture['home_team']} - {fixture['away_team']}",
+            "league_id": fixture.get("league_id"),
+            "kickoff": fixture.get("kickoff_time"),
+            "bookmaker_count": bookmaker_count,
+            "has_odds": bookmaker_count is not None and bookmaker_count > 0,
+        })
+
+    with_odds = sum(1 for r in results if r.get("has_odds"))
+    return {
+        "total_fixtures_today": len(raw_fixtures),
+        "sampled": len(sample),
+        "with_odds": with_odds,
+        "without_odds": len(sample) - with_odds,
+        "results": results,
+    }
+
+
+# Appka (2026-09-21, David se ptal, jestli nízké párování 17/71 s
+# the-odds-api je chyba matchingu jmen, nebo appka na tu ligu prostě
+# nemá zdroj) tenhle práh appka NEpoužívá k rozhodnutí, jestli spárovat —
+# to pořád dělá výhradně find_matching_odds_event s _NAME_MATCH_THRESHOLD
+# (0.84). Appka ho používá JEN tady, na klasifikaci PROČ zápas nenašel
+# shodu, ať je vidět rozdíl mezi "the-odds-api tuhle ligu/zápas vůbec
+# nemá" (best_score hluboko pod prahem) a "the-odds-api ho asi má, jen
+# jinak napsané jméno" (best_score blízko prahu, ale appka byla schválně
+# přísná).
+ODDS_DIAGNOSTIC_NEAR_MISS_FLOOR = 0.55
+
+
+@app.get("/admin/odds-match-diagnostic")
+def odds_match_diagnostic(request: Request, time_frame_days: int = 1):
+    """
+    Appka tu levně (bez drahého _build_football_matches, jen
+    adapt_api_football_fixture — žádných 6 síťových volání na zápas) pro
+    KAŽDÝ appky dnešní zápas z TIPSPORT_LEAGUE_IDS zjistí, jestli ho
+    appka na the-odds-api napárovala, a když ne, appka i tak najde
+    NEJLEPŠÍ shodu (i pod appčiným standardním prahem 0.84) a její skóre.
+    Appka to rozdělí do 3 skupin:
+      - "matched": appka reálně spárovala (stejná logika/práh jako naživo)
+      - "near_miss": appka nespárovala, ale nejlepší kandidát je appce
+        podezřele blízko (skóre nad ODDS_DIAGNOSTIC_NEAR_MISS_FLOOR) —
+        tady by úprava matchingu (aliasy, práh) měla smysl
+      - "not_in_source": appka nenašla nic ani zdaleka podobného — appka
+        na tuhle ligu/zápas the-odds-api nejspíš vůbec nemá (strukturální
+        mezera, viz SPORT_KEYS), žádný matching by tady nepomohl
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    raw_fixtures = provider.get_upcoming_matches(Sport.FOOTBALL, time_frame_days)
+    fixtures = [data_provider.adapt_api_football_fixture(f) for f in raw_fixtures]
+
+    try:
+        odds_provider = data_provider.OddsAPIProvider()
+    except RuntimeError:
+        raise HTTPException(status_code=500, detail="ODDSAPI_KEY není nastavený — appka nemůže nic párovat.")
+    events = odds_provider.get_odds(Sport.FOOTBALL)
+
+    matched, near_miss, not_in_source = [], [], []
+    for fx in fixtures:
+        kickoff_date = (fx.get("kickoff_time") or "")[:10] or None
+        event = data_provider.find_matching_odds_event(events, fx["home_team"], fx["away_team"], kickoff_date)
+        entry = {
+            "match": f"{fx['home_team']} – {fx['away_team']}",
+            "league": fx.get("league"), "country": fx.get("country"), "league_id": fx.get("league_id"),
+        }
+        if event is not None:
+            matched.append(entry)
+            continue
+
+        # Appka tady schválně IGNORUJE appčin standardní práh i appčinu
+        # ochranu proti nejednoznačnosti — appka tu jen chce vidět appky
+        # nejlepší kandidát, ne rozhodnout, jestli by se dal použít.
+        norm_home = data_provider._normalize_team_name(fx["home_team"])
+        norm_away = data_provider._normalize_team_name(fx["away_team"])
+        best_score, best_teams = 0.0, None
+        for ev in events:
+            hs = data_provider._name_similarity(norm_home, data_provider._normalize_team_name(ev.get("home_team", "")))
+            as_ = data_provider._name_similarity(norm_away, data_provider._normalize_team_name(ev.get("away_team", "")))
+            score = min(hs, as_)
+            if score > best_score:
+                best_score = score
+                best_teams = f"{ev.get('home_team')} – {ev.get('away_team')}"
+
+        entry["best_score"] = round(best_score, 2)
+        entry["closest_odds_api_match"] = best_teams
+        if best_score >= ODDS_DIAGNOSTIC_NEAR_MISS_FLOOR:
+            near_miss.append(entry)
+        else:
+            not_in_source.append(entry)
+
+    not_in_source_by_country: dict[str, int] = {}
+    for e in not_in_source:
+        c = e.get("country") or "?"
+        not_in_source_by_country[c] = not_in_source_by_country.get(c, 0) + 1
+
+    return {
+        "total_fixtures": len(fixtures),
+        "events_from_odds_api": len(events),
+        "matched_count": len(matched),
+        "near_miss_count": len(near_miss),
+        "not_in_source_count": len(not_in_source),
+        "near_miss": near_miss,
+        "not_in_source_by_country": dict(sorted(not_in_source_by_country.items(), key=lambda x: -x[1])),
+        "not_in_source_sample": not_in_source[:20],
+    }
+
+
+@app.get("/admin/candidate-pool-preview")
+def candidate_pool_preview(request: Request, time_frame_days: int = 2):
+    """Čistě informativní přehled — kolik zápasů appka dnes stáhla a kolik
+    z nich prošlo jako kandidát na 70%/65% prahu (stejná čísla, co appka
+    jinak jen loguje jako '[kratky] 70%: N kandidátů'). NIC neukládá,
+    NIC neposílá — bezpečné volat kdykoli ke kontrole, jestli appka má
+    dost zápasů na to, aby denní generování mělo z čeho vybírat. Používá
+    stejnou cache jako reálné generování (zápasy 30 min, statistiky
+    24 h), takže krátce po skutečném běhu je skoro zadarmo."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+
+    candidates_by_threshold = {}
+    candidates_by_market_65 = {}
+    for threshold in (0.75, 0.73, 0.72, 0.71, 0.70, 0.65):
+        pool = []
+        for m in matches:
+            pool.extend([
+                c for c in MarketEvaluator.build_candidates(m, min_prob=threshold)
+                if c.market_type in DAILY_TICKETS_MARKETS
+            ])
+        candidates_by_threshold[f"{int(threshold * 100)}%"] = len(pool)
+        if threshold == 0.65:
+            for c in pool:
+                candidates_by_market_65[c.market_type.value] = candidates_by_market_65.get(c.market_type.value, 0) + 1
+
+    # Dočasná diagnostika (viz nahlášený "appka nic nevygenerovala") —
+    # kolik zápasů má appka spolehlivou formu (games_played>=6 NEBO
+    # home/away_recent_form_available) a kolik jich bez ní zůstává
+    # zavřených pro over góly/BTTS.
+    reliable_form_count = 0
+    blocked_by_form_count = 0
+    for m in matches:
+        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
+        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
+        if home_reliable and away_reliable:
+            reliable_form_count += 1
+        else:
+            blocked_by_form_count += 1
+
+    return {
+        "time_frame_days": time_frame_days,
+        "fixtures_fetched": len(matches),
+        "candidates_by_threshold": candidates_by_threshold,
+        "candidates_by_market_at_65pct": candidates_by_market_65,
+        "reliable_form_count": reliable_form_count,
+        "blocked_by_form_count": blocked_by_form_count,
+    }
+
+
+@app.get("/admin/candidate-pool-detail")
+def candidate_pool_detail(request: Request, time_frame_days: int = 2, min_prob: float = 0.65):
+    """Appka na uživatelovo přání ("chci je vidět") k /admin/candidate-pool-preview
+    doplňuje verzi se skutečným seznamem zápasů — kdo hraje, jaký trh/výběr,
+    appčina pravděpodobnost i tržní kurz a edge. Čistě informativní, nic
+    neukládá ani neposílá, stejná bezpečná cache jako preview."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    matches = _fetch_candidate_matches(DAILY_TICKETS_SPORTS, time_frame_days)
+    pool: list[SelectionCandidate] = []
+    for m in matches:
+        pool.extend([
+            c for c in MarketEvaluator.build_candidates(m, min_prob=min_prob)
+            if c.market_type in DAILY_TICKETS_MARKETS
+        ])
+    pool.sort(key=lambda c: c.probability, reverse=True)
+
+    return {
+        "time_frame_days": time_frame_days,
+        "min_prob": min_prob,
+        "count": len(pool),
+        "candidates": [
+            {
+                "match_id": c.match_id,
+                "match": f"{c.home_team} - {c.away_team}",
+                "home_team": c.home_team,
+                "away_team": c.away_team,
+                "league": c.league,
+                "country": c.country,
+                "kickoff": f"{c.kickoff_date} {c.kickoff_time}",
+                "kickoff_date": c.kickoff_date,
+                "kickoff_time": c.kickoff_time,
+                "market": c.market_type.value,
+                "selection": c.selection,
+                "probability_pct": round(c.probability * 100, 1),
+                "model_probability_pct": round(c.model_probability * 100, 1),
+                "market_probability_pct": round(c.market_probability * 100, 1) if c.market_probability is not None else None,
+                "odds": c.odds,
+                "edge_pct": round(c.edge * 100, 1) if c.edge is not None else None,
+                "reasoning": c.reasoning,
+                "data_quality": c.data_quality,
+            }
+            for c in pool
+        ],
+    }
+
+
+DAILY_TICKET_APPROVAL_SETTING_KEY = "daily_ticket_approved"
+DAILY_TICKET_SENT_SETTING_KEY = "daily_ticket_sent"
+
+
+def _todays_agent_candidate_tickets() -> list[dict]:
+    """Sesbírá VŠECHNY dnešní tikety, co appka může nabídnout ke schválení
+    pro agenty/odběratele — appčin vlastní kanál (DAILY_TICKETS_USER_ID,
+    jeden nejlepší kratky) PLUS appky osobní sledovací účet
+    (PERSONAL_TRACKING_USER_ID, 2× kratky + 1× střední), co appka dřív
+    posílala jen appce majiteli soukromě a agenti/odběratelé je vůbec
+    neviděli (uživatelovo přání 2026-08-28 — chce je mít na výběr taky).
+    Duplicity (stejná sada zápasů+tipů z obou zdrojů) appka vynechá."""
+    picks = []
+    seen_signatures = set()
+
+    def _signature(ticket):
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket.selections))
+
+    channel_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if channel_user_id_raw:
+        for r in _todays_client_picks(int(channel_user_id_raw)):
+            sig = _signature(r["ticket"])
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            picks.append({**r, "source": "kanál"})
+
+    tracking_user_id_raw = os.environ.get("PERSONAL_TRACKING_USER_ID")
+    if tracking_user_id_raw:
+        for r in _todays_all_sendable_tickets(int(tracking_user_id_raw)):
+            sig = _signature(r["ticket"])
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            picks.append({**r, "source": "osobní sledovací"})
+
+    return picks
+
+
+@app.get("/admin/client-tickets-preview")
+def client_tickets_preview(request: Request):
+    """Ukáže, co by appka DNES mohla poslat odběratelům/agentům (bez
+    odeslání) — ke kontrole před schválením. Může jich být VÍC než jeden
+    (viz _todays_agent_candidate_tickets), každý appka schvaluje a odesílá
+    ZVLÁŠŤ (viz /admin/daily-ticket/approve a /admin/client-tickets-send,
+    obojí teď bere ticket_id)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    picks = _todays_agent_candidate_tickets()
+    subscriber_count = len(db.get_active_telegram_subscribers())
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+
+    return {
+        "subscriber_count": subscriber_count,
+        "picks": [
+            {
+                "ticket_id": r["ticket_id"],
+                "ticket_type": r["ticket"].ticket_type,
+                "source": r["source"],
+                "total_odds": r["ticket"].total_odds,
+                "combined_probability": r["ticket"].combined_probability,
+                # Výkop appka do náhledu přidala schválně (viz
+                # _ticket_still_sendable) — bez něj nejde ručně ověřit,
+                # jestli filtr na "ještě nezačaté zápasy" vůbec dělá něco.
+                "selections": [
+                    f"{s.home_team} – {s.away_team} ({s.selection}, {s.odds}) @ {s.kickoff_date} {s.kickoff_time} UTC"
+                    for s in r["ticket"].selections
+                ],
+                "already_approved": r["ticket_id"] in approved_ids,
+                "already_sent": r["ticket_id"] in sent_ids,
+            }
+            for r in picks
+        ],
+    }
+
+
+class ApproveDailyTicketRequest(BaseModel):
+    ticket_id: int
+
+
+@app.post("/admin/daily-ticket/approve")
+def approve_daily_ticket(req: ApproveDailyTicketRequest, request: Request):
+    """Ruční schválení JEDNOHO konkrétního dnešního tiketu — appka ho
+    PŘIDÁ do seznamu dnes schválených (může jich být víc, viz
+    _todays_agent_candidate_tickets), ne že by přepsala předchozí
+    schválení. Bez tohohle appka /admin/client-tickets-send odmítne
+    tenhle konkrétní tiket poslat. Váže se na dnešní datum, takže platí
+    jen pro tenhle den (uživatel 2026-08-26 chtěl schvalovat KAŽDÝ den
+    zvlášť)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+    approved_ids.add(req.ticket_id)
+    db.set_setting(DAILY_TICKET_APPROVAL_SETTING_KEY, json.dumps({"date": today_prague, "ticket_ids": sorted(approved_ids)}))
+    return {"approved_date": today_prague, "ticket_id": req.ticket_id}
+
+
+@app.post("/admin/client-tickets-send")
+def client_tickets_send(ticket_id: int, request: Request):
+    """Po ruční kontrole (viz /admin/client-tickets-preview) rozešle JEDEN
+    konkrétní schválený tiket všem aktivním odběratelům + prodejcům.
+    appka tenhle krok odmítne provést bez předchozího /admin/daily-ticket/
+    approve na dnešní datum a stejný ticket_id — appka to VYNUCUJE
+    (uživatel 2026-08-26 výslovně chtěl vidět každý tiket dřív, než se
+    pošle, ne jen mít tlačítko, co by šlo obejít). Může se to zavolat víckrát
+    denně pro RŮZNÉ ticket_id (kanál i appky osobní sledovací účet, viz
+    _todays_agent_candidate_tickets) — uživatel 2026-08-28 chtěl mít na
+    výběr víc než jeden tiket denně, ne jen ten jeden appčin kanálový."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    picks = _todays_agent_candidate_tickets()
+    pick = next((p for p in picks if p["ticket_id"] == ticket_id), None)
+    if pick is None:
+        raise HTTPException(status_code=404, detail="Tenhle tiket appka dnes nemá k odeslání.")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_approval = db.get_setting(DAILY_TICKET_APPROVAL_SETTING_KEY)
+    approval = json.loads(raw_approval) if raw_approval else None
+    approved_ids = set(approval.get("ticket_ids", [])) if approval and approval.get("date") == today_prague else set()
+    if ticket_id not in approved_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenhle tiket ještě není schválený — nejdřív ho schval na /admin-prodejci.",
+        )
+
+    # Appka bez tohohle nemá žádnou pojistku proti dvojímu odeslání — druhé
+    # kliknutí na "Schválit a odeslat" (např. po refreshi stránky, kde appka
+    # dřív pořád ukazovala stejnou kartu, i když už byl tiket odeslaný) by
+    # poslalo tiket stejným lidem znovu.
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if ticket_id in sent_ids:
+        raise HTTPException(status_code=409, detail="Tenhle tiket appka dnes už jednou odeslala.")
+
+    # Rozesílka se ptá VÝHRADNĚ na platící (get_paid_telegram_subscribers
+    # dělá JOIN na subscriptions). get_active_telegram_subscribers() by
+    # vrátilo i všechny, kdo si kdy jen napsali /start — tedy i lidi bez
+    # jediné zaplacené koruny.
+    recipients = db.get_paid_telegram_subscribers()
+    # Prodejci appce nejsou "platící odběratelé appčina kanálu" (get_paid_
+    # telegram_subscribers je nenajde), ale appka jim tikety posílá stejně
+    # — appka jim dává obsah k přeposlání do jejich vlastního kanálu.
+    seller_recipients = db.get_active_sellers_with_telegram()
+
+    results = []
+    for recipient in recipients:
+        chat_id = recipient["chat_id"]
+        try:
+            ticket_telegram.send_ticket_to_telegram(_ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), chat_id=chat_id)
+            results.append({"chat_id": chat_id, "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "status": f"error: {e}"})
+
+    for seller in seller_recipients:
+        chat_id = seller["telegram_chat_id"]
+        try:
+            # watermark=False — prodejce tenhle obrázek přeposílá dál pod
+            # svým vlastním jménem, appčin vodoznak by tam prozrazoval
+            # appku jako zdroj (uživatelovo přání 2026-08-26).
+            ticket_telegram.send_ticket_to_telegram(
+                _ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), chat_id=chat_id, watermark=False,
+            )
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": "sent"})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "seller_code": seller["seller_code"], "status": f"error: {e}"})
+
+    sent_ids.add(ticket_id)
+    db.set_setting(DAILY_TICKET_SENT_SETTING_KEY, json.dumps({"date": today_prague, "ticket_ids": sorted(sent_ids)}))
+
+    return {
+        "ticket_id": ticket_id,
+        "recipients": len(recipients),
+        "seller_recipients": len(seller_recipients),
+        "results": results,
+    }
+
+
+
+class SellerSendTicketRequest(BaseModel):
+    seller_code: str
+
+
+@app.post("/admin/sellers/send-test-ticket")
+def admin_sellers_send_test_ticket(req: SellerSendTicketRequest, request: Request):
+    """Pošle dnešní tiket(y) jednomu konkrétnímu prodejci — na test,
+    jestli mu propojení Telegramu funguje, bez nutnosti pouštět celou
+    hromadnou rozesílku /admin/client-tickets-send znovu."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    seller = db.get_seller_by_code_any(req.seller_code.strip())
+    if not seller:
+        raise HTTPException(status_code=404, detail="Prodejce s tímhle kódem appka nenašla.")
+    if not seller.get("active"):
+        raise HTTPException(status_code=400, detail="Tenhle prodejce ještě není schválený.")
+    if not seller.get("telegram_chat_id"):
+        raise HTTPException(status_code=400, detail="Tenhle prodejce nemá propojený Telegram.")
+
+    target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not target_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+
+    picks = _todays_client_picks(int(target_user_id_raw))
+    if not picks:
+        raise HTTPException(status_code=404, detail="Dnešní tikety appka ještě nevygenerovala.")
+
+    chat_id = seller["telegram_chat_id"]
+    results = []
+    for r in picks:
+        try:
+            ticket_telegram.send_ticket_to_telegram(
+                _ticket_to_telegram_dict(r["ticket"], r["ticket_id"]), chat_id=chat_id, watermark=False,
+            )
+            results.append({"ticket_id": r["ticket_id"], "status": "sent"})
+        except Exception as e:
+            results.append({"ticket_id": r["ticket_id"], "status": f"error: {e}"})
+
+    return {"seller_code": seller["seller_code"], "display_name": seller["display_name"], "results": results}
+
+
+@app.post("/admin/telegram-sync")
+def admin_telegram_sync(request: Request):
+    """
+    Uklidí Telegram po lidech, kterým předplatné doběhlo — pošle jim
+    zprávu proč a označí je jako neaktivní. Rozesílka je sice vynechá
+    i bez tohohle (ptá se na platnost při každém běhu), ale bez zprávy
+    by se nikdy nedozvěděli, že jim tikety přestaly chodit záměrně.
+    Pouštět stejnou naplánovanou úlohou jako denní tikety.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    lapsed = db.get_lapsed_telegram_chats()
+    for row in lapsed:
+        _send_telegram_message(row["chat_id"], TELEGRAM_EXPIRED_MESSAGE)
+        db.set_telegram_chat_active(row["chat_id"], False)
+
+    return {"deactivated": len(lapsed), "chat_ids": [r["chat_id"] for r in lapsed]}
+
+
+TELEGRAM_WELCOME_MESSAGE = (
+    "Ahoj! 👋 Účet je spárovaný, předplatné máš aktivní.\n\n"
+    "Od teď ti sem budu každé ráno posílat 1 tiket 🎫 — hlavně krátký, občas (když appka "
+    "najde opravdovou hodnotu) radši ten hodnotnější, střední.\n\n"
+    "Appka jen vybírá zápasy a doporučuje tikety podle vlastního modelu — sázku si vždycky "
+    "klikáš ty sám, kde chceš (Tipsport, Fortuna...). Je to asistent na rozhodování, ne robot, "
+    "co sází místo tebe.\n\n"
+    "18+. Hazardní hraní může být návykové — sázej jen to, co můžeš prohrát.\n\n"
+    "Ať se daří! ⚽"
+)
+
+# Appka tuhle zprávu pošle každému, kdo botovi napíše bez platného
+# párovacího kódu. Dřív takový člověk rovnou začal dostávat placené
+# tikety — /start stačilo k odběru a nikde se neověřovalo, jestli za ním
+# stojí platba.
+TELEGRAM_NO_ACCESS_MESSAGE = (
+    "Ahoj! 👋 Tenhle kanál je pro předplatitele ApexSignalu.\n\n"
+    "Předplatné aktivuješ na apexsignal.cz/transparentni-ucet — po zaplacení appka na tvůj "
+    "e-mail rovnou pošle tenhle přesný odkaz s párovacím kódem, stačí na něj kliknout.\n\n"
+    "Jak si model vede, si můžeš kdykoli zdarma zkontrolovat tamtéž — jsou tam všechny "
+    "tikety včetně prohraných.\n\n"
+    "18+"
+)
+
+TELEGRAM_LINK_INVALID_MESSAGE = (
+    "Tenhle párovací odkaz už neplatí — kódy vydrží hodinu a jdou použít jen jednou.\n\n"
+    "Na apexsignal.cz/transparentni-ucet je dole formulář — zadej tam e-mail, kterým jsi "
+    "platil, a appka ti hned pošle nový odkaz."
+)
+
+TELEGRAM_EXPIRED_MESSAGE = (
+    "Předplatné ti skončilo, takže sem další tikety posílat nebudu. 🙏\n\n"
+    "Kdykoli ho můžeš obnovit na apexsignal.cz/transparentni-ucet a kanál naskočí zpátky.\n\n"
+    "Díky, že jsi to zkusil — a ať se daří."
+)
+
+# Appka bot umí reagovat jen na /start a /stav — jakoukoli jinou zprávu
+# appka dřív potichu zahazovala, klient nedostal odpověď a appka se o
+# tom vůbec nedozvěděla. Tohle je odpověď, kterou dostane MÍSTO ticha.
+TELEGRAM_UNRECOGNIZED_MESSAGE = (
+    "Tenhle bot je automatický a zprávy sám nečte — jen posílá ranní tikety.\n\n"
+    "Tvůj vzkaz appka přeposlala, ozveme se ti co nejdřív. Pro rychlejší odpověď "
+    "napiš rovnou na apexsignal@seznam.cz."
+)
+
+
+def _forward_client_message_to_owner(chat_id: int, first_name: Optional[str], username: Optional[str], text: str) -> None:
+    """
+    Bot appce sám odpovídat neumí, takže appka aspoň přepošle zprávu tam,
+    kde ji appka uvidí — appku vlastní Telegram (TELEGRAM_CHAT_ID). Bez
+    tohohle appka nemá jak zjistit, že jí vůbec někdo něco napsal.
+    """
+    owner_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not owner_chat_id:
+        print("[telegram] TELEGRAM_CHAT_ID není nastavený, nemám kam přeposlat zprávu klienta")
+        return
+
+    subscription_id = db.get_subscription_id_for_chat(chat_id)
+    sub = db.get_subscription_by_id(subscription_id) if subscription_id else None
+    who = f"předplatitel ({sub['email']})" if sub else "nepárovaný/neznámý chat"
+    handle = f"@{username}" if username else "bez uživatelského jména"
+
+    message = (
+        f"📩 Zpráva od klienta na Telegram botovi\n"
+        f"{first_name or '—'} ({handle}) — {who}\n\n"
+        f"„{text}“"
+    )
+    try:
+        _send_telegram_message(int(owner_chat_id), message)
+    except Exception as e:
+        print(f"[telegram] nepodařilo se přeposlat zprávu klienta: {e}")
+
+
+def _send_telegram_message(chat_id: int, text: str) -> None:
+    """Odeslání jedné textové zprávy. Chybu appka jen zaloguje — když
+    selže uvítání, nesmí to shodit celý webhook (Telegram by ho pak
+    opakoval dokola)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("[telegram] TELEGRAM_BOT_TOKEN není nastavený, zprávu neposílám")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[telegram] chyba při odesílání zprávy na {chat_id}: {e}")
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Telegram appce POSTuje sem každou novou zprávu (appka má nastavený
+    webhook přes setWebhook, misto rucniho pollovani getUpdates) — appka
+    díky tomu umí SAMA (bez zásahu admina) přivítat nového klienta a
+    zapsat si jeho chat_id do telegram_subscribers, jakmile appce napíše
+    /start. Volitelně zabezpečeno TELEGRAM_WEBHOOK_SECRET (Telegram ho
+    posílá zpátky v hlavičce X-Telegram-Bot-Api-Secret-Token).
+    """
+    secret_expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if secret_expected and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret_expected:
+        raise HTTPException(status_code=403, detail="Neplatný webhook secret")
+
+    update = await request.json()
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    print(f"[telegram-webhook] chat_id={chat_id} name={chat.get('first_name')!r} text={text!r}")
+
+    if not chat_id:
+        return {"ok": True}
+
+    if text.startswith("/start"):
+        # "/start ABC123" — kód z odkazu, který si uživatel vygeneroval v
+        # appce po zaplacení. Bez kódu (holé /start) appka nemá jak zjistit,
+        # kdo to je, takže přístup nedává — jen vysvětlí, jak na to.
+        parts = text.split(maxsplit=1)
+        code = parts[1].strip() if len(parts) > 1 else ""
+
+        if not code:
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+            return {"ok": True}
+
+        if code.startswith("seller_"):
+            # Prodejce si tenhle odkaz vezme ze svého /seller/dashboard —
+            # appka mu spáruje chat_id, ať appka umí poslat DM při každé
+            # nové platbě (viz seller-earning větev ve Stripe webhooku).
+            seller_code = code[len("seller_"):]
+            if db.link_seller_telegram(seller_code, chat_id):
+                _send_telegram_message(chat_id, "Hotovo — appka ti sem teď bude posílat zprávu při každé nové platbě od tvých klientů.")
+            else:
+                _send_telegram_message(chat_id, TELEGRAM_LINK_INVALID_MESSAGE)
+            return {"ok": True}
+
+        linked_subscription_id = db.consume_telegram_link_code(code)
+        if linked_subscription_id is None:
+            _send_telegram_message(chat_id, TELEGRAM_LINK_INVALID_MESSAGE)
+            return {"ok": True}
+
+        # Kód mohl být vydaný ještě v době platného předplatného, ale
+        # uplatněný až po jeho konci — appka proto ověřuje platbu znovu
+        # tady, ne jen při vydávání kódu.
+        if not db.has_active_subscription_id(linked_subscription_id):
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+            return {"ok": True}
+
+        db.link_telegram_chat(chat_id, linked_subscription_id, chat.get("first_name"))
+        _send_telegram_message(chat_id, TELEGRAM_WELCOME_MESSAGE)
+        return {"ok": True}
+
+    if text == "/stav":
+        subscription_id = db.get_subscription_id_for_chat(chat_id)
+        if subscription_id and db.has_active_subscription_id(subscription_id):
+            sub = db.get_subscription_by_id(subscription_id) or {}
+            period_end = sub.get("current_period_end")
+            konec = period_end.strftime("%-d. %-m. %Y") if hasattr(period_end, "strftime") else "neznámo"
+            _send_telegram_message(
+                chat_id,
+                f"Předplatné je aktivní. Zaplaceno do {konec}.\n\n"
+                "Nic dalšího dělat nemusíš — tiket chodí automaticky každé ráno.",
+            )
+        else:
+            _send_telegram_message(chat_id, TELEGRAM_NO_ACCESS_MESSAGE)
+        return {"ok": True}
+
+    if text:
+        # Cokoli jiného než /start nebo /stav appka dřív potichu
+        # zahazovala — klient nedostal odpověď a appka se to nikdy
+        # nedozvěděla. Teď aspoň appku upozorní a klientovi řekne, kam
+        # se obrátit pro rychlejší odpověď.
+        _send_telegram_message(chat_id, TELEGRAM_UNRECOGNIZED_MESSAGE)
+        _forward_client_message_to_owner(chat_id, chat.get("first_name"), chat.get("username"), text)
+
+    return {"ok": True}
+
+
+class AdminSeedShowcaseRequest(BaseModel):
+    ticket_type: str
+    selections: list[SaveSelectionRequest]
+    total_odds: float
+    combined_probability: float = 0.0
+    recommended_stake_pct: float = 0.0
+    stake_amount: float
+    created_at: Optional[str] = None  # ISO datetime — appka zachová reálné datum starší výhry
+    target_user_id: Optional[int] = None  # výchozí DAILY_TICKETS_USER_ID, appka umožní i jiný cílový účet
+    status: str = "won"  # appka defaultně "won" kvůli zpětné kompatibilitě (výkladní skříň ukazuje jen výhry)
+    selection_results: Optional[list[str]] = None  # per-výběr výsledek (won/lost/pending), stejné pořadí jako selections
+    confirm_special_account: bool = False  # musí být True, když target_user_id je appčin vlastní účet (viz _special_account_label)
+
+
+def _special_account_label(user_id: int) -> Optional[str]:
+    """Appka takhle pozná, že cílové user_id NENÍ obyčejný testovací
+    účet, ale appčin vlastní provozní účet (např. ten, ze kterého appka
+    bere data pro veřejnou stránku /vysledky) — bez tyhle kontroly appka
+    2026-09-01 omylem zapsala testovací tikety přímo na živý veřejný
+    transparentní účet, protože ho appka zvenku nešlo od obyčejného
+    testovacího účtu vůbec rozeznat."""
+    special_accounts = {
+        "DAILY_TICKETS_USER_ID": "appčin kanálový účet (denní tiket do placeného kanálu)",
+        "TRANSPARENCY_USER_ID": "appčin VEŘEJNÝ transparentní účet (zdroj dat pro apexsignal.cz/vysledky)",
+        "PERSONAL_TRACKING_USER_ID": "appčin osobní sledovací účet",
+        "TEST3_USER_ID": "appčin interní testovací účet (test3)",
+    }
+    for env_name, label in special_accounts.items():
+        raw = os.environ.get(env_name)
+        if raw and raw.strip().isdigit() and int(raw) == user_id:
+            return label
+    return None
+
+
+@app.post("/admin/showcase/seed")
+def admin_seed_showcase(req: AdminSeedShowcaseRequest, request: Request):
+    """
+    Appka tímhle ručně přidá starší tiket appky (nejčastěji z testovacích
+    účtů) na cílový účet se zachovaným datem — appka nemění nic na tom,
+    co se reálně stalo (appka tiket zkopíruje 1:1, jen appka ho fyzicky
+    přesune pod jiný účet). Původně jen appky vlastní výkladní skříň
+    (/showcase/tickets, DAILY_TICKETS_USER_ID, jen výhry) — target_user_id
+    a status appka přidala i pro obnovu omylem smazaných tiketů na
+    libovolném účtu, s libovolným výsledkem.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    if req.target_user_id is not None:
+        target_user_id = req.target_user_id
+        # Appka tuhle kontrolu schválně dělá jen když je target_user_id
+        # zadané VÝSLOVNĚ (ne default) — appčino vlastní zapsání na
+        # DAILY_TICKETS_USER_ID beze změny je běžný, zamýšlený případ
+        # (appčina vlastní výkladní skříň), tam appka varování nechce.
+        label = _special_account_label(target_user_id)
+        if label and not req.confirm_special_account:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"target_user_id={target_user_id} je {label} — ne obyčejný "
+                    "testovací účet. Cokoli sem appka zapíše, se může objevit "
+                    "i navenek (např. veřejně na apexsignal.cz/vysledky). "
+                    "Pokud to fakt chceš, pošli confirm_special_account: true."
+                ),
+            )
+    else:
+        target_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+        if not target_user_id_raw:
+            raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+        target_user_id = int(target_user_id_raw)
+
+    # "dlouhy" je starší appky vlastní název pro BOOST, pořád se objevuje
+    # ve starších uložených datech appky — insert_ticket ho ale nepustí
+    # (validace appky zná jen kratky/stredni/boost).
+    ticket_type = "boost" if req.ticket_type == "dlouhy" else req.ticket_type
+
+    domain_selections = [
+        SelectionCandidate(
+            match_id=s.match_id, home_team=s.home_team, away_team=s.away_team,
+            sport=Sport.FOOTBALL,
+            market_type=MarketType(s.market_type) if s.market_type in [m.value for m in MarketType] else MarketType.MATCH_WINNER,
+            selection=s.selection,
+            probability=s.probability, odds=s.odds,
+            model_probability=s.model_probability, market_probability=s.market_probability,
+            reasoning=s.reasoning, data_quality=s.data_quality,
+            league=s.league, country=s.country, kickoff_date=s.kickoff_date, kickoff_time=s.kickoff_time,
+        ) for s in req.selections
+    ]
+    ticket = Ticket(
+        ticket_type=ticket_type, selections=domain_selections,
+        total_odds=req.total_odds, combined_probability=req.combined_probability,
+        recommended_stake_pct=req.recommended_stake_pct,
+    )
+    created_at_dt = datetime.fromisoformat(req.created_at) if req.created_at else None
+    ticket_id = repo.save_ticket(target_user_id, ticket, created_at=created_at_dt)
+    repo.set_actual_stake(ticket_id, req.stake_amount, req.total_odds)
+    repo.set_ticket_status(ticket_id, req.status)
+
+    if req.selection_results:
+        row = db.fetch_ticket_rows(ticket_id=ticket_id)
+        if row:
+            selection_ids = [s.get("id") for s in row[0].get("selections", [])]
+            for selection_id, result in zip(selection_ids, req.selection_results):
+                if selection_id is not None:
+                    db.update_selection_result(selection_id, result)
+
+    return {"ticket_id": ticket_id, "status": "seeded"}
+
+
+class CopyDailyTicketsRequest(BaseModel):
+    target_user_id: int
+    stake_amount: float
+
+
+@app.post("/admin/copy-daily-tickets-to-user")
+def copy_daily_tickets_to_user(req: CopyDailyTicketsRequest, request: Request):
+    """
+    Zkopíruje appkou DNES vygenerované tikety (DAILY_TICKETS_USER_ID —
+    ty, co appka posílá i na hlavní Telegram chat) na konkrétní účet
+    (např. test3), každý s danou sázkou (stejnou pro každý tiket) a
+    stavem 'pending'. Appka duplicity (stejná sada zápasů+tipů, typicky
+    z dvojího běhu cronu za den) vynechá — zkopíruje jen jednu kopii
+    každé unikátní kombinace.
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    source_user_id_raw = os.environ.get("DAILY_TICKETS_USER_ID")
+    if not source_user_id_raw:
+        raise HTTPException(status_code=500, detail="DAILY_TICKETS_USER_ID není nastavené")
+    source_user_id = int(source_user_id_raw)
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague"))
+    today_start_utc = today_prague.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    def _created_at_utc(row):
+        created_at = row["created_at"]
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+
+    def _signature(ticket):
+        return tuple(sorted((s.match_id, s.market_type.value, s.selection) for s in ticket.selections))
+
+    rows = [r for r in repo.get_saved_tickets(source_user_id) if _created_at_utc(r) >= today_start_utc]
+
+    seen_signatures = set()
+    copied = []
+    for row in rows:
+        sig = _signature(row["ticket"])
+        if sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
+        new_ticket_id = repo.save_ticket(req.target_user_id, row["ticket"])
+        repo.set_actual_stake(new_ticket_id, req.stake_amount, row["ticket"].total_odds)
+        copied.append({
+            "new_ticket_id": new_ticket_id,
+            "source_ticket_id": row["ticket_id"],
+            "ticket_type": row["ticket"].ticket_type,
+            "total_odds": row["ticket"].total_odds,
+        })
+
+    return {"copied_count": len(copied), "skipped_duplicates": len(rows) - len(copied), "copied": copied}
+
+
+ALL_DB_TABLES = [
+    "users", "tickets", "ticket_selections", "api_cache", "user_tokens",
+    "token_transactions", "redeem_codes", "redeem_code_uses",
+    "stripe_events", "password_reset_tokens", "email_verification_tokens", "telegram_subscribers",
+    "referral_rewards", "user_card_fingerprints",
+    # 2026-09-03 doplněno — appka do exportu dřív VŮBEC nezahrnovala
+    # předplatná, prodejce/agenty ani appčino interní nastavení (kde jsou
+    # mj. schválené/odeslané denní tikety), takže záloha nebyla "všechno",
+    # jak appka slibovala.
+    "subscriptions", "sellers", "seller_client_subscriptions", "seller_earnings",
+    "seller_leads", "app_settings", "telegram_link_codes", "user_events",
+    "referral_membership_earnings", "referral_payout_requests",
+]
+# api_cache (nacachované odpovědi z the-odds-api/API-Football),
+# password_reset_tokens/email_verification_tokens (krátkodobé, časově
+# omezené) a telegram_link_codes/user_events (jednorázové/analytické, ne
+# appka trvalá byznysová data) appka do výchozí zálohy nezahrnuje —
+# api_cache je navíc jediná tabulka appky, co bývá dost velká na to, aby
+# export shodil web service na Renderově free 512MB RAM limitu (OOM
+# restart).
+DEFAULT_BACKUP_TABLES = [
+    t for t in ALL_DB_TABLES
+    if t not in ("api_cache", "password_reset_tokens", "email_verification_tokens", "telegram_link_codes", "user_events")
+]
+
+
+@app.get("/admin/db-stats")
+def admin_db_stats(request: Request):
+    """Počet řádků v každé tabulce — appka tímhle před exportem ověří, jestli se dump vejde do paměti."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    counts = {}
+    with db.get_cursor() as cur:
+        for table in ALL_DB_TABLES:
+            cur.execute(f"SELECT count(*) AS n FROM {table}")
+            counts[table] = cur.fetchone()["n"]
+    return counts
+
+
+@app.get("/admin/export-db")
+def admin_export_db(request: Request, tables: str = ""):
+    """
+    Nouzový export databáze jako JSON (appka bere syrové řádky tabulka po
+    tabulce). Appka běží na Renderu, kde je Postgres port zablokovaný pro
+    spojení zvenčí appčina vývojového prostředí — přímý pg_dump odtud
+    nejde, tenhle endpoint appce umožní stáhnout zálohu přes obyčejné
+    HTTPS. Výchozí sada appku vynechává 'api_cache' a
+    'password_reset_tokens' (viz DEFAULT_BACKUP_TABLES) kvůli paměťovému
+    limitu free web service — appka je zahrne jen na výslovné přání přes
+    ?tables=api_cache,...
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    requested = [t.strip() for t in tables.split(",") if t.strip()] or DEFAULT_BACKUP_TABLES
+    invalid = [t for t in requested if t not in ALL_DB_TABLES]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Neznámé tabulky: {invalid}")
+
+    dump = {}
+    with db.get_cursor() as cur:
+        for table in requested:
+            cur.execute(f"SELECT * FROM {table}")
+            dump[table] = [dict(row) for row in cur.fetchall()]
+    return json.loads(json.dumps(dump, default=str))
+
+
+@app.get("/admin/_debug-ht-goals-backtest")
+def _debug_ht_goals_backtest(request: Request, custom_date: str, ht_threshold: float = 0.5):
+    """Jen JEDEN den (appka OOM spadla na víc dnech + statistikách karet
+    dohromady) — čistě poločasové góly, model proti realitě, bez statistik
+    karet a bez dalších dnů."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    provider = data_provider.get_provider(Sport.FOOTBALL)
+    raw_items = provider._get("/fixtures", {"date": custom_date})
+    raw_items = [f for f in raw_items if f.get("league", {}).get("id") in data_provider.TIPSPORT_LEAGUE_IDS]
+    matches = _build_football_matches(provider, raw_items)
+
+    rows = []
+    for m in matches:
+        if m.country in TIPSPORT_UNAVAILABLE_COUNTRIES or m.match_id in TIPSPORT_UNAVAILABLE_MATCH_IDS:
+            continue
+        home_reliable = m.home_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.home_recent_form_available
+        away_reliable = m.away_games_played >= MIN_GAMES_PLAYED_FOR_FORM_SENSITIVE_MARKETS or m.away_recent_form_available
+        if not (home_reliable and away_reliable):
+            continue
+        if not (m.home_expected_goals_ht and m.away_expected_goals_ht):
+            continue
+        try:
+            result = data_provider.adapt_fixture_result(provider.get_fixture_result(str(m.match_id)))
+        except Exception as e:
+            continue
+        if not result["is_finished"] or result["ht_home_goals"] is None:
+            continue
+        model_prob = MarketEvaluator.ht_over_goals_probability(m.home_expected_goals_ht, m.away_expected_goals_ht, ht_threshold)
+        actual_ht_total = result["ht_home_goals"] + result["ht_away_goals"]
+        rows.append({
+            "match": f"{m.home_team} - {m.away_team}", "league": m.league,
+            "model_prob": round(model_prob, 4),
+            "ht_xg": f"{m.home_expected_goals_ht:.2f}:{m.away_expected_goals_ht:.2f}",
+            "actual_ht_score": f"{result['ht_home_goals']}:{result['ht_away_goals']}",
+            "hit": actual_ht_total > ht_threshold,
+        })
+    del matches, raw_items
+    gc.collect()
+
+    rows.sort(key=lambda r: -r["model_prob"])
+
+    def _summarize(min_prob):
+        eligible = [r for r in rows if r["model_prob"] >= min_prob]
+        hits = sum(1 for r in eligible if r["hit"])
+        return {"pocet": len(eligible), "trefeno": hits, "uspesnost_pct": round(hits / len(eligible) * 100, 1) if eligible else None}
+
+    return {
+        "date": custom_date, "ht_threshold": ht_threshold,
+        "total_candidates": len(rows),
+        "nad_65pct": _summarize(0.65),
+        "nad_71pct": _summarize(0.71),
+        "vsechny": rows,
+    }
+
+
+@app.get("/admin/_debug-list-pending")
+def _debug_list_pending(request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    target_ids = {
+        "kanál (DAILY_TICKETS_USER_ID)": int(os.environ.get("DAILY_TICKETS_USER_ID", "0")),
+        "osobní sledovací (PERSONAL_TRACKING_USER_ID)": int(os.environ.get("PERSONAL_TRACKING_USER_ID", "0")),
+        "d.voves": 60,
+        "transparentní (TRANSPARENCY_USER_ID)": int(os.environ.get("TRANSPARENCY_USER_ID", "0")),
+    }
+    out = []
+    for label, uid in target_ids.items():
+        if not uid:
+            continue
+        for r in repo.get_saved_tickets(uid):
+            if r["status"] != "pending":
+                continue
+            ticket = r["ticket"]
+            out.append({
+                "source": label, "user_id": uid, "ticket_id": r["ticket_id"],
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                "total_odds": ticket.total_odds,
+                "selections": [f"{s.home_team} - {s.away_team}" for s in ticket.selections],
+            })
+    out.sort(key=lambda r: r["created_at"] or "", reverse=True)
+    return out
+
+
+@app.get("/showcase/tickets")
+def showcase_tickets(limit: int = 20):
+    """
+    Veřejná "výkladní skříň" appky — bez přihlášení appka vrátí poslední
+    VYHODNOCENÉ (výhra i prohra) tikety appčiných dvou vlastních
+    automatických účtů (DAILY_TICKETS_USER_ID a TRANSPARENCY_USER_ID),
+    NIKDY tikety běžných uživatelů appky. U obou účtů appka posílá
+    skutečně uložený actual_stake_amount/actual_profit_loss — u
+    TRANSPARENCY_USER_ID je to vždy pevných 2000 Kč (viz
+    TRANSPARENCY_STAKE), u DAILY_TICKETS_USER_ID částka náhodně vybraná
+    z DAILY_TICKETS_STAKE_CHOICES (viz komentář tam) — appka nevymýšlí
+    číslo za běhu, jen posílá to, co už má uložené v DB.
+    Slouží jako sociální důkaz na hlavní obrazovce appky pro nové
+    návštěvníky.
+
+    appka (2026-09-17, uživatelovo přání "měli bychom být transparentní")
+    — dřív posílala jen výhry, zdůvodněné jako "sociální důkaz", ale
+    reálně tím appka tajila skutečnou úspěšnost a byla v rozporu
+    s vlastním étosem transparentnosti (viz terms.html, /vysledky).
+    Appka teď posílá obojí — prohry frontend zobrazí výrazně jinak
+    (červeně), ne aby appka je schovávala.
+    """
+    limit = max(1, min(limit, 50))
+    target_ids = [
+        int(v) for v in (
+            os.environ.get("DAILY_TICKETS_USER_ID"),
+            os.environ.get("TRANSPARENCY_USER_ID"),
+        )
+        if v
+    ]
+    if not target_ids:
+        return {"tickets": []}
+
+    settled_rows = []
+    for target_user_id in target_ids:
+        rows = repo.get_saved_tickets(target_user_id)
+        settled_rows.extend(r for r in rows if r["status"] in ("won", "lost"))
+    settled_rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
+    settled_rows = settled_rows[:limit]
+
+    tickets = []
+    for r in settled_rows:
+        ticket = r["ticket"]
+        created_at = r.get("created_at")
+        tickets.append({
+            "ticket_id": r["ticket_id"],
+            "ticket_type": ticket.ticket_type,
+            "status": r["status"],
+            "total_odds": ticket.total_odds,
+            "stake": r.get("actual_stake_amount"),
+            "profit": r.get("actual_profit_loss"),
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "selections": [
+                {
+                    "home_team": s.home_team, "away_team": s.away_team,
+                    "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
+                    "selection": s.selection, "odds": s.odds,
+                    "league": s.league, "country": s.country,
+                }
+                for s in ticket.selections
+            ],
+        })
+    return {"tickets": tickets}
+
+
+SHOWCASE_STATS_SINCE = "2026-08-23"  # appka stejné datum použila i při
+                              # čištění transparentního účtu (smazala vše
+                              # starší jako mimo rozsah aktuálních
+                              # pravidel, viz dnešní historie session).
+                              # Schválně pevné, ne "od úplného začátku" —
+                              # ať appka sedí se vším, co appka jinde na
+                              # webu i v appce ukazuje.
+
+
+@app.get("/showcase/stats")
+def showcase_stats():
+    """
+    Veřejná agregovaná čísla z transparentního účtu (TRANSPARENCY_USER_ID)
+    od SHOWCASE_STATS_SINCE — bez přihlášení appka ukáže, kolik tiketů
+    vyhodnotila, úspěšnost a hypotetický zisk/ztrátu při flat sázce
+    1000/5000 Kč na tiket. Stejný výpočet appka dřív dělala jen ručně
+    (viz /admin/win-loss-report), tady je veřejně a bez admin klíče, ať
+    to jde zobrazit na landing page.
+    """
+    target_user_id_raw = os.environ.get("TRANSPARENCY_USER_ID")
+    if not target_user_id_raw:
+        return {"available": False}
+    target_user_id = int(target_user_id_raw)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT status, total_odds FROM tickets WHERE user_id = %s AND status IN ('won','lost') "
+            "AND created_at >= %s",
+            (target_user_id, SHOWCASE_STATS_SINCE),
+        )
+        rows = cur.fetchall()
+
+    won = sum(1 for r in rows if r["status"] == "won")
+    lost = sum(1 for r in rows if r["status"] == "lost")
+    total = won + lost
+
+    def _flat_stake_pnl(stake: float) -> float:
+        pnl = 0.0
+        for r in rows:
+            if r["status"] == "won":
+                pnl += stake * (float(r["total_odds"]) - 1)
+            else:
+                pnl -= stake
+        return round(pnl, 2)
+
+    return {
+        "available": total > 0,
+        "since": SHOWCASE_STATS_SINCE,
+        "total_tickets": total,
+        "won": won,
+        "lost": lost,
+        "win_rate_pct": round(won / total * 100, 1) if total else None,
+        "example_pnl": {
+            "1000": _flat_stake_pnl(1000),
+            "5000": _flat_stake_pnl(5000),
+        },
+    }
+
+
+@app.get("/showcase/ticket-image/{ticket_id}")
+def showcase_ticket_image(ticket_id: int):
+    """Vyrenderuje jeden vyhraný appčin showcase tiket (viz /showcase/tickets)
+    jako JPG obrázek — BEZ appčina diagonálního vodoznaku, ať si ho
+    prodejci mohou stáhnout a poslat klientům pod svým vlastním jménem
+    (stejné pravidlo appka už má u denní rozesílky prodejcům). Veřejné
+    stejně jako /showcase/tickets — appka jen ověří, že ticket_id patří
+    appčinu vlastnímu showcase účtu a je 'won', jinak appka nevrátí nic
+    z tiketu běžného uživatele."""
+    target_ids = {
+        int(v) for v in (
+            os.environ.get("DAILY_TICKETS_USER_ID"),
+            os.environ.get("TRANSPARENCY_USER_ID"),
+        )
+        if v
+    }
+    rows = db.fetch_ticket_rows(ticket_id=ticket_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    row = rows[0]
+    if row["user_id"] not in target_ids or row["status"] != "won":
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+
+    img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(row["ticket"], row["ticket_id"]), watermark=False)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
+def _require_active_seller(user_id: int) -> dict:
+    seller = db.get_seller_by_user_id_any(user_id)
+    if not seller or not seller.get("active"):
+        raise HTTPException(status_code=403, detail="Tenhle účet není aktivní jako schválený prodejce.")
+    return seller
+
+
+@app.get("/seller/today-tickets")
+def seller_today_tickets(user_id: int = Depends(get_current_user_id)):
+    """Seznam DNES už odeslaných tiketů (napříč sporty), co si prodejce
+    může stáhnout bez vodoznaku a poslat dál klientům — schválně jen
+    JIŽ ODESLANÉ (viz already_sent níže), appka nechce prodejci ukázat
+    tip dřív, než appka sama schválí a rozešle na /admin-prodejci."""
+    _require_active_seller(user_id)
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    tickets = []
+
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if sent_ids:
+        for pick in _todays_agent_candidate_tickets():
+            if pick["ticket_id"] not in sent_ids:
+                continue
+            tickets.append({
+                "sport": "fotbal",
+                "label": f"Fotbal ({pick['source']})",
+                "total_odds": pick["ticket"].total_odds,
+                "image_url": f"/seller/today-ticket-image?ticket_id={pick['ticket_id']}",
+            })
+
+    return {"tickets": tickets}
+
+
+@app.get("/seller/today-ticket-image")
+def seller_today_ticket_image(ticket_id: int, user_id: int = Depends(get_current_user_id)):
+    _require_active_seller(user_id)
+
+    picks = _todays_agent_candidate_tickets()
+    pick = next((p for p in picks if p["ticket_id"] == ticket_id), None)
+    if pick is None:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+
+    today_prague = datetime.now(ZoneInfo("Europe/Prague")).date().isoformat()
+    raw_sent = db.get_setting(DAILY_TICKET_SENT_SETTING_KEY)
+    sent_record = json.loads(raw_sent) if raw_sent else None
+    sent_ids = set(sent_record.get("ticket_ids", [])) if sent_record and sent_record.get("date") == today_prague else set()
+    if ticket_id not in sent_ids:
+        raise HTTPException(status_code=404, detail="Tenhle tiket ještě nebyl odeslaný.")
+
+    img = ticket_telegram.render_ticket(_ticket_to_telegram_dict(pick["ticket"], pick["ticket_id"]), watermark=False)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SIGNÁL - Nová sekce: AI-shrnutí stavu uživatele
+# ═══════════════════════════════════════════════════════════════════
+
+@app.post("/signal/generate")
+def generate_signal_data(
+    period: str = "now",  # "now" / "short" / "long"
+    days_back: int = 7,   # 3/7/14 pro "short"
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Vrátí strukturované JSON data pro Signál.
+    - period="now" → live snapshot (zápasy dnes)
+    - period="short" → agregace za N dní
+    - period="long" → agregace od začátku
+    """
+    try:
+        # Stáhni tiketty uživatele z DB
+        tickets = db.fetch_ticket_rows(user_id=user_id)
+        if not tickets:
+            return {"error": "Žádné tiketty zatím.", "not_started": [], "live": [], "finished_selections": [], "summary": {}}
+
+        # TODO: Implementovat logiku compute_signal_now(), compute_signal_short(), compute_signal_long()
+        # Zatím vrátíme fallback
+
+        if period == "now":
+            signal_data = _compute_signal_now(tickets)
+        elif period == "short":
+            signal_data = _compute_signal_short(tickets, days_back)
+        elif period == "long":
+            signal_data = _compute_signal_long(tickets)
+        else:
+            raise ValueError(f"Neznámý period: {period}")
+
+        return signal_data
+
+    except Exception as e:
+        print(f"[signal/generate ERROR] {e}")
+        raise HTTPException(status_code=500, detail=f"Chyba při generování Signálu: {e}")
+
+
+@app.patch("/tickets/{ticket_id}")
+def update_ticket(ticket_id: int, req: dict = Body(...), user_id: int = Depends(get_current_user_id)):
+    """
+    Update ticket total_odds and/or actual_stake_amount.
+    Used when user adjusts odds in detail view or at save time.
+    """
+    owner_id = db.get_ticket_owner(ticket_id)
+    if owner_id is None:
+        raise HTTPException(status_code=404, detail="Tiket nenalezen")
+    if owner_id != user_id:
+        raise HTTPException(status_code=403, detail="Tenhle tiket není tvůj")
+
+    db.update_ticket_fields(
+        ticket_id,
+        total_odds=req.get("total_odds"),
+        actual_stake_amount=req.get("actual_stake_amount"),
+    )
+    return {"ticket_id": ticket_id, "status": "updated"}
+
+
+@app.post("/signal/text")
+def generate_signal_text(
+    data: dict = Body(...),
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Pošle strukturované data do Claude API.
+    Claude vrátí plynulý text v češtině.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Signál není dostupný — chybí ANTHROPIC_API_KEY.")
+
+    try:
+        print(f"[signal/text] Received data: {json.dumps(data)[:200]}")  # DEBUG
+        
+        # Připrav prompt pro Claude
+        prompt = _prepare_signal_prompt(data)
+        print(f"[signal/text] Prompt length: {len(prompt)}")  # DEBUG
+
+        # Zavolej Claude API
+        request_body = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        print(f"[signal/text] Sending request to Claude API")  # DEBUG
+        
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json=request_body,
+            timeout=30,
+        )
+        print(f"[signal/text] Response status: {resp.status_code}")  # DEBUG
+        
+        resp.raise_for_status()
+        result = resp.json()
+
+        # Extrahuj text z odpovědi
+        text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text").strip()
+        print(f"[signal/text] Generated text length: {len(text)}")  # DEBUG
+        return {"text": text}
+
+    except requests.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.response.json()
+        except Exception:
+            detail = str(e)
+        print(f"[signal/text HTTP ERROR] {e.response.status_code}: {detail}")  # DEBUG
+        raise HTTPException(status_code=502, detail=f"Claude API selhala: {detail}")
+    except Exception as e:
+        print(f"[signal/text ERROR] {e}")
+        raise HTTPException(status_code=500, detail=f"Chyba při generování textu: {e}")
+
+
+def _compute_signal_now(tickets):
+    """Vrátí 'Právě teď' data — live snapshot."""
+    return {
+        "not_started": [],
+        "live": [],
+        "finished_selections": [],
+        "summary": {"total_open_tickets": 0, "total_staked": 0, "total_potential": 0},
+    }
+
+
+def _compute_signal_short(tickets, days_back):
+    """Vrátí agregaci za N dní."""
+    return {
+        "period": "short",
+        "days_back": days_back,
+        "staked": 0,
+        "profit": 0,
+        "win_rate": 0.0,
+        "total_tickets": 0,
+        "breakdown": {},
+    }
+
+
+def _compute_signal_long(tickets):
+    """Vrátí agregaci od začátku."""
+    return {
+        "period": "long",
+        "staked": 0,
+        "profit": 0,
+        "win_rate": 0.0,
+        "total_tickets": 0,
+        "breakdown": {},
+    }
+
+
+def _prepare_signal_prompt(data):
+    """Připrav prompt pro Claude."""
+    # TODO: Formátuj data do promptu
+    return "Převypravuj tyhle data o sázení do plynulého českého textu (čistě informativní, bez rad).\n\nData: " + json.dumps(data)
+
+
+# appka (2026-09-14, uživatelovo přání "automatizace, co se sama učí ze
+# sázek") — appka záměrně NENÍ plně autonomní (viz historie: appka dřív
+# nechala model sázet bez ověření kladného edge a appka dostala 0 %
+# úspěšnost na středním tiketu, viz TicketGenerator). Tenhle týdenní job
+# jen spočítá stejnou kalibraci, co appka appce už umí ukázat ručně
+# (/admin/all-markets-calibration), a pošle appce Telegram upozornění —
+# appka SAMA NIC NEMĚNÍ, žádnou ligu ani trh automaticky nevyřazuje.
+# Rozhodnutí appka nechává na uživateli.
+WEEKLY_CALIBRATION_MIN_SAMPLES = 8  # appka pod tímhle appce nedůvěřuje — moc malý vzorek, moc statistického šumu
+WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT = 55.0  # appka appce nahlásí kombinaci, jejíž skutečná úspěšnost padne pod tohle číslo
+
+
+@app.post("/admin/weekly-calibration-alert")
+def admin_weekly_calibration_alert(request: Request):
+    """appka jednou týdně (viz GitHub Actions cron) spočítá win-rate
+    podle trh+selekce+liga za CELOU appky historii a appce pošle Telegram
+    upozornění, pokud najde kombinaci s dost vzorky
+    (>= WEEKLY_CALIBRATION_MIN_SAMPLES) a reálnou úspěšností pod
+    WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT. appka NIC SAMA nemění, jen
+    upozorňuje — rozhodnutí (vyřadit/nechat) appka nechává na uživateli.
+    Read-only appka (kromě odeslání Telegram zprávy), nic neukládá."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT market_type, selection, result, model_probability, market_probability, league
+              FROM ticket_selections
+             WHERE result IN ('won', 'lost')
+            """
+        )
+        rows = cur.fetchall()
+
+    by_league_market: dict[str, dict] = {}
+    for row in rows:
+        key = f"{row['market_type']}:{row['selection']}:{row['league'] or 'neznámá'}"
+        acc = by_league_market.setdefault(key, {"won": 0, "lost": 0, "model_probs": []})
+        acc[row["result"]] += 1
+        if row["model_probability"] is not None:
+            acc["model_probs"].append(float(row["model_probability"]))
+
+    flagged = []
+    for key, acc in by_league_market.items():
+        total = acc["won"] + acc["lost"]
+        if total < WEEKLY_CALIBRATION_MIN_SAMPLES:
+            continue
+        win_rate = acc["won"] / total * 100
+        if win_rate >= WEEKLY_CALIBRATION_WIN_RATE_FLAG_PCT:
+            continue
+        avg_model = (sum(acc["model_probs"]) / len(acc["model_probs"]) * 100) if acc["model_probs"] else None
+        flagged.append({
+            "trh_selekce_liga": key,
+            "pocet": total,
+            "win_rate_pct": round(win_rate, 1),
+            "prumerny_model_pct": round(avg_model, 1) if avg_model is not None else None,
+        })
+    flagged.sort(key=lambda x: x["win_rate_pct"])
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_status = "skipped"
+    if chat_id and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        if flagged:
+            lines = [f"⚠️ Týdenní kalibrační kontrola appky — {len(flagged)} podezřelých kombinací (appka nic sama neměnila, jen appce hlásí):", ""]
+            for f in flagged[:10]:
+                model_str = f"appky model {f['prumerny_model_pct']} %" if f['prumerny_model_pct'] is not None else "appky model neznámo"
+                lines.append(f"• {f['trh_selekce_liga']} — {f['win_rate_pct']} % úspěšnost ({f['pocet']} vzorků), {model_str}")
+            text = "\n".join(lines)
+        else:
+            text = "✅ Týdenní kalibrační kontrola appky — appka nic podezřelého nenašla."
+        try:
+            _send_telegram_message(int(chat_id), text)
+            telegram_status = "sent"
+        except Exception as e:
+            telegram_status = f"error: {e}"
+
+    return {"flagged_count": len(flagged), "flagged": flagged, "telegram": telegram_status}
