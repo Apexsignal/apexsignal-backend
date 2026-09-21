@@ -7896,6 +7896,18 @@ def _debug_list_pending(request: Request):
     return out
 
 
+@app.post("/admin/_debug-delete-tickets")
+def _debug_delete_tickets(ticket_ids: list[int], request: Request):
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    deleted = []
+    for tid in ticket_ids:
+        db.delete_ticket(tid)
+        deleted.append(tid)
+    return {"deleted": deleted}
+
+
 @app.get("/showcase/tickets")
 def showcase_tickets(limit: int = 20):
     """
