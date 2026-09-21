@@ -3526,10 +3526,29 @@ def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
         tournament_id = data_provider.ODDSPAPI_TOURNAMENT_IDS.get(match.league_id)
         if tournament_id is None:
             continue
-        fixture = odds_provider.find_matching_fixture(tournament_id, match.home_team, match.away_team, match.kickoff_date)
-        if fixture is None:
+        try:
+            fixture = odds_provider.find_matching_fixture(tournament_id, match.home_team, match.away_team, match.kickoff_date)
+            if fixture is None:
+                continue
+            raw = odds_provider.get_odds(fixture["fixtureId"])
+        except requests.exceptions.HTTPError as e:
+            # appka (2026-09-21) zjistila, že appka tuhle chybu dřív vůbec
+            # nechytala — jeden zápas s 429 (Too Many Requests, malá
+            # měsíční kvóta 250 req) shodil celý požadavek na 500, i když
+            # OddsPapi je tu jen POSLEDNÍ záchrana, ne povinný zdroj (viz
+            # docstring výš). U 429 appka navíc rovnou přestává zkoušet
+            # DALŠÍ zápasy v tomhle shortlistu — limit se v rámci jedné
+            # minuty/dne stejně nezvedne, appka by jen zbytečně dál
+            # utrácela ze stejné omezené kvóty na jisté další chyby.
+            status = e.response.status_code if e.response is not None else None
+            print(f"[enrich-odds-oddspapi] {match.home_team}-{match.away_team}: HTTP chyba ({status}), zápas přeskočen")
+            if status == 429:
+                print("[enrich-odds-oddspapi] 429 (rate limit) — appka končí zbytek shortlistu, nezkouší dál")
+                break
             continue
-        raw = odds_provider.get_odds(fixture["fixtureId"])
+        except (requests.exceptions.RequestException, RuntimeError) as e:
+            print(f"[enrich-odds-oddspapi] {match.home_team}-{match.away_team}: {e} — zápas přeskočen")
+            continue
         if not raw:
             continue
         adapted = data_provider.adapt_oddspapi_odds(raw)
