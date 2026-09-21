@@ -5353,8 +5353,7 @@ def verify_results(user_id: int = Depends(get_current_user_id)):
 
     return {
         "zkontrolovano_vyberu": checked,
-        "nelze_overi
-t": unverifiable,
+        "nelze_overit": unverifiable,
         "pocet_neshod": len(mismatches),
         "neshody": mismatches,
     }
