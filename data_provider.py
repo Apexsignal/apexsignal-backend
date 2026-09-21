@@ -2371,15 +2371,36 @@ class APIFootballProvider(SportsDataProvider):
         except Exception as e:
             print(f"[cache] DB cache nedostupná, pokračuju bez ní: {e}")
 
-        # Appka dřív limit rovnoměrně DĚLILA přes všechny požadované dny
-        # (MAX_FIXTURES_PER_REQUEST // len(dates)) — na řídký den (pondělí,
-        # pár soutěží) to appce zbytečně ubralo z bohatého dne (sobota),
-        # i když ten bohatý den měl kandidátů dost sám o sobě. Appka teď
-        # jde po dnech PO POŘADÍ (dnes, zítra, ...) a bere z KAŽDÉHO,
-        # co zbývá ze stropu MAX_FIXTURES_PER_REQUEST — na další den appka
-        # sáhne, jen když jí ten předchozí nedal dost. Běžná sobota tak
-        # appce klidně stačí celá sama, bez zbytečných volání na další dny.
+        # 2026-09-21: appka zjistila, že "po pořadí, ber co zbývá" mělo
+        # opačnou vadu — u vícedenních oken (rozšířené okno +3 dny, /admin
+        # rozsahy) první bohatý den (typicky pátek/sobota) snadno vysál
+        # CELÝ strop MAX_FIXTURES_PER_REQUEST sám, a další den v okně
+        # nedostal ani jeden zápas navíc, i kdyby tam bylo přes víkend
+        # taky hodně zápasů (uživatel: "to ma stahnout min 150 zapasu
+        # v jeden den..ne dohromady"). Appka teď dny zpracovává ve DVOU
+        # kolech:
+        #   1. kolo — z KAŽDÉHO dne appka nejdřív vezme jeho spravedlivou
+        #      rezervu (strop / počet dní), ať žádný den nezůstane úplně
+        #      naprázdno kvůli dřívějšímu dni.
+        #   2. kolo — zbytek stropu (co první kolo nevyčerpalo, typicky
+        #      z řídkých dnů jako pondělí) appka rozdělí mezi dny, co měly
+        #      víc zápasů, než jim rezerva dovolila — pořád v pořadí dnů.
+        # U jednodenního dotazu (custom_date, typicky ruční/admin generace
+        # na konkrétní den) je rezerva rovnou celý strop, takže se chování
+        # pro tenhle nejčastější případ vůbec nemění.
+        #
+        # Appka zároveň KAŽDÝ zápas hned po filtraci ořezává přes
+        # _trim_fixture() na jen ty klíče, co appka dál skutečně čte
+        # (viz definice níž) — appka dřív držela v paměti celý syrový
+        # JSON z API-Football (venue, referee, statistics placeholdery
+        # atd.) pro každý zápas v poolu, i když z toho appka používala
+        # jen zlomek polí. Tohle samo o sobě snižuje špičkovou spotřebu
+        # paměti při enrichmentu, nezávisle na tom, kolik zápasů appka
+        # celkem stáhne — je to bezpečnostní opatření navíc k dvoukolovému
+        # rozdělení výš, ne náhrada za MAX_FIXTURES_PER_REQUEST.
         fixtures: list[dict] = []
+        per_day_reserve = max(1, MAX_FIXTURES_PER_REQUEST // len(dates))
+        by_day: dict[str, list[dict]] = {}
         today_str = date.today().isoformat()
         now_utc = datetime.utcnow()
 
@@ -2408,10 +2429,41 @@ class APIFootballProvider(SportsDataProvider):
                     pass
             return True
 
+        def _trim_fixture(f: dict) -> dict:
+            # appka (2026-09-21) ořezává syrový objekt z API-Football hned
+            # po filtraci na jen ty klíče, co appka dál skutečně čte —
+            # `adapt_api_football_fixture` (a interní filtrování/řazení tady
+            # v get_upcoming_matches) používá jen zlomek toho, co API vrací.
+            # Appka NEZAHAZUJE `goals`/`score`/zbytek `venue`/`fixture.status.long`
+            # atd. proto, že by je nikdy nepotřebovala vůbec — jen proto, že
+            # tahle konkrétní odpověď (/fixtures?date=...) je pro naši potřebu
+            # nepoužívá; jiné metody (get_fixture_result, get_league_results,
+            # H2H) je čtou ze SVÝCH VLASTNÍCH volání, ta appka nijak neořezává.
+            fx = f.get("fixture", {}) or {}
+            league = f.get("league", {}) or {}
+            teams = f.get("teams", {}) or {}
+            home = teams.get("home", {}) or {}
+            away = teams.get("away", {}) or {}
+            return {
+                "fixture": {
+                    "id": fx.get("id"),
+                    "date": fx.get("date"),
+                    "referee": fx.get("referee"),
+                    "venue": {"city": (fx.get("venue") or {}).get("city")},
+                },
+                "league": {
+                    "id": league.get("id"),
+                    "name": league.get("name"),
+                    "country": league.get("country"),
+                    "season": league.get("season"),
+                },
+                "teams": {
+                    "home": {"id": home.get("id"), "name": home.get("name")},
+                    "away": {"id": away.get("id"), "name": away.get("name")},
+                },
+            }
+
         for day_str in dates:
-            remaining = MAX_FIXTURES_PER_REQUEST - len(fixtures)
-            if remaining <= 0:
-                break  # strop už je plný — appka nemá důvod volat další (dražší) dny
             day_fixtures = self._get("/fixtures", {"date": day_str})
             day_fixtures = [f for f in day_fixtures if f.get("league", {}).get("id") in TIPSPORT_LEAGUE_IDS]
             # Budoucí dny — filtruj jen NS (nezačalo), dnes — filtruj podle času
@@ -2450,8 +2502,24 @@ class APIFootballProvider(SportsDataProvider):
                 return (tier, cache_bonus, f.get("fixture", {}).get("date", ""))
 
             day_fixtures.sort(key=_sort_key)
-            fixtures.extend(day_fixtures[:remaining])
+            by_day[day_str] = [_trim_fixture(f) for f in day_fixtures]
             time.sleep(0.3)
+
+        # 1. kolo — z KAŽDÉHO dne appka nejdřív vezme jeho spravedlivou
+        # rezervu, ať den s méně zápasy nezůstane kvůli bohatšímu dni
+        # úplně naprázdno (viz vysvětlení u per_day_reserve výš).
+        for day_str in dates:
+            day_list = by_day.get(day_str, [])
+            fixtures.extend(day_list[:per_day_reserve])
+            by_day[day_str] = day_list[per_day_reserve:]  # zbytek pro 2. kolo
+
+        # 2. kolo — co ze stropu zbylo (typicky díky řídkým dnům, co
+        # rezervu ani nevyčerpaly), appka doplní z dnů, co měly zápasů víc.
+        for day_str in dates:
+            remaining = MAX_FIXTURES_PER_REQUEST - len(fixtures)
+            if remaining <= 0:
+                break
+            fixtures.extend(by_day.get(day_str, [])[:remaining])
 
         # Ulož do obou cache — in-memory pro tuto session, DB pro příští restart.
         # PRÁZDNÝ výsledek appka schválně NEUKLÁDÁ (2026-08-31) — appka zjistila,
