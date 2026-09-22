@@ -7872,6 +7872,13 @@ def showcase_tickets(limit: int = 20):
     for r in settled_rows:
         ticket = r["ticket"]
         created_at = r.get("created_at")
+        # "result" (won/lost/pending) appka páruje POZIČNĚ se samostatně
+        # uloženými r["selections"] (DB řádky) — stejný princip jako
+        # v /public/transparency. appka to potřebuje, ať appka na landing
+        # page umí u prohraného tiketu ukázat, KTERÁ konkrétní noha
+        # prohru způsobila, místo aby jen napsala "Prohra" bez rozlišení
+        # jednotlivých zápasů.
+        raw_selections = r.get("selections") or []
         tickets.append({
             "ticket_id": r["ticket_id"],
             "ticket_type": ticket.ticket_type,
@@ -7886,8 +7893,9 @@ def showcase_tickets(limit: int = 20):
                     "market_type": s.market_type.value if hasattr(s.market_type, "value") else s.market_type,
                     "selection": s.selection, "odds": s.odds,
                     "league": s.league, "country": s.country,
+                    "result": raw_selections[i]["result"] if i < len(raw_selections) else None,
                 }
-                for s in ticket.selections
+                for i, s in enumerate(ticket.selections)
             ],
         })
     return {"tickets": tickets}
