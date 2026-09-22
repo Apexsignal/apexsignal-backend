@@ -321,14 +321,19 @@ TIPSPORT_UNAVAILABLE_COUNTRIES = {"Russia"}  # appka (2026-09-15, uživatel:
                               # proto řeší přesněji, přes TIPSPORT_UNAVAILABLE_MATCH_IDS
                               # níže, ne přes celou zemi.
 
-TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508, 1638819, 1520895}  # appka (2026-09-22,
-                              # uživatel: "Goias nejde vsadit ted na tipsportu",
-                              # screenshot) — Goiás–Atlético Goianiense (Serie B
-                              # Brazílie, 26.9.2026) appce vygenerovala dvojtip,
-                              # ale appka na Tipsportu k zápasu ukazuje "K zápasu
-                              # nejsou další informace" (žádné kurzy), zatímco
-                              # ostatní zápasy stejného týmu je mají. appka
-                              # (2026-09-16, uživatel:
+TIPSPORT_UNAVAILABLE_MATCH_IDS = {1555508, 1638819}  # appka (2026-09-22) zkusila
+                              # sem krátce přidat i Goiás–Atlético Goianiense
+                              # (match_id 1520895, Serie B Brazílie, 26.9.2026) —
+                              # uživatel nahlásil "K zápasu nejsou další
+                              # informace" na Tipsportu, ale appka to zase
+                              # vyndala: zápas appka kontrolovala 4 dny dopředu,
+                              # a u méně sledovaných lig Tipsport kurz běžně
+                              # zveřejní až blíž ke startu, ne hned. Na rozdíl
+                              # od Hapoel Tel Aviv/Worcester City níže tu appka
+                              # NEMĚLA jasný signál trvalé absence, jen
+                              # předčasnou kontrolu — pokud se blíž k datu
+                              # ukáže, že kurz pořád chybí, přidat zpátky.
+                              # appka (2026-09-16, uživatel:
                               # "Hapoel tel aviv neni na tipsportu", screenshot
                               # Tipsportu bez nadcházejících zápasů) — na
                               # rozdíl od TIPSPORT_UNAVAILABLE_COUNTRIES appka
