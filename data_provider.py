@@ -2181,7 +2181,11 @@ TIPSPORT_LEAGUE_IDS: set[int] = {
     960,  # Euro - kvalifikace — appka měla kvalifikaci na MS, ale na Euro
           # kvalifikaci appka neměla vůbec nic
     5,    # UEFA Nations League
-    10,   # Friendlies (mezinárodní přátelská)
+    # Přátelské mezinárodní zápasy (league_id 10) appka VYŘADILA
+    # (2026-09-23, uživatel: "pratelaky nechci jsou nedulezity pro ty
+    # tymy") — pro samotné týmy nic neznamenají, sestavy/nasazení
+    # neodpovídá běžné motivaci, model na nich dává nespolehlivé
+    # predikce (spadl Gibraltar–São Tomé, appka ho nabízela).
     32,   # World Cup Qualifiers Europe
     34,   # World Cup Qualifiers South America
     29,   # World Cup Qualifiers Africa
