@@ -202,6 +202,18 @@ CREATE TABLE IF NOT EXISTS referral_link_clicks (
     clicked_at TIMESTAMP DEFAULT now()
 );
 
+-- appka appce sleduje QR/tiskové promo kódy (vizitky apod.) odděleně od
+-- doporučovacího systému výš — žádný "doporučitel", žádné provize, jen
+-- čistý marketingový trychtýř appky (navštívil → zaregistroval se →
+-- vygeneroval). Viz record_promo_event/get_promo_funnel_stats níž.
+CREATE TABLE IF NOT EXISTS promo_events (
+    id SERIAL PRIMARY KEY,
+    promo_code VARCHAR(32) NOT NULL,
+    event_type VARCHAR(16) NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS stripe_events (
     event_id VARCHAR(255) PRIMARY KEY,
     processed_at TIMESTAMP DEFAULT now()
@@ -502,6 +514,15 @@ def ensure_schema() -> None:
     try:
         with get_cursor() as cur:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS multi_account_flag BOOLEAN NOT NULL DEFAULT false")
+    except Exception:
+        pass
+
+    # QR/tiskové promo appka appce nastaví jen JEDNOU, při registraci (viz
+    # set_promo_source), ať appka pozná i po měsících, přes jaký kód se
+    # kdo zaregistroval — nezávislé na doporučovacím referral_code výš.
+    try:
+        with get_cursor() as cur:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS promo_source VARCHAR(32)")
     except Exception:
         pass
 
@@ -1494,6 +1515,68 @@ def get_user_id_by_referral_code(code: str) -> Optional[int]:
         cur.execute("SELECT id FROM users WHERE referral_code = %s", (code.strip().upper(),))
         row = cur.fetchone()
         return row["id"] if row else None
+
+
+def record_promo_event(promo_code: str, event_type: str, user_id: Optional[int] = None) -> None:
+    """Čistě marketingová analytika pro QR/tiskové kódy (vizitky apod.) —
+    appka appce nekontroluje platnost kódu, žádný dopad na peníze ani
+    tokeny (na rozdíl od set_promo_source, ten appka volá zvlášť)."""
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO promo_events (promo_code, event_type, user_id) VALUES (%s, %s, %s)",
+            (promo_code.strip().lower(), event_type, user_id),
+        )
+
+
+def set_promo_source(user_id: int, promo_code: str) -> bool:
+    """appka appce nastaví jen JEDNOU za život účtu (stejný vzor jako
+    set_referred_by), ať appka pozdější opakovanou návštěvou appce
+    nepřepíše, přes jaký kód se appka reálně zaregistrovala."""
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE users SET promo_source = %s WHERE id = %s AND promo_source IS NULL RETURNING promo_source",
+            (promo_code.strip().lower(), user_id),
+        )
+        return cur.fetchone() is not None
+
+
+def get_promo_source(user_id: int) -> Optional[str]:
+    with get_cursor() as cur:
+        cur.execute("SELECT promo_source FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row["promo_source"] if row else None
+
+
+def get_promo_funnel_stats(promo_code: str) -> dict:
+    code = promo_code.strip().lower()
+    with get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM promo_events WHERE promo_code = %s AND event_type = 'visit'", (code,))
+        visits = cur.fetchone()["c"]
+        cur.execute(
+            "SELECT COUNT(DISTINCT user_id) AS c FROM promo_events WHERE promo_code = %s AND event_type = 'register'",
+            (code,),
+        )
+        registered = cur.fetchone()["c"]
+        cur.execute(
+            "SELECT COUNT(DISTINCT user_id) AS c FROM promo_events WHERE promo_code = %s AND event_type = 'generate'",
+            (code,),
+        )
+        generated = cur.fetchone()["c"]
+        cur.execute(
+            """
+            SELECT u.email, u.created_at AS registered_at,
+                   EXISTS(
+                       SELECT 1 FROM promo_events pe
+                       WHERE pe.user_id = u.id AND pe.event_type = 'generate'
+                   ) AS has_generated
+            FROM users u
+            WHERE u.promo_source = %s
+            ORDER BY u.created_at DESC
+            """,
+            (code,),
+        )
+        users = [dict(r) for r in cur.fetchall()]
+    return {"visits": visits, "registered": registered, "generated": generated, "users": users}
 
 
 def record_referral_link_click(code: str) -> None:

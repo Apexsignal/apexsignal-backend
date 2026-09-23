@@ -367,6 +367,8 @@ class RegisterRequest(BaseModel):
     device_seen: Optional[bool] = None  # appka appce pošle True, když appka v localStorage appky
     # už NAJDE appčinu značku z PŘEDCHOZÍ registrace na stejném zařízení/prohlížeči — appka appce
     # to jen zaznamená pro admin přehled (viz multi_account_flag), appka na tom nic neblokuje.
+    promo: Optional[str] = None  # QR/tiskový promo kód z ?promo= — nezávislé na referral systému
+    # výš (žádný doporučitel, žádné provize), viz set_promo_source/QR_FLYER_GIFT_TOKENS níže.
 
     @field_validator("email")
     @classmethod
@@ -532,6 +534,17 @@ def register(req: RegisterRequest, request: Request):
         except Exception as e:
             print(f"[register] Nepodařilo se přiřadit doporučitele ({req.ref}): {e}")
 
+    # QR/tiskové promo kódy (vizitky apod.) — nezávislé na doporučovacím
+    # systému výš, appka appce nekontroluje, jestli appka kód "zná", jen
+    # ho appka uloží k účtu (viz set_promo_source) a zaznamená do
+    # appčina marketingového trychtýře (viz get_promo_funnel_stats).
+    if req.promo:
+        try:
+            db.set_promo_source(user_id, req.promo)
+            db.record_promo_event(req.promo, "register", user_id)
+        except Exception as e:
+            print(f"[register] Nepodařilo se zaznamenat promo kód ({req.promo}): {e}")
+
     # Uvítací dárek (jen když appka výš zjistila platného doporučitele)
     # appka dá až PO ověření e-mailu (viz /auth/verify-email) — jinak by
     # šlo dokola zakládat účty s vymyšlenými e-maily jen kvůli
@@ -574,6 +587,15 @@ def verify_email(req: VerifyEmailRequest):
                 free_tokens_granted = True
         except Exception as e:
             print(f"[verify_email] Nepodařilo se přidat uvítací dárek: {e}")
+        # QR/tiskový promo dárek (vizitky) — appka appce dá nezávisle na
+        # doporučovacím dárku výš (jiný, samostatný kanál), stejně
+        # jednorázově vázaný na potvrzení e-mailu.
+        try:
+            if db.get_promo_source(user_id) == QR_FLYER_PROMO_CODE:
+                db.adjust_tokens(user_id, QR_FLYER_GIFT_TOKENS, "QR_FLYER_GIFT")
+                free_tokens_granted = True
+        except Exception as e:
+            print(f"[verify_email] Nepodařilo se přidat QR promo dárek: {e}")
     return {"status": "E-mail potvrzen", "free_tokens_granted": free_tokens_granted}
 
 
@@ -606,6 +628,22 @@ def track_referral_click(req: TrackReferralClickRequest):
     code = req.code.strip().upper()
     if code and db.get_user_id_by_referral_code(code) is not None:
         db.record_referral_link_click(code)
+    return {"status": "ok"}
+
+
+class TrackPromoVisitRequest(BaseModel):
+    code: str
+
+
+@app.post("/promo/track-visit")
+def track_promo_visit(req: TrackPromoVisitRequest):
+    """QR/tiskové promo kódy (vizitky) appka sleduje odděleně od
+    doporučovacího systému výš — bez přihlášení (návštěvník landing page
+    se ještě nepřihlásil), žádná kontrola platnosti kódu, čistá
+    analytika appčina marketingového trychtýře."""
+    code = (req.code or "").strip().lower()
+    if code:
+        db.record_promo_event(code, "visit")
     return {"status": "ok"}
 
 
@@ -1449,6 +1487,14 @@ TOKEN_COSTS = {"kratky": 10}  # 300 Kč při TOKEN_KC_VALUE=30 — appka BOOST i
 # kdyby se cena krátkého tiketu někdy změnila — appka to chce takhle
 # svázané schválně.
 REFERRAL_CODE_GIFT_TOKENS = TOKEN_COSTS["kratky"]
+
+# QR/tiskový promo dárek (vizitky) — schválně 2× krátký tiket, svázané se
+# stejnou konstantou jako výš, ať appka nezapomene přepočítat, kdyby se
+# cena krátkého tiketu změnila. Kód "letak" je natvrdo daný, appka ho
+# appce nikde nezveřejňuje ke psaní, jen ho appka propíše přes QR odkaz.
+QR_FLYER_PROMO_CODE = "letak"
+QR_FLYER_GIFT_TOKENS = TOKEN_COSTS["kratky"] * 2
+
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
 
@@ -2874,6 +2920,18 @@ def admin_referral_suspicious_ip_matches(request: Request):
     }
 
 
+@app.get("/admin/promo/{code}/stats")
+def admin_promo_stats(code: str, request: Request):
+    """Appce (adminovi) ukáže marketingový trychtýř jednoho QR/tiskového
+    promo kódu — kolik lidí odkaz otevřelo, kolik se zaregistrovalo a
+    kolik z nich i reálně vygenerovalo tiket, plus úplný seznam
+    zaregistrovaných účtů (viz get_promo_funnel_stats)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    return db.get_promo_funnel_stats(code)
+
+
 @app.get("/admin/referral-membership/overview")
 def admin_referral_membership_overview(request: Request):
     """Appka appce (adminovi) ukáže VŠECHNY referrery, co appce vydělali
@@ -3999,10 +4057,23 @@ def get_generate_result(request_id: str):
     return payload
 
 
+def _maybe_record_promo_generate(user_id: int) -> None:
+    """Appka appce zaloguje 'generate' krok QR/tiskového trychtýře jen u
+    účtů, co appka založila přes promo kód (viz set_promo_source) — u
+    ostatních appka žádný extra dotaz navíc nedělá."""
+    try:
+        promo_source = db.get_promo_source(user_id)
+        if promo_source:
+            db.record_promo_event(promo_source, "generate", user_id)
+    except Exception as e:
+        print(f"[promo] Nepodařilo se zaznamenat generování ({user_id}): {e}")
+
+
 @app.post("/tickets/generate")
 def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
     _require_generation_enabled(user_id)
     _check_token_balance(user_id, req.risk_level)
+    _maybe_record_promo_generate(user_id)
     request_id = _start_generation_job(user_id, req, _run_generate_job)
     return {"request_id": request_id, "status": "processing"}
 
@@ -4011,6 +4082,7 @@ def generate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_curr
 def regenerate_tickets(req: TicketGenerateRequest, user_id: int = Depends(get_current_user_id)):
     _require_generation_enabled(user_id)
     _check_token_balance(user_id, req.risk_level)
+    _maybe_record_promo_generate(user_id)
     request_id = _start_generation_job(user_id, req, _run_regenerate_job)
     return {"request_id": request_id, "status": "processing"}
 
