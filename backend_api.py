@@ -1187,25 +1187,26 @@ class Repo:
 
     def get_all_saved_match_ids(self, user_id: int) -> list[int]:
         """
-        Vrátí match_ids, co appka nemá nabízet znovu — jen z PENDING
-        tiketů. Dřív appka brala úplně všechny uložené tikety bez ohledu
-        na status, což natrvalo vyřazovalo i zápasy, co se ještě
-        neodehrály, jen proto, že appka celý tiket označila "prohraný"
-        kvůli JINÉ noze (parlay: jedna prohraná noha = celý tiket
-        prohraný, i když appka ostatní zápasy ještě nestihla vyhodnotit
-        — viz _try_settle_ticket). Won/lost tikety appka z vyloučení
-        vypouští: zápasy z nich už appka nikdy jako budoucí kandidáty
-        nenabídne (jsou v minulosti), takže na výsledek to nemá vliv —
-        kromě přesně týhle situace, kterou appka opravuje.
+        Vrátí match_ids, co appka nemá nabízet znovu — podle toho, jestli
+        je KONKRÉTNÍ NOHA (výběr) ještě nerozhodnutá, ne podle stavu
+        celého tiketu. Dřív appka filtrovala jen tikety se
+        status='pending' — jenže tiket appka označí 'lost' hned, jakmile
+        prohraje JEDNA noha (parlay), i když ostatní nohy v něm ještě
+        vůbec neproběhly (viz _try_settle_ticket). Takový tiket appka
+        vyřadila z 'pending' filtru, a jeho ještě neodehraný zápas se tak
+        stal znovu volným kandidátem — appka ho uměla nabídnout do
+        DALŠÍHO tiketu, který se pak vyhodnotil jako druhá, samostatná
+        sázka na stejný reálný zápas (uživatel by v realitě druhou sázku
+        na už rozehraný tiket nikdy nedal). Skutečný incident 2026-09-24
+        na test2/TRANSPARENCY_USER_ID — 22 tiketů appka musela ručně
+        smazat, viz CLAUDE.md.
         """
-        rows = db.fetch_ticket_rows(user_id=user_id, status="pending")
+        rows = db.fetch_ticket_rows(user_id=user_id)
         match_ids = set()
         for row in rows:
-            ticket = row.get("ticket")
-            if ticket and hasattr(ticket, "selections"):
-                for s in ticket.selections:
-                    if hasattr(s, "match_id"):
-                        match_ids.add(s.match_id)
+            for sel_row in row.get("selections", []):
+                if sel_row.get("result", "pending") == "pending":
+                    match_ids.add(sel_row["match_id"])
         return list(match_ids)
 
     def get_pending_match_ids(self, user_id: int) -> list[int]:
@@ -5140,6 +5141,31 @@ def admin_user_tickets(request: Request, email: str):
 
     tickets = _list_saved_tickets_for_user(user["id"])
     return {"user_id": user["id"], "email": email, "tickets": tickets}
+
+
+class AdminDeleteTicketsRequest(BaseModel):
+    ticket_ids: list[int]
+
+
+@app.post("/admin/delete-tickets")
+def admin_delete_tickets(req: AdminDeleteTicketsRequest, request: Request):
+    """
+    Ruční jednorázové mazání konkrétních tiketů podle ID (admin-key,
+    NIKOLI generický bulk nástroj — appka vždy dostane explicitní seznam
+    ID, žádné 'smaž podle podmínky' uvnitř endpointu). Vzniklo
+    2026-09-24 kvůli úklidu na test2/TRANSPARENCY_USER_ID po opravě
+    get_all_saved_match_ids (viz komentář tam) — appka omylem nabídla
+    stejný reálný zápas do víc než jednoho tiketu téhož uživatele, což by
+    appka v realitě nikdy neudělala (druhá sázka na už rozehraný tiket).
+    """
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    deleted = []
+    for tid in req.ticket_ids:
+        db.delete_ticket(tid)
+        deleted.append(tid)
+    return {"deleted_ticket_ids": deleted, "count": len(deleted)}
 
 
 @app.get("/tickets/saved", response_model=list[TicketResponse])
