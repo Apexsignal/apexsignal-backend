@@ -3596,6 +3596,18 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
 
     print(f"[enrich-odds] {len(events)} events z the-odds-api, {matched_count}/{len(matches)} zápasů napárováno")
 
+    # Appka appce (2026-09-24) uvolní `events` HNED po napárování, ne až
+    # na konci funkce — the-odds-api appce vrací zápasy ze VŠECH ~40 lig
+    # najednou (appka si nemůže vybrat jen ty, co reálně potřebuje, viz
+    # OddsAPIProvider.SPORT_KEYS), takže i po ořezání (_trim_odds_event)
+    # je to pořád stovky eventů držených v paměti navíc, přesně v době,
+    # kdy appka pokračuje dalším náročným obohacením (extra trhy,
+    # OddsPapi) a pak stavbou kandidátů — živě reprodukovaný OOM pád
+    # (2026-09-24, po obnovení ODDSAPI_KEY appka zápasy zase skutečně
+    # stahuje, ne jen okamžitě selže na došlé kvótě jako předtím).
+    del events
+    gc.collect()
+
     if sport == Sport.FOOTBALL and matched_pairs:
         _enrich_shortlist_with_extra_markets(matched_pairs)
 
