@@ -5090,6 +5090,26 @@ def _list_saved_tickets_for_user(user_id: int) -> list[TicketResponse]:
     return result_list
 
 
+@app.get("/admin/user-lookup")
+def admin_user_lookup(request: Request, ids: str):
+    """Diagnostika — appka najde e-mail pro daná ID účtů (čárkou oddělený
+    seznam, např. ?ids=2,5,17). Read-only, nic neukládá. Vzniklo kvůli
+    dohledání appčiných vlastních cronových účtů (DAILY_TICKETS_USER_ID
+    a spol.) po ztrátě proměnných prostředí na Renderu (2026-09-24)."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ids musí být čárkou oddělená čísla")
+    results = []
+    for uid in id_list:
+        user = db.get_user_by_id(uid)
+        results.append({"id": uid, "email": user["email"] if user else None})
+    return {"users": results}
+
+
 @app.get("/admin/user-tickets")
 def admin_user_tickets(request: Request, email: str):
     """
