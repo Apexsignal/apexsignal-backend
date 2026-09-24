@@ -190,6 +190,23 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
 
 ## Stojící pravidla od uživatele (nezapomenout)
 
+- **BEZPEČNOSTNÍ POJISTKA (zavedeno 2026-09-24, po incidentu — appka
+  omylem smazala VŠECHNY proměnné prostředí na Renderu hromadným PUT
+  příkazem při testování Instagram OAuth, appka appku appky appku appku
+  na několik minut úplně shodila).** Než appka udělá COKOLIV z tohohle:
+  - zápis/mazání proměnných prostředí (env vars) na Renderu nebo jinde,
+  - mazání souborů/složek mimo appčin scratchpad,
+  - jakoukoliv hromadnou/destruktivní operaci (bulk PUT, force push,
+    DROP, apod.),
+  - manipulaci s API klíči/hesly/tajnými hodnotami,
+
+  appka se MUSÍ nejdřív zeptat a počkat na **heslo appky appka** —
+  konkrétní heslo appka appce NEZAPISUJE sem do repozitáře (uživatel to
+  výslovně řekl v chatu, appka si ho pamatuje jen v rámci konverzace,
+  ne natrvalo v kódu). Appka zápis/mazání BEZ tohohle hesla neprovede,
+  ani při jasném příkazu na obsah — tohle pravidlo stojí NAD běžnou
+  konzultační výjimkou níž. Test/čtecí (GET, read-only) volání appka
+  dál smí dělat volně, jen ZÁPISY/MAZÁNÍ appka gatuje heslem.
 - **"Nejdriv semnou konzultuj vzdy nez neco budes menit!!!"** — vždy
   nejdřív konzultovat, než se něco změní. (V praxi: pokud přijde jasný,
   přímý příkaz na OBSAH změny, ten už JE konzultace/schválení pro tu
