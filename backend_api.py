@@ -3997,7 +3997,17 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         # uživatele zbytečně čekat na "nic nenašla", i když je opravdu ochotná
         # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
         # co appka reálně udělala.
-        if result["safe"] is None:
+        # req.time_frame_days appka výš ořízla na max 3 — a _fetch_candidate_matches
+        # udělá to samé oříznutí ZNOVU na cokoliv appka pošle (viz tamní
+        # komentář), takže "širší" pokus při time_frame_days už na
+        # stropu (3) by appce jen znovu stáhl a zpracoval NAPROSTO
+        # STEJNÁ data od nuly — appka appce zdvojnásobila práci (druhé
+        # stahování + druhé sestavování kandidátů) bez jediné šance na
+        # jiný výsledek. Živě reprodukovaný pád 2026-09-24 (uživatel
+        # zvolil 4 dny → appka ořízla na 3 → widen pokus na "4" appka
+        # zase ořízla na 3 → identická data podruhé). Appka teď widen
+        # přeskočí úplně, když už na stropu appka je.
+        if result["safe"] is None and req.time_frame_days < 3:
             # Appka původní (užší) pool zápasů dál nepotřebuje — širší ho
             # nahradí. Uvolní ho PŘED stažením širšího, ne až po něm, ať
             # appka nedrží oba pooly v paměti naráz (2026-09-24, appka na
@@ -4053,6 +4063,27 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
                             f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly) — "
                             f"nabízí zápasy až za {wider_days} dní."
                         )
+        elif result["safe"] is None:
+            # req.time_frame_days appka už má na stropu (3) — širší pokus
+            # by appce jen znovu stáhl identická data (viz komentář výš),
+            # appka proto zkusí aspoň VŠECHNY trhy na už staženém a
+            # obohaceném poolu, bez jediného dalšího síťového volání.
+            all_markets = _all_markets_for_sports(req.sports)
+            if set(all_markets) != set(req.market_types):
+                markets_result = ticket_generator.generate(
+                    matches, req.risk_level, req.sports, all_markets, req.time_frame_days,
+                    pool_filter=_pool_filter_for_risk(req.risk_level),
+                    allow_relaxed_min_odds=allow_relaxed_min_odds,
+                )
+                gc.collect()
+                if markets_result["safe"] is not None:
+                    result = markets_result
+                    pool_for_peek, time_frame_for_peek, markets_for_peek = matches, req.time_frame_days, all_markets
+                    horizon_note = (
+                        f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                        f"{'den' if req.time_frame_days == 1 else 'dny'}) a zvolených trzích nenašla žádnou "
+                        f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly)."
+                    )
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
@@ -4115,8 +4146,11 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
         gc.collect()  # viz stejná pojistka v _run_generate_job (OOM na starter plánu)
 
         # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
-        # zkusí, ale vždycky to řekne přes horizon_note.
-        if result["safe"] is None:
+        # zkusí, ale vždycky to řekne přes horizon_note. Stejně jako tam
+        # appka widen PŘESKOČÍ, když je time_frame_days už na stropu (3) —
+        # jinak by appce jen znovu stáhla identická data (viz komentář
+        # u _run_generate_job).
+        if result["safe"] is None and req.time_frame_days < 3:
             # Viz stejná pojistka v _run_generate_job — appka uvolní
             # původní (užší) pool PŘED stažením širšího, ne až po něm.
             del matches
@@ -4161,6 +4195,25 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
                             f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly) — "
                             f"nabízí zápasy až za {wider_days} dní."
                         )
+        elif result["safe"] is None:
+            # req.time_frame_days appka už má na stropu — viz stejná
+            # větev v _run_generate_job. Zkusí aspoň všechny trhy na už
+            # staženém poolu, bez dalšího síťového volání.
+            all_markets = _all_markets_for_sports(req.sports)
+            if set(all_markets) != set(req.market_types):
+                markets_result = ticket_generator.regenerate(
+                    matches, req.risk_level, req.sports, all_markets, req.time_frame_days, list(previous_ids),
+                    pool_filter=_pool_filter_for_risk(req.risk_level),
+                    allow_relaxed_min_odds=allow_relaxed_min_odds,
+                )
+                gc.collect()
+                if markets_result["safe"] is not None:
+                    result = markets_result
+                    horizon_note = (
+                        f"Appka v tvém vybraném časovém rámci ({req.time_frame_days} "
+                        f"{'den' if req.time_frame_days == 1 else 'dny'}) a zvolených trzích nenašla žádnou "
+                        f"kombinaci s dostatečnou důvěrou, tak zkusila i ostatní trhy (např. Under góly)."
+                    )
 
         used_ids = [s.match_id for t in result.values() if t for s in t.selections]
         repo.set_last_batch(user_id, used_ids)
