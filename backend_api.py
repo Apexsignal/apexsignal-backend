@@ -5682,16 +5682,24 @@ def _generate_one_ticket_for_cron(
     if len(matches) < 3 and max_widen_days > 0:
         matches = all_wider_matches
 
+    # Appka appce (2026-09-24) doplňuje stejné gc.collect() mezi pokusy,
+    # co má /tickets/generate (_run_generate_job) — tahle funkce dřív
+    # dělala až 3 volání ticket_generator.generate() za sebou na stejném
+    # (širokém) poolu BEZ úklidu mezitím, což appce na 512MB Render plánu
+    # padalo OOM (živě reprodukováno 2026-09-24 přes /admin/test3-daily-tickets,
+    # co tuhle funkci appka appce volá).
     result = ticket_generator.generate(
         matches, risk_level, sports, market_types, time_frame_days,
         pool_filter=_pool_filter_for_risk(risk_level),
     )
+    gc.collect()
 
     if result["safe"] is None:
         result = ticket_generator.generate(
             all_wider_matches, risk_level, sports, market_types, time_frame_days,
             pool_filter=_pool_filter_for_risk(risk_level),
         )
+        gc.collect()
 
     # Poslední záchranná síť (2026-09-18, uživatelovo přání: appka má
     # PŘEDNOSTNĚ stavět tiket v plném rozsahu 1.90-3.0, ale když se to ani
@@ -5704,6 +5712,7 @@ def _generate_one_ticket_for_cron(
             all_wider_matches, risk_level, sports, market_types, time_frame_days,
             pool_filter=_pool_filter_for_risk(risk_level), allow_relaxed_min_odds=True,
         )
+        gc.collect()
 
     return result["safe"]
 
