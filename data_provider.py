@@ -1752,22 +1752,21 @@ class OddsPapiProvider:
         Appka tenhle request kešuje týden (stejně jako the-odds-api) —
         odpověď je velká (~8 MB) a appka má jen 250/měsíc, takže appka
         nechce stejný zápas stahovat znovu při každém dalším generování
-        ten samý den.
+        ten samý den. Kešuje se ale JEN do databáze (disk), ne do
+        in-memory keše appky instance — appka umí za jedno generování
+        zavolat tohle až ODDSPAPI_MAX_SHORTLIST× (10), takže by appka
+        v paměti mohla naráz držet klidně 80 MB syrových dat (appka na
+        tomhle na 512MB Render plánu padala OOM, 2026-09-24).
         """
         cache_key = f"op_odds:{fixture_id}"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
         try:
             import db as _db
             db_cached = _db.cache_get(cache_key)
             if db_cached is not None:
-                self._cache.set(cache_key, db_cached)
                 return db_cached
         except Exception:
             pass
         data = self._get("/odds", {"fixtureId": fixture_id})
-        self._cache.set(cache_key, data)
         try:
             import db as _db
             _db.cache_set(cache_key, data, ttl_seconds=7 * 24 * 3600)
