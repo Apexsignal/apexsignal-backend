@@ -2922,6 +2922,116 @@ def admin_referral_suspicious_ip_matches(request: Request):
     }
 
 
+INSTAGRAM_OAUTH_STATE_SETTING_KEY = "instagram_oauth_state"
+INSTAGRAM_TOKEN_SETTING_KEY = "instagram_access_token"
+# Instagram API s Instagram Login žádá rovnou tyhle 4 scope — appka
+# nepotřebuje Facebook Login for Business ani starší Instagram Basic
+# Display API (ten appka nepoužívá).
+INSTAGRAM_OAUTH_SCOPES = (
+    "instagram_business_basic,instagram_business_content_publish,"
+    "instagram_business_manage_comments,instagram_business_manage_messages"
+)
+
+
+def _instagram_redirect_uri() -> str:
+    backend_url = os.environ.get("BACKEND_URL", "https://apexsignal-backend.onrender.com")
+    return f"{backend_url}/admin/instagram/oauth-callback"
+
+
+@app.get("/admin/instagram/oauth-start")
+def instagram_oauth_start(request: Request):
+    """Appka vygeneruje odkaz na Instagram OAuth přihlášení — jednorázově
+    appka potřebuje živého člověka, co se přihlásí a povolí přístup
+    (appka to sama odklikat nemůže), ale výměnu kódu za trvalý token si
+    appka udělá sama v /admin/instagram/oauth-callback — obchází to
+    nestabilní Graph API Explorer UI."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.query_params.get("admin_key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící admin klíč")
+    ig_app_id = os.environ.get("INSTAGRAM_APP_ID")
+    if not ig_app_id:
+        raise HTTPException(status_code=500, detail="Chybí INSTAGRAM_APP_ID v env proměnných")
+    state = secrets.token_urlsafe(24)
+    db.set_setting(INSTAGRAM_OAUTH_STATE_SETTING_KEY, state)
+    auth_url = (
+        "https://www.instagram.com/oauth/authorize"
+        f"?client_id={ig_app_id}&redirect_uri={requests.utils.quote(_instagram_redirect_uri(), safe='')}"
+        f"&response_type=code&scope={INSTAGRAM_OAUTH_SCOPES}&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+
+@app.get("/admin/instagram/oauth-callback")
+def instagram_oauth_callback(request: Request):
+    """Instagram sem appku přesměruje po přihlášení uživatele
+    (?code=...&state=...) — appka kód vymění nejdřív za krátkodobý, pak
+    za dlouhodobý (60 dní) token a uloží ho do app_settings."""
+    error = request.query_params.get("error")
+    if error:
+        return {"status": "error", "detail": request.query_params.get("error_description", error)}
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
+    saved_state = db.get_setting(INSTAGRAM_OAUTH_STATE_SETTING_KEY)
+    if not code or not state or state != saved_state:
+        raise HTTPException(status_code=400, detail="Neplatný OAuth state nebo chybí kód")
+
+    ig_app_id = os.environ.get("INSTAGRAM_APP_ID")
+    ig_app_secret = os.environ.get("INSTAGRAM_APP_SECRET")
+    if not ig_app_id or not ig_app_secret:
+        raise HTTPException(status_code=500, detail="Chybí INSTAGRAM_APP_ID/INSTAGRAM_APP_SECRET v env proměnných")
+
+    try:
+        short_resp = requests.post(
+            "https://api.instagram.com/oauth/access_token",
+            data={
+                "client_id": ig_app_id,
+                "client_secret": ig_app_secret,
+                "grant_type": "authorization_code",
+                "redirect_uri": _instagram_redirect_uri(),
+                "code": code,
+            },
+            timeout=20,
+        )
+        short_resp.raise_for_status()
+        short_body = short_resp.json()
+        if "data" in short_body and isinstance(short_body["data"], list) and short_body["data"]:
+            short_token = short_body["data"][0]["access_token"]
+            ig_user_id = short_body["data"][0].get("user_id")
+        else:
+            short_token = short_body["access_token"]
+            ig_user_id = short_body.get("user_id")
+
+        long_resp = requests.get(
+            "https://graph.instagram.com/access_token",
+            params={
+                "grant_type": "ig_exchange_token",
+                "client_secret": ig_app_secret,
+                "access_token": short_token,
+            },
+            timeout=20,
+        )
+        long_resp.raise_for_status()
+        long_body = long_resp.json()
+        long_token = long_body["access_token"]
+        expires_in = long_body.get("expires_in")
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Výměna Instagram tokenu selhala: {e}")
+
+    db.set_setting(
+        INSTAGRAM_TOKEN_SETTING_KEY,
+        json.dumps({
+            "access_token": long_token,
+            "ig_user_id": ig_user_id,
+            "obtained_at": datetime.now(timezone.utc).isoformat(),
+            "expires_in_seconds": expires_in,
+        }),
+    )
+    return HTMLResponse(
+        "<h1>Hotovo</h1><p>Instagram účet je propojený, token je uložený. "
+        "Tohle okno můžeš zavřít.</p>"
+    )
+
+
 @app.get("/admin/promo/{code}/stats")
 def admin_promo_stats(code: str, request: Request):
     """Appce (adminovi) ukáže marketingový trychtýř jednoho QR/tiskového
