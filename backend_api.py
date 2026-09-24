@@ -3546,7 +3546,7 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     vlastním odhadu.
     """
     try:
-        odds_provider = data_provider.OddsAPIProvider()
+        odds_provider = data_provider.get_odds_api_provider()
     except RuntimeError:
         return
 
@@ -3621,7 +3621,7 @@ def _enrich_shortlist_with_extra_markets(matched_pairs: list[tuple[MatchInput, "
     the-odds-api event (bez event_id appka nemá na co se ptát).
     """
     try:
-        odds_provider = data_provider.OddsAPIProvider()
+        odds_provider = data_provider.get_odds_api_provider()
     except RuntimeError:
         return
 
@@ -6726,7 +6726,7 @@ def test_odds_markets(
         raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
 
     try:
-        odds_provider = data_provider.OddsAPIProvider()
+        odds_provider = data_provider.get_odds_api_provider()
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -7259,7 +7259,7 @@ def odds_match_diagnostic(request: Request, time_frame_days: int = 1):
     fixtures = [data_provider.adapt_api_football_fixture(f) for f in raw_fixtures]
 
     try:
-        odds_provider = data_provider.OddsAPIProvider()
+        odds_provider = data_provider.get_odds_api_provider()
     except RuntimeError:
         raise HTTPException(status_code=500, detail="ODDSAPI_KEY není nastavený — appka nemůže nic párovat.")
     events = odds_provider.get_odds(Sport.FOOTBALL)

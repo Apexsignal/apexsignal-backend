@@ -3306,3 +3306,21 @@ def get_provider(sport: Sport) -> SportsDataProvider:
 
     _PROVIDER_CACHE[sport] = provider
     return provider
+
+
+# OddsAPIProvider appka dřív vytvářela ZNOVU při každém volání (4 místa
+# v backend_api.py) — jeho 5minutová in-memory keš (self._cache) tak byla
+# fakticky k ničemu (nová prázdná instance pokaždé), takže appka i pro
+# opakované generování v krátké době pořád chodila aspoň na DB pro
+# každou ligu zvlášť (~35-40 dotazů), místo aby četla už rozbalená data
+# z paměti. Sdílený singleton (2026-09-24, appka appce hledala další
+# rezervu na 512MB Render plánu) zrychlí opakované generování v okně pár
+# minut a sníží zbytečné znovu-alokace stejných dat pod souběžnou zátěží.
+_ODDS_API_PROVIDER_CACHE: Optional["OddsAPIProvider"] = None
+
+
+def get_odds_api_provider() -> "OddsAPIProvider":
+    global _ODDS_API_PROVIDER_CACHE
+    if _ODDS_API_PROVIDER_CACHE is None:
+        _ODDS_API_PROVIDER_CACHE = OddsAPIProvider()
+    return _ODDS_API_PROVIDER_CACHE
