@@ -916,6 +916,42 @@ def adapt_api_tennis_player_stats(player: dict) -> dict:
 # ŽIVÉ KURZY — the-odds-api.com (samostatná vrstva, kombinuje se s výše
 # uvedenými providery). Dokumentace: the-odds-api.com/liveapi/guides/v4
 # =======================================================================
+def _trim_odds_event(event: dict) -> dict:
+    """
+    Appka stahuje kurzy až ze ~40 lig najednou, každý event nese desítky
+    bookmakerů s metadaty, co appka nikdy nečte (title, last_update per
+    market/bookmaker, region...) — adapt_odds_api_event a
+    find_matching_odds_event čtou jen tohle. Appka to ořezává rovnou při
+    stažení (stejný princip jako _trim_fixture u API-Football), ať appka
+    v paměti nedrží víc, než reálně potřebuje — na tomhle appka spadla
+    kvůli nedostatku paměti při obohacování o kurzy (2026-09-24).
+    """
+    return {
+        "id": event.get("id"),
+        "sport_key": event.get("sport_key"),
+        "home_team": event.get("home_team"),
+        "away_team": event.get("away_team"),
+        "commence_time": event.get("commence_time"),
+        "bookmakers": [
+            {
+                "key": bm.get("key"),
+                "markets": [
+                    {
+                        "key": m.get("key"),
+                        "outcomes": [
+                            {"name": o.get("name"), "price": o.get("price"), "point": o.get("point")}
+                            for o in m.get("outcomes", [])
+                        ],
+                    }
+                    for m in bm.get("markets", [])
+                    if m.get("key") in ("h2h", "totals", "btts")
+                ],
+            }
+            for bm in event.get("bookmakers", [])
+        ],
+    }
+
+
 class OddsAPIProvider:
     BASE_URL = "https://api.the-odds-api.com/v4"
 
@@ -1034,7 +1070,7 @@ class OddsAPIProvider:
             except requests.exceptions.RequestException as e:
                 print(f"[odds-api] {sport_key}: {e}")
                 continue
-            data = resp.json()
+            data = [_trim_odds_event(e) for e in resp.json()]
             self._cache.set(cache_key, data)
             try:
                 import db as _db
