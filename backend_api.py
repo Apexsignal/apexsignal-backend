@@ -3952,6 +3952,12 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
         # nabídnout aspoň něco), ale VŽDY to uživateli řekne přes horizon_note,
         # co appka reálně udělala.
         if result["safe"] is None:
+            # Appka původní (užší) pool zápasů dál nepotřebuje — širší ho
+            # nahradí. Uvolní ho PŘED stažením širšího, ne až po něm, ať
+            # appka nedrží oba pooly v paměti naráz (2026-09-24, appka na
+            # tomhle na 512MB Render plánu padala OOM).
+            del matches
+            gc.collect()
             wider_days = req.time_frame_days + 1
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in exclude_ids]
@@ -4064,6 +4070,10 @@ def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairR
         # Viz stejná poznámka v generate_tickets — appka rozšíření pořád
         # zkusí, ale vždycky to řekne přes horizon_note.
         if result["safe"] is None:
+            # Viz stejná pojistka v _run_generate_job — appka uvolní
+            # původní (užší) pool PŘED stažením širšího, ne až po něm.
+            del matches
+            gc.collect()
             wider_days = req.time_frame_days + 1
             all_wider_matches = _fetch_candidate_matches(req.sports, wider_days, request_id=req.request_id)
             all_wider_matches = [m for m in all_wider_matches if m.match_id not in combined_exclude]
