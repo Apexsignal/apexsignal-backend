@@ -291,10 +291,60 @@ na GitHubu"). Nová konverzace si je musí získat z těchhle míst:
 | Účty appky pro cron úlohy | Render (ID appčiných účtů v DB) | `DAILY_TICKETS_USER_ID`, `TRANSPARENCY_USER_ID`, `TEST3_USER_ID` |
 | Netlify (frontend deploy) | MCP nástroj (pokud dostupný) NEBO Netlify CLI + Personal Access Token, co pošle uživatel v chatu (`https://app.netlify.com/user/applications#personal-access-tokens`) | site `apexsignalapp`, ID `4a1b79c9-f2ca-4a57-a5ff-df02c2c6bc57` (`apexsignal.cz`) — **ověřeno živě 2026-08-18 přes `GET /api/v1/sites`, VŽDY takhle ověřit znovu, nespoléhat na ID zapsaná v historii tohoto souboru** |
 | **SportBreak.cz** (ruční nahrávání reálných tiketů) | appka login zná: `apexsignal02@seznam.cz` — **heslo appka do repa neukládá**, sdělí ho uživatel přímo v chatu nové konverzaci, až ho bude appka potřebovat | — |
+| OddsPapi (třetí zdroj kurzů) | oddspapi.io dashboard → Render | `ODDSPAPI_KEY` (free plán, 250 req/měsíc — appka umí ověřit zůstatek přes `GET /admin/test-oddspapi`) |
+| Python verze buildu (Render appku bez tohohle defaultuje na nejnovější Python, což appce naposledy rozbilo build — viz incident 2026-09-24) | `render.yaml` (literální hodnota, NE `sync: false`) → Render | `PYTHON_VERSION` (aktuálně `3.12.4`) |
+| Instagram OAuth (appka si staví vlastní obchozí flow, viz `/admin/instagram/oauth-start`) | developers.facebook.com → Render | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` |
+| Render API token (appka s ním umí zapisovat JEDNOTLIVÉ env vars, spouštět deploy, číst memory metriky) | Render dashboard → avatar vpravo nahoře → Account Settings → API Keys → Create API Key — appka ho NEUKLÁDÁ natrvalo nikde, dostane ho v chatu, až ho bude potřebovat | NENÍ to env var appky samotné appky — je to jiný typ tokenu (Render account-level, appka ho použije jen když ho uživatel pošle v chatu) |
 
 Pozn.: appka je "fotbal only" byznys rozhodnutí (uživatel: "Ne bude jen
 fotbal žadnej tenis") — `APITENNIS_KEY` v kódu existuje, ale appka ho
 aktivně nevyužívá pro produkční tikety.
+
+### Živě ověřený kontrolní seznam proměnných prostředí (2026-09-24, 15:40)
+
+Appka si POUZE JMÉNA (bez hodnot!) živě stáhla přes Render API
+(`GET /v1/services/{id}/env-vars`) — přesně tohle appka chtěla mít
+zapsané POTÉ, co jí incident z rána (hromadné smazání všech env vars)
+stál celé dopoledne rekonstrukce. Když se něco podobného stane znovu,
+nová konverzace TOHLE porovná se skutečným stavem na Renderu (stejným
+voláním) — chybějící klíč pozná OKAMŽITĚ, bez hádání, co vůbec mělo
+existovat:
+
+```
+ADMIN_TASK_KEY, ANTHROPIC_API_KEY, APISPORTS_KEY, DAILY_TICKETS_USER_ID,
+DATABASE_URL, FRONTEND_URL, GOOGLE_CLIENT_ID, INSTAGRAM_APP_ID,
+INSTAGRAM_APP_SECRET, ODDSAPI_KEY, ODDSPAPI_KEY, PYTHON_VERSION,
+SECRET_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, TELEGRAM_BOT_TOKEN,
+TELEGRAM_BOT_USERNAME, TELEGRAM_CHAT_ID, TELEGRAM_CHAT_ID_WIFE,
+TELEGRAM_WEBHOOK_SECRET, TEST3_USER_ID, TRANSPARENCY_USER_ID
+```
+
+(22 proměnných — `APITENNIS_KEY` a `STRIPE_CHANNEL_PAYMENT_LINK_URL`
+appka záměrně nemá nastavené, viz poznámky výš, to není chyba/mezera.)
+
+### Poslední ověřeně fungující stav appky (záloha, 2026-09-24 15:40)
+
+Uživatel po ránu s incidentem env proměnných výslovně požádal appku
+o zálohu fungujícího stavu ("Tohle uz nechci nikdy zazit"). Appka nemá
+kam nahrát binární zálohu celé appky (jen appčin GitHub repo drží kód),
+takže appka jako zálohu uložila **přesný commit SHA** posledního stavu,
+co appka OSOBNĚ živě ověřila v produkci — na téhle verzi appka nechala
+uživatele vygenerovat a uložit skutečný tiket, žádná simulace:
+
+**`df4323b` (`df4323bc71655cf4968ed0ed0fb4a6c26915c7d1`) na `main`.**
+
+Návrat k tomuhle stavu (appka tím vrátí POUZE kód — env proměnné a DB
+appka tímhle NEOPRAVÍ, jen kód appky):
+
+```
+git fetch origin main
+git reset --hard df4323b
+git push origin main --force-with-lease
+```
+
+**Appka tohle NEPOUŽIJE bez hesla appky (force push = hromadná/destruktivní
+operace, viz bezpečnostní pojistka výš) — a jen pro doopravdy havarijní
+situaci, ne jako rutinu.**
 
 ## Rozpracované / otevřené věci k 2026-07-30
 
