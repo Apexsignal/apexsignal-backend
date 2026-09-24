@@ -3057,6 +3057,160 @@ def instagram_status(request: Request):
     return {"connected": True, "obtained_at": stored.get("obtained_at"), "profile": resp.json()}
 
 
+def _get_instagram_credentials() -> tuple[str, str]:
+    """Appka appce vytáhne uložený token + ig_user_id, nebo appce rovnou
+    řekne, že se má nejdřív propojit (viz /admin/instagram/oauth-start)."""
+    raw = db.get_setting(INSTAGRAM_TOKEN_SETTING_KEY)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Instagram účet není propojený — nejdřív projdi /admin/instagram/oauth-start.")
+    stored = json.loads(raw)
+    return stored["access_token"], stored["ig_user_id"]
+
+
+def _require_instagram_admin(request: Request) -> None:
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+
+
+class InstagramPublishImageRequest(BaseModel):
+    image_url: str  # musí být veřejně dostupná URL, appka appce přímý upload souboru nepodporuje
+    caption: str = ""
+
+
+@app.post("/admin/instagram/publish-image")
+def instagram_publish_image(req: InstagramPublishImageRequest, request: Request):
+    """Publikuje jeden obrázek na appčin Instagram feed. image_url musí
+    být veřejně dostupná (Instagram si obrázek sám stáhne) — appka appce
+    nepřijímá přímý upload souboru, jen odkaz."""
+    _require_instagram_admin(request)
+    access_token, ig_user_id = _get_instagram_credentials()
+    try:
+        create_resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/media",
+            data={"image_url": req.image_url, "caption": req.caption, "access_token": access_token},
+            timeout=30,
+        )
+        create_resp.raise_for_status()
+        creation_id = create_resp.json()["id"]
+        publish_resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/media_publish",
+            data={"creation_id": creation_id, "access_token": access_token},
+            timeout=30,
+        )
+        publish_resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Publikace obrázku selhala: {detail}")
+    return publish_resp.json()
+
+
+class InstagramPublishReelRequest(BaseModel):
+    video_url: str  # stejně jako u obrázku — veřejně dostupná URL
+    caption: str = ""
+    cover_url: Optional[str] = None
+
+
+@app.post("/admin/instagram/publish-reel")
+def instagram_publish_reel(req: InstagramPublishReelRequest, request: Request):
+    """Publikuje video jako Reel. Instagram video zpracovává asynchronně
+    — appka po vytvoření kontejneru počká (max ~2,5 minuty, 5s intervaly)
+    na status FINISHED, než appka zavolá samotné publikování. Delší
+    zpracování (velká videa) appka vrátí jako timeout — appka appce pak
+    doporučuje zkusit /admin/instagram/publish-reel znovu za chvíli
+    s tím samým video_url (appka appce container appce po timeoutu
+    zahodí, appka appce to musí zkusit od začátku)."""
+    _require_instagram_admin(request)
+    access_token, ig_user_id = _get_instagram_credentials()
+    try:
+        params = {"media_type": "REELS", "video_url": req.video_url, "caption": req.caption, "access_token": access_token}
+        if req.cover_url:
+            params["cover_url"] = req.cover_url
+        create_resp = requests.post(f"https://graph.instagram.com/v21.0/{ig_user_id}/media", data=params, timeout=30)
+        create_resp.raise_for_status()
+        creation_id = create_resp.json()["id"]
+
+        for _ in range(30):
+            status_resp = requests.get(
+                f"https://graph.instagram.com/v21.0/{creation_id}",
+                params={"fields": "status_code", "access_token": access_token},
+                timeout=15,
+            )
+            status_resp.raise_for_status()
+            status_code = status_resp.json().get("status_code")
+            if status_code == "FINISHED":
+                break
+            if status_code == "ERROR":
+                raise HTTPException(status_code=502, detail="Instagram zpracování videa selhalo (status ERROR).")
+            time.sleep(5)
+        else:
+            raise HTTPException(status_code=504, detail="Video appka nestihla zpracovat do 2,5 minuty — zkus to znovu za chvíli.")
+
+        publish_resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/media_publish",
+            data={"creation_id": creation_id, "access_token": access_token},
+            timeout=30,
+        )
+        publish_resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Publikace reels selhala: {detail}")
+    return publish_resp.json()
+
+
+class InstagramReplyCommentRequest(BaseModel):
+    comment_id: str
+    message: str
+
+
+@app.post("/admin/instagram/reply-comment")
+def instagram_reply_comment(req: InstagramReplyCommentRequest, request: Request):
+    """Odpoví na konkrétní komentář (appka comment_id získá např. přes
+    Instagram appku samotnou, appka appce zatím nemá vlastní přehled
+    komentářů — to by appka řešila samostatně, přes webhooky)."""
+    _require_instagram_admin(request)
+    access_token, _ = _get_instagram_credentials()
+    try:
+        resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{req.comment_id}/replies",
+            data={"message": req.message, "access_token": access_token},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Odpověď na komentář selhala: {detail}")
+    return resp.json()
+
+
+class InstagramSendMessageRequest(BaseModel):
+    recipient_id: str  # Instagram-scoped ID příjemce (IGSID), ne uživatelské jméno
+    message: str
+
+
+@app.post("/admin/instagram/send-message")
+def instagram_send_message(req: InstagramSendMessageRequest, request: Request):
+    """Pošle přímou zprávu (DM) konkrétnímu Instagram uživateli. recipient_id
+    je Instagram-scoped ID (appka ho dostane z webhooku na příchozí zprávu,
+    NE uživatelské jméno) — appka bez předchozí zprávy od uživatele nemůže
+    poslat DM jako první (Instagram to nedovolí, stejné pravidlo jako
+    appka zná z Messengeru)."""
+    _require_instagram_admin(request)
+    access_token, ig_user_id = _get_instagram_credentials()
+    try:
+        resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/messages",
+            json={"recipient": {"id": req.recipient_id}, "message": {"text": req.message}},
+            params={"access_token": access_token},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Odeslání zprávy selhalo: {detail}")
+    return resp.json()
+
+
 @app.get("/admin/promo/{code}/stats")
 def admin_promo_stats(code: str, request: Request):
     """Appce (adminovi) ukáže marketingový trychtýř jednoho QR/tiskového
