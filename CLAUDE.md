@@ -249,6 +249,21 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
   pushem na `main`/nasazením, i když už předtím dostala jasné svolení
   k opravě samotné — příprava a nasazení jsou dvě oddělené věci, co
   appka nesmí slučovat do jednoho souhlasu.
+- **Instagram publikace — appka VŽDY nejdřív ukáže náhled (obrázek/video),
+  než cokoliv zveřejní.** Text a hashtagy si uživatel píše sám ("Vzdycky
+  chci nahled tu plus udelam text plus hastegy ok?", 2026-09-24) — appka
+  nepublikuje nic na živý Instagram účet appky bez tohohle schválení
+  (na rozdíl od /admin/instagram/publish-image endpointu samotného, co
+  appka technicky MÁ hotový a funkční — jen ho appka nesmí použít bez
+  téhle konzultace). Appka poprvé publikovala testovací příspěvek
+  2026-09-24 (media ID `18335111065273205`) — funguje, propojený účet
+  `apexsignal.cz` (BUSINESS), `ig_user_id` `28114545914912007`.
+  **Vždy dodržet správné rozměry pro Instagram:** čtverec 1080×1080
+  nebo na výšku 1080×1350 (poměr 4:5) pro feed, 1080×1920 (9:16) pro
+  Reels/Stories — NIKDY neposílat appčin webový `og-image.png` (má
+  poměr stran na web náhledy, ne na Instagram feed — přesně takhle
+  appka publikovala první testovací příspěvek a vyšlo to špatně
+  ořezané).
 - **SportBreak.cz nahrávání tiketů musí zůstat manuální, human-in-the-loop.**
   Uživatel explicitně: "Automaticky to nejde protoze ja davam realne sazky
   na tipsportu." — appka nesmí sama automatizovat nahrávání reálných sázek,
