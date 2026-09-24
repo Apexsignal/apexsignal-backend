@@ -3550,7 +3550,21 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     except RuntimeError:
         return
 
-    events = odds_provider.get_odds(sport)
+    # Appka appce (2026-09-24) stáhne jen ligy, co appka v `matches`
+    # skutečně má — dřív appka pokaždé tahala VŠECH ~39 fotbalových lig
+    # z the-odds-api bez ohledu na to, jestli je aktuální pool vůbec
+    # obsahoval, což appku na 512MB Render plánu opakovaně shazovalo OOM
+    # (živě reprodukováno 2026-09-24). Prázdný seznam appka appce vrátí,
+    # když appka nerozpozná ŽÁDNOU ligu z poolu — pak appka radši nevolá
+    # the-odds-api vůbec, ne že by appka spadla zpátky na "stáhni
+    # všechno" (to je přesně ten starý, drahý stav).
+    sport_keys = data_provider.relevant_odds_sport_keys(matches, sport)
+    # Prázdný seznam appka appce nechá projít jako "žádná liga appce
+    # nesedí" BEZ volání the-odds-api (get_odds by na prázdném seznamu
+    # sport_keys stejně nic nevrátil) — appka NESMÍ tady rovnou 'return',
+    # protože o kus níž appka pořád volá _enrich_with_oddspapi (třetí,
+    # nezávislý zdroj kurzů), ten appka vynechat nesmí.
+    events = odds_provider.get_odds(sport, sport_keys=sport_keys) if sport_keys != [] else []
     totals_market = {
         Sport.FOOTBALL: MarketType.OVER_GOALS, Sport.HOCKEY: MarketType.OVER_GOALS,
         Sport.BASKETBALL: MarketType.OVER_POINTS, Sport.TENNIS: MarketType.OVER_GAMES,

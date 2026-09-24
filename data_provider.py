@@ -1011,6 +1011,63 @@ class OddsAPIProvider:
         Sport.TENNIS: [],  # turnajové klíče se mění (např. "tennis_atp_french_open") — doplň aktuální
     }
 
+    # sport_key -> (country, league) PŘESNĚ tak, jak appka vidí tyhle
+    # hodnoty v MatchInput.country/league (appka je bere z fixture.league.country
+    # / fixture.league.name z API-Football — viz adapt_api_football_fixture).
+    # Použito v relevant_odds_sport_keys() (2026-09-24) k omezení fetch jen
+    # na ligy, co appka v aktuálním poolu zápasů skutečně má — appka dřív
+    # tahala VŠECH ~39 fotbalových lig při každém generování, i když jich
+    # reálně potřebovala pár, což appku na 512MB Render plánu shazovalo
+    # OOM. Přesné porovnání appka dělá case-insensitive; drobná
+    # nepřesnost v téhle tabulce appku nerozbije — appka takovou ligu
+    # jen nedostane doplněná o the-odds-api kurzy (stejné, jako když liga
+    # v SPORT_KEYS vůbec není), ne že by appka spadla nebo dostala
+    # špatná data.
+    LEAGUE_FRAGMENTS: dict[str, tuple[str, str]] = {
+        "soccer_epl": ("england", "premier league"),
+        "soccer_efl_champ": ("england", "championship"),
+        "soccer_england_league1": ("england", "league one"),
+        "soccer_england_league2": ("england", "league two"),
+        "soccer_england_efl_cup": ("england", "efl cup"),
+        "soccer_germany_bundesliga": ("germany", "bundesliga"),
+        "soccer_germany_bundesliga2": ("germany", "2. bundesliga"),
+        "soccer_germany_liga3": ("germany", "3. liga"),
+        "soccer_germany_dfb_pokal": ("germany", "dfb pokal"),
+        "soccer_italy_serie_a": ("italy", "serie a"),
+        "soccer_italy_serie_b": ("italy", "serie b"),
+        "soccer_spain_la_liga": ("spain", "la liga"),
+        "soccer_portugal_primeira_liga": ("portugal", "primeira liga"),
+        "soccer_france_ligue_one": ("france", "ligue 1"),
+        "soccer_netherlands_eredivisie": ("netherlands", "eredivisie"),
+        "soccer_belgium_first_div": ("belgium", "jupiler pro league"),
+        "soccer_spl": ("scotland", "premiership"),
+        "soccer_switzerland_superleague": ("switzerland", "super league"),
+        "soccer_sweden_allsvenskan": ("sweden", "allsvenskan"),
+        "soccer_sweden_superettan": ("sweden", "superettan"),
+        "soccer_norway_eliteserien": ("norway", "eliteserien"),
+        "soccer_denmark_superliga": ("denmark", "superliga"),
+        "soccer_finland_veikkausliiga": ("finland", "veikkausliiga"),
+        "soccer_russia_premier_league": ("russia", "premier league"),
+        "soccer_poland_ekstraklasa": ("poland", "ekstraklasa"),
+        "soccer_brazil_campeonato": ("brazil", "serie a"),
+        "soccer_brazil_serie_b": ("brazil", "serie b"),
+        "soccer_argentina_primera_division": ("argentina", "liga profesional argentina"),
+        "soccer_chile_campeonato": ("chile", "primera división"),
+        "soccer_usa_mls": ("usa", "mls"),
+        "soccer_mexico_ligamx": ("mexico", "liga mx"),
+        "soccer_korea_kleague1": ("south korea", "k league 1"),
+        "soccer_china_superleague": ("china", "super league"),
+        "soccer_league_of_ireland": ("ireland", "premier division"),
+        "soccer_austria_bundesliga": ("austria", "bundesliga"),
+        "soccer_greece_super_league": ("greece", "super league"),
+        "soccer_uefa_champs_league": ("world", "uefa champions league"),
+        "soccer_uefa_champs_league_qualification": ("world", "uefa champions league"),
+        "soccer_uefa_europa_league": ("world", "uefa europa league"),
+        "soccer_uefa_europa_conference_league": ("world", "uefa europa conference league"),
+        "soccer_conmebol_copa_libertadores": ("world", "copa libertadores"),
+        "soccer_conmebol_copa_sudamericana": ("world", "copa sudamericana"),
+    }
+
     def __init__(self, api_key: Optional[str] = None, cache_ttl_seconds: int = 300):
         self.api_key = api_key or os.environ.get("ODDSAPI_KEY", "")
         if not self.api_key:
@@ -1026,16 +1083,27 @@ class OddsAPIProvider:
     # kreditů/měsíc, což nechává rozumnou rezervu.
     DB_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
-    def get_odds(self, sport: Sport, markets: str = "h2h,totals", regions: str = "eu") -> list[dict]:
+    def get_odds(
+        self, sport: Sport, markets: str = "h2h,totals", regions: str = "eu",
+        sport_keys: Optional[list[str]] = None,
+    ) -> list[dict]:
         """
         Chyba na JEDNÉ lize (výpadek, došlá kvóta...) nesmí shodit celé
         generování tiketu — appka takovou ligu jen přeskočí a jede dál.
         Při 401 (neplatný klíč nebo došlá kvóta) appka navíc rovnou
         ukončí celou smyčku — další ligy by selhaly úplně stejně, nemá
         smysl na ně plýtvat dalšími voláními.
+
+        sport_keys appka appce nechá nepovinné — bez něj appka projde
+        VŠECHNY ligy daného sportu (staré chování, appka to používá i
+        v diagnostických /admin/test-odds-markets apod.). Volající, co
+        zná konkrétní ligy z aktuálního poolu zápasů (viz
+        relevant_odds_sport_keys), appce pošle jen ty — appka pak
+        nestahuje a nedrží v paměti eventy z desítek lig, co appka
+        stejně nikdy nevyužije (viz _enrich_with_market_odds).
         """
         events: list[dict] = []
-        for sport_key in self.SPORT_KEYS.get(sport, []):
+        for sport_key in (sport_keys if sport_keys is not None else self.SPORT_KEYS.get(sport, [])):
             cache_key = f"odds:{sport_key}:{markets}"
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -1124,6 +1192,26 @@ class OddsAPIProvider:
         except Exception as e:
             print(f"[odds-api] Uložení do DB cache selhalo: {e}")
         return data
+
+
+def relevant_odds_sport_keys(matches: list, sport: Sport) -> Optional[list[str]]:
+    """
+    Vrátí jen ty sport_keys z OddsAPIProvider.SPORT_KEYS, co odpovídají
+    ligám skutečně přítomným v `matches` (podle OddsAPIProvider.LEAGUE_FRAGMENTS)
+    — appce se pak nemusí stahovat VŠECH ~39 fotbalových lig, jen ty pár,
+    co appka v aktuálním poolu zápasů má (viz get_odds(sport_keys=...)).
+    None appka appce vrátí pro sporty mimo fotbal (appka tam má tak
+    málo klíčů — 0-1 — že optimalizace nemá smysl, appka jede po staru).
+    """
+    if sport != Sport.FOOTBALL:
+        return None
+    present = {(m.country or "").strip().lower() for m in matches}
+    present_leagues = {(m.league or "").strip().lower() for m in matches}
+    keys = [
+        key for key, (country, league) in OddsAPIProvider.LEAGUE_FRAGMENTS.items()
+        if country in present and league in present_leagues
+    ]
+    return keys
 
 
 # the-odds-api a API-Football appce dávají jméno stejného týmu často jinak
