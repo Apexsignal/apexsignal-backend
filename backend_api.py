@@ -3765,7 +3765,21 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_
     request_id appka posílá jen fotbalu (_build_football_matches) — jediný
     sport, co appka reálně v produkci nabízí a jediný s obohacovací
     smyčkou dost dlouhou na to, aby appce dávalo smysl ukazovat postup.
+
+    time_frame_days appka tvrdě omezí na 3 — na 4 appka opakovaně padala
+    na nedostatek paměti (Render Starter, 512 MB), a to i mimo samotné
+    generování (živě reprodukováno 2026-09-24 přes
+    /admin/candidate-pool-preview i /admin/test3-daily-tickets, oba na
+    4 dnech spadly na 502, včetně krátkého výpadku celého backendu pro
+    VŠECHNY appčiny uživatele). Appka na uživatelovo přání tohle omezení
+    dala sem, na jedno centrální místo, ať platí pro úplně všechny
+    volající (ruční generování/regenerace i appčiny vlastní cronové
+    účty) — appce se nechce přidávat stejnou kontrolu na 5+ míst zvlášť.
+    Frontend appka nemění — appka jen potichu vygeneruje 3denní tiket
+    místo 4denního, ať appka radši ukáže o něco užší, ale funkční výsledek
+    než pád.
     """
+    time_frame_days = min(time_frame_days, 3)
     builders = {
         Sport.FOOTBALL: _build_football_matches,
         Sport.HOCKEY: _build_hockey_matches,
@@ -3898,6 +3912,13 @@ def _all_markets_for_sports(sports: list[Sport]) -> list[MarketType]:
 
 
 def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
+    # 4+ dní appka na 512MB Render plánu opakovaně shazovalo OOM (viz
+    # _fetch_candidate_matches) — appka to sníží HNED tady, na req
+    # samotném, ať se to stejně promítne i do horizon_note textu a
+    # výpočtu wider_days níž (jinak by appka uživateli lhala o počtu
+    # dní, co reálně prohledala).
+    req.time_frame_days = min(req.time_frame_days, 3)
+
     # Uložené zápasy + zápasy z JAKÉHOKOLIV předchozího generování v týhle
     # (ještě neuložené) sérii — jinak by druhé volání (jiný risk_level =
     # jiný typ tiketu) klidně nabídlo STEJNÝ zápas jako to první, protože
@@ -4045,6 +4066,7 @@ def _run_generate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairRes
 
 
 def _run_regenerate_job(user_id: int, req: TicketGenerateRequest) -> TicketPairResponse:
+    req.time_frame_days = min(req.time_frame_days, 3)  # viz stejná poznámka v _run_generate_job
     previous_ids = repo.get_last_batch(user_id)
     exclude_ids = repo.get_all_saved_match_ids(user_id)  # Všechny již vsazené zápasy
     combined_exclude = set(previous_ids) | set(exclude_ids)
@@ -5377,6 +5399,7 @@ def replace_selection(req: TicketGenerateRequestWithExclude, user_id: int = Depe
     poznámkou (horizon_note), ať appka appce vidí, že tenhle konkrétní
     tiket appka appce jednou přeskládala."""
     _require_generation_enabled(user_id)
+    req.time_frame_days = min(req.time_frame_days, 3)  # viz stejná poznámka v _run_generate_job
     if not repo.try_consume_replace_selection(user_id):
         raise HTTPException(
             status_code=400,
