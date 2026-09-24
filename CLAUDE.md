@@ -23,9 +23,12 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
 1. **`apexsignal-backend`** (tenhle repo) — FastAPI backend na Renderu
    (`srv-d8puije7r5hc7399afh0`), single web service. Auto-deploy z branch
    `main` (push do `main` = během pár minut live na Renderu). Vývojová
-   branch v aktuální session: `claude/navazani-na-konverzaci-aikq9n` (na
-   ni appka commituje, pak fast-forward pushne i do `main` — obě branch
-   se vždy drží ve stejném stavu).
+   branch se mění podle toho, co appce zadá orchestrující systém na
+   začátku session (aktuálně `claude/app-purpose-question-kq24hv`, dřív
+   např. `claude/navazani-na-konverzaci-aikq9n`) — appka na ni commituje,
+   pak fast-forward pushne i do `main` (obě branch se vždy drží ve
+   stejném stavu). **Nespoléhat na konkrétní jméno zapsané tady, řídit se
+   tím, co appka dostane na začátku aktuální session.**
    Databáze: PostgreSQL na Renderu (placený plán `basic_256mb`, zálohy
    zapnuté — ověřeno v session z 2026-07-30).
 2. **`apexsignal-app`** (klon appka drží lokálně v `/tmp/apexsignal-app`
@@ -187,6 +190,28 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
   sourozenecké endpointy** — chybělo `_filter_future_matches`,
   `_filter_within_days`, `_require_generation_enabled`, a exclude-set
   nezahrnoval historii uložených tiketů. Sjednoceno (`20c2e38`, `7e261e2`).
+- **`get_all_saved_match_ids` dřív vylučovalo z nabízení jen zápasy z
+  tiketů se `status='pending'`** — ale appka tiket označí `lost` hned,
+  jakmile prohraje JEDNA noha (parlay), i když ostatní nohy ještě vůbec
+  neproběhly. Takový tiket appka z výluky ztratila a jeho ještě
+  neodehraný zápas mohla nabídnout do DALŠÍHO, samostatného tiketu —
+  appka tak "vsadila" na stejný reálný zápas dvakrát, což by appka
+  v realitě nikdy neudělala (druhá sázka na tiket, co ještě neskončil).
+  **Skutečný incident 2026-09-24 na `test2@test.cz` (=`TRANSPARENCY_USER_ID`,
+  veřejná stránka `/transparentni-ucet`):** appka takhle omylem duplicitně
+  vsadila na 25 různých zápasů napříč 22 tikety, což zkreslovalo veřejnou
+  statistiku (61,5 % úspěšnost místo skutečných 66,7 % po opravě). Opraveno
+  — filtr teď běží podle toho, jestli je KONKRÉTNÍ noha ještě
+  nerozhodnutá (`result='pending'`), ne podle stavu celého tiketu
+  (`1ad0d3c`). Těch 22 duplicitních tiketů appka na uživatelův pokyn
+  (s heslem) smazala přes nový `POST /admin/delete-tickets` (admin-key,
+  bere explicitní seznam `ticket_ids` — appka ho nechala v kódu jako
+  trvalý nástroj pro podobný jednorázový úklid příště, ne jednorázový
+  hack). **Pokud se na jiném účtu (hlavně TRANSPARENCY_USER_ID/
+  DAILY_TICKETS_USER_ID) znovu objeví tikety se stejným `match_id`
+  vícekrát — to už by se PO téhle opravě nemělo dít u NOVĚ generovaných
+  tiketů, ale staré/historické případy mohly appce uniknout, protože
+  appka kontrolovala jen test2.**
 
 ## Stojící pravidla od uživatele (nezapomenout)
 
@@ -291,6 +316,7 @@ aktivně nevyužívá pro produkční tikety.
 ## Poslední větší commity (nejnovější nahoře, `main`)
 
 ```
+1ad0d3c Opravit vylučování rozehraných zápasů + přidat /admin/delete-tickets
 7e261e2 Doplnit _require_generation_enabled i do /tickets/replace-selection
 20c2e38 Sjednotit /tickets/replace-selection s bezpečnostními pojistkami generate
 e99dcf7 Opravit ztrácející se kickoff_time při ukládání + doplnit settlement pro všechny účty
