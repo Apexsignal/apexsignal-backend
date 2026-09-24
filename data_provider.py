@@ -2601,6 +2601,29 @@ class APIFootballProvider(SportsDataProvider):
 
         return fixtures
 
+    @staticmethod
+    def _trim_team_statistics(data: dict) -> dict:
+        """
+        /teams/statistics vrací desítky polí (forma, statistiky po
+        minutových intervalech, série výher, čistá konta, penalty,
+        sestavy...) — adapt_api_football_team_stats z toho čte jen
+        goals.for/against.average.total, cards.yellow a fixtures.played.
+        Appka tohle ořezává hned při stažení, ať to nedrží zbytečně
+        v paměti pro každý tým v poolu (2026-09-24, appka na tomhle na
+        512MB Render plánu padala OOM).
+        """
+        if not data:
+            return data
+        goals = data.get("goals", {})
+        return {
+            "goals": {
+                "for": {"average": {"total": goals.get("for", {}).get("average", {}).get("total")}},
+                "against": {"average": {"total": goals.get("against", {}).get("average", {}).get("total")}},
+            },
+            "cards": {"yellow": data.get("cards", {}).get("yellow", {})},
+            "fixtures": {"played": {"total": data.get("fixtures", {}).get("played", {}).get("total")}},
+        }
+
     def get_team_statistics(self, sport: Sport, team_id: str, league_id: Optional[str] = None) -> dict:
         cache_key = f"team_stats:{team_id}:{league_id}"
         # In-memory cache
@@ -2623,7 +2646,8 @@ class APIFootballProvider(SportsDataProvider):
             return {}
         season = _season_year_for_league(int(league_id), date.today())
         response = self._get("/teams/statistics", {"team": team_id, "season": season, "league": league_id})
-        data = response if isinstance(response, dict) else (response[0] if response else {})
+        raw_data = response if isinstance(response, dict) else (response[0] if response else {})
+        data = self._trim_team_statistics(raw_data)
         self._cache.set(cache_key, data)
         try:
             import db as _db
