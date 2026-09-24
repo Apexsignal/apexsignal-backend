@@ -1048,7 +1048,9 @@ class TicketGenerateRequest(BaseModel):
     risk_level: int = Field(ge=0, le=60)  # appka BOOST (risk_level > 60) už nenabízí
     sports: list[Sport]
     market_types: list[MarketType]
-    time_frame_days: int = Field(ge=1, le=5)  # Horizont: 1-5 dní (už ne konkrétní data)
+    time_frame_days: int = Field(ge=1, le=2)  # appka snížila strop z 5 na 2 dny
+    # (2026-09-24) — širší okno appka na 512MB RAM plánu spolehlivě shazovalo
+    # pamětí (OOM), i po ořezání syrových dat z enrichmentu.
     # Appka podle tohohle (appkou vygenerovaný náhodný řetězec, appka ho
     # nijak neověřuje ani nepáruje na uživatele) hlásí SKUTEČNÝ postup
     # generování přes GET /tickets/generate-progress — appka bez něj
@@ -5311,7 +5313,7 @@ class TicketGenerateRequestWithExclude(BaseModel):
     risk_level: int = Field(ge=0, le=60)  # appka BOOST (risk_level > 60) už nenabízí
     sports: list[Sport]
     market_types: list[MarketType]
-    time_frame_days: int = Field(ge=1, le=5)
+    time_frame_days: int = Field(ge=1, le=2)  # appka snížila strop z 5 na 2 dny (2026-09-24) — viz TicketGenerateRequest výš
     exclude_match_ids: list[int] = []
 
 
