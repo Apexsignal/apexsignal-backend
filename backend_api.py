@@ -3033,6 +3033,30 @@ def instagram_oauth_callback(request: Request):
     )
 
 
+@app.get("/admin/instagram/status")
+def instagram_status(request: Request):
+    """Diagnostika (2026-09-24) — appka ověří, že appka uložený token
+    ještě žije, zavoláním Instagram Graph API /me. Read-only, nic
+    neukládá ani nemění."""
+    admin_key_expected = os.environ.get("ADMIN_TASK_KEY")
+    if not admin_key_expected or request.headers.get("X-Admin-Key") != admin_key_expected:
+        raise HTTPException(status_code=403, detail="Neplatný nebo chybějící X-Admin-Key")
+    raw = db.get_setting(INSTAGRAM_TOKEN_SETTING_KEY)
+    if not raw:
+        return {"connected": False, "detail": "Appka žádný token nemá uložený."}
+    stored = json.loads(raw)
+    try:
+        resp = requests.get(
+            "https://graph.instagram.com/me",
+            params={"fields": "id,username,account_type", "access_token": stored["access_token"]},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return {"connected": False, "obtained_at": stored.get("obtained_at"), "error": str(e)}
+    return {"connected": True, "obtained_at": stored.get("obtained_at"), "profile": resp.json()}
+
+
 @app.get("/admin/promo/{code}/stats")
 def admin_promo_stats(code: str, request: Request):
     """Appce (adminovi) ukáže marketingový trychtýř jednoho QR/tiskového
