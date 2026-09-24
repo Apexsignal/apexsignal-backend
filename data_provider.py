@@ -2313,6 +2313,25 @@ class _RateLimiter:
 _api_football_rate_limiter = _RateLimiter(max_per_second=12.0)
 
 
+def _trim_recent_form_fixture(f: dict) -> dict:
+    """
+    get_recent_form se volá 2× na zápas (doma/venku) pro celý pool
+    (klidně 400× 2 = 800×), každá odpověď nese až 10 kompletních
+    syrových zápasů — stejně bohatá struktura jako hlavní fixture pool,
+    co appka ořezává přes _trim_fixture, jenže tady se to dřív NEDĚLALO
+    a výsledek se navíc ukládal natrvalo do keše. adapt_recent_form_goals
+    a adapt_rest_days čtou jen tohle.
+    """
+    fixture = f.get("fixture", {})
+    teams = f.get("teams", {})
+    goals = f.get("goals", {})
+    return {
+        "fixture": {"date": fixture.get("date")},
+        "teams": {"home": {"id": teams.get("home", {}).get("id")}},
+        "goals": {"home": goals.get("home"), "away": goals.get("away")},
+    }
+
+
 class APIFootballProvider(SportsDataProvider):
     def __init__(self, api_key: Optional[str] = None, cache_ttl_seconds: int = 300):
         self.api_key = api_key or os.environ.get("APISPORTS_KEY", "")
@@ -2634,7 +2653,7 @@ class APIFootballProvider(SportsDataProvider):
                 return db_cached
         except Exception:
             pass
-        fixtures = self._get("/fixtures", {"team": team_id, "last": last, "status": "FT"})
+        fixtures = [_trim_recent_form_fixture(f) for f in self._get("/fixtures", {"team": team_id, "last": last, "status": "FT"})]
         self._cache.set(cache_key, fixtures)
         try:
             import db as _db
