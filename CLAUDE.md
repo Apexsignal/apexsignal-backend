@@ -240,6 +240,15 @@ platícím odběratelům na Telegram. Provozovatel: David Novik, IČO 05010276.
   (push na `main`, Netlify deploy) — uživatel to 2026-07-31 explicitně
   upřesnil: "priste se semnou porad nez to nasadis". Připravit/otestovat
   změnu jde rovnou, publikovat ji naživo ne bez potvrzení.)
+  **Znovu potvrzeno 2026-09-24:** appka tohle sama porušila u dvou
+  drobných výkonnostních oprav (`gc.collect()` v cronu, sdílený
+  OddsAPIProvider) — nasadila je rovnou na základě obecného "najdi vše
+  a oprav to" / otázky "nedá se to ještě zlepšit?", bez samostatného
+  "mám to i nasadit?" těsně před pushem. Uživatel to označil za chybu
+  a explicitně potvrdil, že se appka má PTÁT ZNOVU těsně před každým
+  pushem na `main`/nasazením, i když už předtím dostala jasné svolení
+  k opravě samotné — příprava a nasazení jsou dvě oddělené věci, co
+  appka nesmí slučovat do jednoho souhlasu.
 - **SportBreak.cz nahrávání tiketů musí zůstat manuální, human-in-the-loop.**
   Uživatel explicitně: "Automaticky to nejde protoze ja davam realne sazky
   na tipsportu." — appka nesmí sama automatizovat nahrávání reálných sázek,
