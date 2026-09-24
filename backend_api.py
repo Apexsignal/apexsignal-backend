@@ -3211,6 +3211,53 @@ def instagram_send_message(req: InstagramSendMessageRequest, request: Request):
     return resp.json()
 
 
+@app.get("/admin/instagram/list-media")
+def instagram_list_media(request: Request):
+    """Read-only — appka vypíše všechny publikované příspěvky (id,
+    caption, typ, čas), ať appka appce ví, co vůbec existuje, PŘED
+    jakýmkoli mazáním."""
+    _require_instagram_admin(request)
+    access_token, ig_user_id = _get_instagram_credentials()
+    try:
+        resp = requests.get(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/media",
+            params={"fields": "id,caption,media_type,permalink,timestamp", "access_token": access_token, "limit": 100},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Načtení příspěvků selhalo: {detail}")
+    return resp.json()
+
+
+class InstagramDeleteMediaRequest(BaseModel):
+    media_ids: list[str]
+
+
+@app.post("/admin/instagram/delete-media")
+def instagram_delete_media(req: InstagramDeleteMediaRequest, request: Request):
+    """Smaže KONKRÉTNÍ příspěvky podle explicitního seznamu ID (appka
+    appce ho bere z /admin/instagram/list-media) — žádné 'smaž vše samo'
+    uvnitř endpointu, appka appce vždy dostane přesný seznam zvenku."""
+    _require_instagram_admin(request)
+    access_token, _ = _get_instagram_credentials()
+    results = []
+    for media_id in req.media_ids:
+        try:
+            resp = requests.delete(
+                f"https://graph.instagram.com/v21.0/{media_id}",
+                params={"access_token": access_token},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            results.append({"media_id": media_id, "status": "deleted"})
+        except requests.exceptions.RequestException as e:
+            detail = e.response.text[:300] if getattr(e, "response", None) is not None else str(e)
+            results.append({"media_id": media_id, "status": "error", "detail": detail})
+    return {"results": results}
+
+
 @app.get("/admin/promo/{code}/stats")
 def admin_promo_stats(code: str, request: Request):
     """Appce (adminovi) ukáže marketingový trychtýř jednoho QR/tiskového
