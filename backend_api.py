@@ -3158,6 +3158,63 @@ def instagram_publish_reel(req: InstagramPublishReelRequest, request: Request):
     return publish_resp.json()
 
 
+class InstagramPublishStoryRequest(BaseModel):
+    image_url: Optional[str] = None  # přesně jedno z image_url/video_url, ověřeno níž
+    video_url: Optional[str] = None
+
+
+@app.post("/admin/instagram/publish-story")
+def instagram_publish_story(req: InstagramPublishStoryRequest, request: Request):
+    """Publikuje obrázek nebo video do Stories (media_type=STORIES).
+    Instagram u Stories caption přes API nepodporuje — text se do Stories
+    dostane jen tak, že je rovnou vypálený v obrázku/videu. Video se
+    zpracovává stejně jako u Reels — počká se na status FINISHED,
+    max ~2,5 minuty."""
+    _require_instagram_admin(request)
+    if not req.image_url and not req.video_url:
+        raise HTTPException(status_code=400, detail="Potřeba je image_url nebo video_url.")
+    if req.image_url and req.video_url:
+        raise HTTPException(status_code=400, detail="Přijímá se jen jedno z image_url/video_url, ne obojí.")
+    access_token, ig_user_id = _get_instagram_credentials()
+    try:
+        params = {"media_type": "STORIES", "access_token": access_token}
+        if req.image_url:
+            params["image_url"] = req.image_url
+        else:
+            params["video_url"] = req.video_url
+        create_resp = requests.post(f"https://graph.instagram.com/v21.0/{ig_user_id}/media", data=params, timeout=30)
+        create_resp.raise_for_status()
+        creation_id = create_resp.json()["id"]
+
+        if req.video_url:
+            for _ in range(30):
+                status_resp = requests.get(
+                    f"https://graph.instagram.com/v21.0/{creation_id}",
+                    params={"fields": "status_code", "access_token": access_token},
+                    timeout=15,
+                )
+                status_resp.raise_for_status()
+                status_code = status_resp.json().get("status_code")
+                if status_code == "FINISHED":
+                    break
+                if status_code == "ERROR":
+                    raise HTTPException(status_code=502, detail="Instagram zpracování videa selhalo (status ERROR).")
+                time.sleep(5)
+            else:
+                raise HTTPException(status_code=504, detail="Video appka nestihla zpracovat do 2,5 minuty — zkus to znovu za chvíli.")
+
+        publish_resp = requests.post(
+            f"https://graph.instagram.com/v21.0/{ig_user_id}/media_publish",
+            data={"creation_id": creation_id, "access_token": access_token},
+            timeout=30,
+        )
+        publish_resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = e.response.text[:500] if getattr(e, "response", None) is not None else str(e)
+        raise HTTPException(status_code=502, detail=f"Publikace story selhala: {detail}")
+    return publish_resp.json()
+
+
 class InstagramReplyCommentRequest(BaseModel):
     comment_id: str
     message: str
