@@ -3221,7 +3221,7 @@ def instagram_list_media(request: Request):
     try:
         resp = requests.get(
             f"https://graph.instagram.com/v21.0/{ig_user_id}/media",
-            params={"fields": "id,caption,media_type,permalink,timestamp", "access_token": access_token, "limit": 100},
+            params={"fields": "id,caption,media_type,permalink,timestamp,media_url,thumbnail_url", "access_token": access_token, "limit": 100},
             timeout=20,
         )
         resp.raise_for_status()
