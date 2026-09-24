@@ -1083,11 +1083,15 @@ class MarketEvaluator:
         return sum(p for i, row in enumerate(grid) for j, p in enumerate(row) if i + j > threshold)
 
     @classmethod
-    def build_candidates(cls, match: MatchInput, min_prob: float = MIN_SELECTION_PROBABILITY) -> list[SelectionCandidate]:
+    def _build_raw_candidates(cls, match: MatchInput) -> list[SelectionCandidate]:
         """
         Vygeneruje kandidáty pro VŠECHNY relevantní trhy daného zápasu —
-        které trhy to jsou, závisí na sportu (viz SPORT_MARKETS). Vrátí
-        jen ty, jejichž model_probability >= min_prob (filtrace).
+        které trhy to jsou, závisí na sportu (viz SPORT_MARKETS). Nic tady
+        nefiltruje podle min_prob (to dělá až build_candidates níž) —
+        appka to rozdělila (2026-09-24), ať nemusí tenhle nejdražší krok
+        (Poisson výpočty, reasoning texty) počítat opakovaně pro stejný
+        zápas na různých prazích v jednom generování — appka na tomhle
+        na 512MB Render plánu padala OOM.
         """
         candidates: list[SelectionCandidate] = []
 
@@ -1248,6 +1252,15 @@ class MarketEvaluator:
                     prob = prob_over(match.expected_total_threes, threshold)
                     candidates.append(cls._candidate(match, MarketType.OVER_THREES, f"over_{threshold}", prob, odds))
 
+        return candidates
+
+    @classmethod
+    def _filter_candidates(
+        cls, match: MatchInput, candidates: list[SelectionCandidate], min_prob: float,
+    ) -> list[SelectionCandidate]:
+        """Filtrovací část, dřív součást build_candidates — appka ji
+        vydělila (2026-09-24), ať appka nemusí drahou _build_raw_candidates
+        počítat znovu pro každý práh zvlášť. Beze změny chování."""
         # Různé minimální kurzy podle typu trhu:
         # - Výhra favorita: min 1.20 (kurz 1.22 při 75% je stále informačně zajímavý)
         # - Over góly/karty: min 1.30 (bez "jistých" tipů za kurz 1.01)
@@ -1315,6 +1328,26 @@ class MarketEvaluator:
             if c.model_probability >= effective_min_prob(c) and c.probability >= effective_min_prob(c)
             and passes_odds_filter(c)
         ]
+
+    @classmethod
+    def build_candidates(
+        cls, match: MatchInput, min_prob: float = MIN_SELECTION_PROBABILITY,
+        raw_cache: Optional[dict[int, list[SelectionCandidate]]] = None,
+    ) -> list[SelectionCandidate]:
+        """
+        Stejné jméno a chování jako dřív — jen navíc umí volitelně dostat
+        raw_cache (viz TicketGenerator.generate), ať nemusí
+        _build_raw_candidates počítat znovu pro stejný zápas na každém
+        dalším prahu. Bez raw_cache funguje přesně jako dřív (fresh
+        výpočet při každém volání).
+        """
+        if raw_cache is not None:
+            if match.match_id not in raw_cache:
+                raw_cache[match.match_id] = cls._build_raw_candidates(match)
+            raw_candidates = raw_cache[match.match_id]
+        else:
+            raw_candidates = cls._build_raw_candidates(match)
+        return cls._filter_candidates(match, raw_candidates, min_prob)
 
     @staticmethod
     def _build_context_notes(match: MatchInput) -> list[str]:
@@ -1532,6 +1565,16 @@ class TicketGenerator:
         pool_filter: Optional[Callable[[list[SelectionCandidate]], list[SelectionCandidate]]] = None,
         allow_relaxed_min_odds: bool = False,
     ) -> dict[str, Optional[Ticket]]:
+        # V rámci jednoho generování se zkouší víc prahů (viz
+        # FALLBACK_THRESHOLDS/fallback_pool/tolerance_pool níž) — bez
+        # sdílené keše se pro stejný zápas počítala nejdražší část
+        # (Poisson výpočty, reasoning texty) opakovaně, klidně 5-6×.
+        # raw_cache drží tenhle výpočet jen po dobu jednoho volání
+        # generate() — po jeho skončení se zahodí, není trvalá napříč
+        # požadavky. Na tomhle appka na 512MB Render plánu padala OOM
+        # (2026-09-24).
+        raw_cache: dict[int, list[SelectionCandidate]] = {}
+
         # allow_relaxed_min_odds appka zapíná jen appka appce (viz
         # backend_api.py) — když uživatel na dané období UŽ má uložený
         # tiket a chce další, appka pustí krátký kurz od 1.80 místo 1.90
@@ -1583,7 +1626,7 @@ class TicketGenerator:
         candidate_counts = {}
 
         for threshold in FALLBACK_THRESHOLDS:
-            pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=threshold)
+            pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=threshold, raw_cache=raw_cache)
             used_threshold = threshold
             candidate_counts[int(threshold*100)] = len(pool)
             print(f"[{ticket_key}] {int(threshold*100)}%: {len(pool)} kandidátů")
@@ -1673,7 +1716,7 @@ class TicketGenerator:
         # nevygeneruje, než nabídne nohu bez prokázané výhody — tenhle
         # fallback je jen míň přísný na SOUČET, ne na jednotlivé nohy.
         if ticket is None and ticket_key == "kratky":
-            fallback_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.70)
+            fallback_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.70, raw_cache=raw_cache)
             if pool_filter is not None:
                 fallback_pool = pool_filter(fallback_pool)
             fallback_pool = [
@@ -1715,7 +1758,7 @@ class TicketGenerator:
         # jasně vidět, které nohy mají prokázanou výhodu a které ne.
         if False and ticket is None and ticket_key == "kratky":
             for tolerance in NEAR_MISS_TOLERANCE_STEPS:
-                tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.65)
+                tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=0.65, raw_cache=raw_cache)
                 if pool_filter is not None:
                     tolerance_pool = pool_filter(tolerance_pool)
                 tolerance_pool = [c for c in tolerance_pool if _passes_edge_tolerance(c, tolerance)]
@@ -1741,7 +1784,7 @@ class TicketGenerator:
         # hranicí, nebo že mají edge jen v toleranci), ať appka klientovi
         # nikdy tiše netvrdí "65%+ jistota", když to reálně neplatí.
         if False and ticket is None and ticket_key == "kratky":
-            display_tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=NEAR_MISS_DISPLAY_MIN_PROB)
+            display_tolerance_pool = self._build_filtered_pool(matches, allowed_sports, allowed_markets, min_prob=NEAR_MISS_DISPLAY_MIN_PROB, raw_cache=raw_cache)
             if pool_filter is not None:
                 display_tolerance_pool = pool_filter(display_tolerance_pool)
             display_tolerance_pool = [c for c in display_tolerance_pool if _passes_edge_tolerance(c, NEAR_MISS_TOLERANCE_STEPS[-1])]
@@ -1790,13 +1833,14 @@ class TicketGenerator:
     def _build_filtered_pool(
         self, matches: list[MatchInput], allowed_sports: list[Sport], allowed_markets: list[MarketType],
         min_prob: float = MIN_SELECTION_PROBABILITY,
+        raw_cache: Optional[dict[int, list[SelectionCandidate]]] = None,
     ) -> list[SelectionCandidate]:
         pool: list[SelectionCandidate] = []
         for match in matches:
             if match.sport not in allowed_sports:
                 continue
             try:
-                candidates = MarketEvaluator.build_candidates(match, min_prob=min_prob)
+                candidates = MarketEvaluator.build_candidates(match, min_prob=min_prob, raw_cache=raw_cache)
                 pool.extend([c for c in candidates if c.market_type in allowed_markets])
             except Exception as e:
                 print(f"[build_candidates ERROR] {match.home_team} vs {match.away_team}: {e}")
