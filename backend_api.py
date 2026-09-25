@@ -16,6 +16,7 @@ Spuštění (dev):
 from __future__ import annotations
 
 import gc
+import resource
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -89,6 +90,19 @@ import stripe
 # (6:13) — nižší souběžnost sama o sobě problém nevyřešila, jen zbytečně
 # zpomalila generování, appka to proto vrátila zpátky na 5.
 FIXTURE_ENRICHMENT_WORKERS = 5
+
+
+def _log_mem(label: str) -> None:
+    """Zaloguje aktuální špičkovou paměť procesu (RSS) — appka to přidala
+    2026-09-25 poté, co dvě po sobě jdoucí opravy (scoped odds fetch,
+    nižší souběžnost) OOM pád nezastavily a appka dál jen hádala, co
+    přesně paměť žere. ru_maxrss appka appce vrací v kB na Linuxu (ne
+    v bajtech) — appka appce ho převádí na MB jen pro čitelnost logu.
+    Volá se na klíčových místech generování, ať má appka při DALŠÍM
+    pádu přesná čísla, ne jen odhad."""
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[mem] {label}: peak RSS {rss_mb:.0f} MB")
+
 
 # Dixon-Coles zafitovaná útočná/obranná síla CELÉ ligy (2026-08-06) — appka
 # to zkusila jako přesnější náhradu heuristického odhadu z posledních
@@ -3747,6 +3761,7 @@ def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Opti
     _load_calibration_curve()
 
     _progress_set_total(request_id, len(raw_fixtures))
+    _log_mem(f"_build_football_matches start ({len(raw_fixtures)} fixtures)")
 
     for batch_start in range(0, len(raw_fixtures), FIXTURE_ENRICHMENT_BATCH_SIZE):
         batch = raw_fixtures[batch_start:batch_start + FIXTURE_ENRICHMENT_BATCH_SIZE]
@@ -3768,6 +3783,7 @@ def _build_football_matches(provider, raw_fixtures: list[dict], request_id: Opti
         # appka to udělala kvůli živě potvrzeným OOM pádům na širokém
         # okně (2026-08-07), viz FIXTURE_ENRICHMENT_BATCH_SIZE výš.
         gc.collect()
+        _log_mem(f"_build_football_matches after batch {batch_start // FIXTURE_ENRICHMENT_BATCH_SIZE + 1} ({len(matches)} matches so far)")
 
     return matches
 
@@ -3840,6 +3856,8 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     except RuntimeError:
         return
 
+    _log_mem(f"_enrich_with_market_odds start ({len(matches)} matches, sport={sport.value})")
+
     # Appka appce (2026-09-24) stáhne jen ligy, co appka v `matches`
     # skutečně má — dřív appka pokaždé tahala VŠECH ~39 fotbalových lig
     # z the-odds-api bez ohledu na to, jestli je aktuální pool vůbec
@@ -3911,11 +3929,14 @@ def _enrich_with_market_odds(matches: list[MatchInput], sport: Sport) -> None:
     # stahuje, ne jen okamžitě selže na došlé kvótě jako předtím).
     del events
     gc.collect()
+    _log_mem(f"_enrich_with_market_odds after events freed ({matched_count} matched)")
 
     if sport == Sport.FOOTBALL and matched_pairs:
         _enrich_shortlist_with_extra_markets(matched_pairs)
+        _log_mem("_enrich_with_market_odds after extra markets shortlist")
 
     _enrich_with_oddspapi(matches, sport)
+    _log_mem("_enrich_with_market_odds end (after oddspapi)")
 
 
 MAX_EXTRA_MARKET_SHORTLIST = 15  # appka dvojtip/poločas tahá přes dotaz NA
@@ -4096,6 +4117,7 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_
     než pád.
     """
     time_frame_days = min(time_frame_days, 3)
+    _log_mem(f"_fetch_candidate_matches start (time_frame_days={time_frame_days}, sports={[s.value for s in sports]})")
     builders = {
         Sport.FOOTBALL: _build_football_matches,
         Sport.HOCKEY: _build_hockey_matches,
@@ -4129,6 +4151,7 @@ def _fetch_candidate_matches(sports: list[Sport], time_frame_days: int, request_
 
         _enrich_with_market_odds(sport_matches, sport)
         matches.extend(sport_matches)
+    _log_mem(f"_fetch_candidate_matches end ({len(matches)} total matches)")
     return matches
 
 

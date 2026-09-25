@@ -19,6 +19,7 @@ from __future__ import annotations
 import gc
 import math
 import random
+import resource
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -1545,6 +1546,16 @@ def _passes_edge_tolerance(selection: "SelectionCandidate", tolerance: float) ->
     return edge_capped_model_probability(selection) >= required_probability - tolerance
 
 
+def _log_mem_pm(label: str) -> None:
+    """Zaloguje aktuální špičkovou paměť procesu (RSS) — stejná pojistka
+    jako _log_mem v backend_api.py, jen tady, ať appka vidí i to, co se
+    děje UVNITŘ TicketGenerator.generate() (víc prahů, raw_cache), ne
+    jen ve fázi stahování/obohacování zápasů. Přidáno 2026-09-25 po
+    dvou po sobě jdoucích opravách, co OOM pád nezastavily."""
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[mem] {label}: peak RSS {rss_mb:.0f} MB")
+
+
 class TicketGenerator:
     """
     Sestavuje kombinované tikety z poolu kandidátů (SelectionCandidate),
@@ -1574,6 +1585,7 @@ class TicketGenerator:
         # požadavky. Na tomhle appka na 512MB Render plánu padala OOM
         # (2026-09-24).
         raw_cache: dict[int, list[SelectionCandidate]] = {}
+        _log_mem_pm(f"TicketGenerator.generate start ({len(matches)} matches, risk_level={risk_level})")
 
         # allow_relaxed_min_odds appka zapíná jen appka appce (viz
         # backend_api.py) — když uživatel na dané období UŽ má uložený
@@ -1630,6 +1642,7 @@ class TicketGenerator:
             used_threshold = threshold
             candidate_counts[int(threshold*100)] = len(pool)
             print(f"[{ticket_key}] {int(threshold*100)}%: {len(pool)} kandidátů")
+            _log_mem_pm(f"TicketGenerator.generate after threshold {int(threshold*100)}% (raw_cache={len(raw_cache)} entries)")
 
             if not pool:
                 continue  # Žádní kandidáti - zkusit nižší prah
