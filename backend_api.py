@@ -4028,9 +4028,10 @@ def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
     shortlist = sorted(
         uncovered, key=lambda m: m.home_expected_goals + m.away_expected_goals, reverse=True,
     )[:ODDSPAPI_MAX_SHORTLIST]
+    _log_mem(f"_enrich_with_oddspapi start (shortlist={len(shortlist)})")
 
     matched_count = 0
-    for match in shortlist:
+    for i, match in enumerate(shortlist, start=1):
         tournament_id = data_provider.ODDSPAPI_TOURNAMENT_IDS.get(match.league_id)
         if tournament_id is None:
             continue
@@ -4084,6 +4085,16 @@ def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
             match.ht_over_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_over_odds"]
             if adapted.get("ht_under_odds") is not None:
                 match.ht_under_goals_odds[adapted["ht_over_threshold"]] = adapted["ht_under_odds"]
+
+        # get_odds() appce sama dokumentuje ~8 MB na odpověď, appka ji tu
+        # volá až ODDSPAPI_MAX_SHORTLIST× (10) — appka to dřív jen POPSALA
+        # v komentáři u get_odds(), ale reálně nikdy neuvolňovala, takže
+        # appce se mohlo v paměti hromadit klidně 80 MB syrových dat, než
+        # to GC sám od sebe stihl uklidit (2026-09-25, appka to živě
+        # reprodukovala — pád nastal přesně uvnitř tyhle funkce).
+        del raw, adapted
+        gc.collect()
+        _log_mem(f"_enrich_with_oddspapi after fixture {i}/{len(shortlist)}")
 
     print(f"[enrich-odds-oddspapi] {matched_count}/{len(shortlist)} zápasů bez kurzu dostalo OddsPapi kurz")
 
