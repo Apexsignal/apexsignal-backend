@@ -1835,16 +1835,45 @@ class OddsPapiProvider:
             return None
         return scored[0][1]
 
+    # Přesná množina marketId, co adapt_oddspapi_odds() reálně čte (FT
+    # výsledek, dvojtip, FT/HT góly nad/pod) — appka z jedné odpovědi
+    # jinak dostává VŠECHNY trhy KAŽDÉHO bookmakera (rohy, karty, hráčské
+    # sázky...), což appka nikdy nepoužije. Živě ověřeno (2026-09-25):
+    # jedna odpověď měla 21,6 MB (víc než 2,5× starý odhad "~8 MB") právě
+    # kvůli tomuhle balastu — appka na tom padala OOM hned při PRVNÍM
+    # zápase v shortlistu, ne až po několika voláních.
+    _WANTED_MARKET_IDS = frozenset(str(m) for m in {
+        FT_RESULT_MARKET_ID, DOUBLE_CHANCE_MARKET_ID,
+        *(ids[0] for ids in FT_TOTALS_THRESHOLDS.values()),
+        *(ids[0] for ids in HT_TOTALS_THRESHOLDS.values()),
+    })
+
+    @classmethod
+    def _trim_bookmaker_markets(cls, obj):
+        # object_hook appce zavolá appka appce PŘI PARSOVÁNÍ, na každý
+        # JSON objekt zvlášť, odspoda nahoru — appka tak zbytečné trhy
+        # zahodí HNED, jak appka jednoho bookmakera doparsuje, dřív než
+        # appka začne parsovat dalšího. Appka díky tomu nikdy nedrží
+        # najednou v paměti plnou nabídku všech 265 bookmakerů, jen
+        # ořezanou verzi + transientně jednoho aktuálně parsovaného.
+        if isinstance(obj, dict) and isinstance(obj.get("markets"), dict):
+            obj["markets"] = {
+                k: v for k, v in obj["markets"].items() if k in cls._WANTED_MARKET_IDS
+            }
+        return obj
+
     def get_odds(self, fixture_id: str) -> Optional[dict]:
         """
         Appka tenhle request kešuje týden (stejně jako the-odds-api) —
-        odpověď je velká (~8 MB) a appka má jen 250/měsíc, takže appka
-        nechce stejný zápas stahovat znovu při každém dalším generování
-        ten samý den. Kešuje se ale JEN do databáze (disk), ne do
-        in-memory keše appky instance — appka umí za jedno generování
-        zavolat tohle až ODDSPAPI_MAX_SHORTLIST× (10), takže by appka
-        v paměti mohla naráz držet klidně 80 MB syrových dat (appka na
-        tomhle na 512MB Render plánu padala OOM, 2026-09-24).
+        appka má jen 250 requestů/měsíc, takže appka nechce stejný zápas
+        stahovat znovu při každém dalším generování ten samý den. Kešuje
+        se ale JEN do databáze (disk), ne do in-memory keše appky
+        instance — appka umí za jedno generování zavolat tohle až
+        ODDSPAPI_MAX_SHORTLIST× (10).
+
+        Appka parsuje odpověď přes object_hook (_trim_bookmaker_markets),
+        NE přes obecné self._get() — appka tím zahodí trhy appka
+        nepoužívá HNED při parsování, viz _WANTED_MARKET_IDS výš.
         """
         cache_key = f"op_odds:{fixture_id}"
         try:
@@ -1854,7 +1883,14 @@ class OddsPapiProvider:
                 return db_cached
         except Exception:
             pass
-        data = self._get("/odds", {"fixtureId": fixture_id})
+        import json
+        query = {"apiKey": self.api_key, "fixtureId": fixture_id}
+        resp = requests.get(f"{self.BASE_URL}/odds", params=query, timeout=20)
+        resp.raise_for_status()
+        data = json.loads(resp.text, object_hook=self._trim_bookmaker_markets)
+        del resp
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(f"OddsPapi vrátilo chybu: {data['error']}")
         try:
             import db as _db
             _db.cache_set(cache_key, data, ttl_seconds=7 * 24 * 3600)

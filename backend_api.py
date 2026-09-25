@@ -4094,7 +4094,7 @@ def _enrich_with_oddspapi(matches: list[MatchInput], sport: Sport) -> None:
         # reprodukovala — pád nastal přesně uvnitř tyhle funkce).
         del raw, adapted
         gc.collect()
-        _log_mem(f"_enrich_with_oddspapi after fixture {i}/{len(shortlist)}")
+        _log_mem(f"_enrich_with_oddspapi after fixture {i}/{len(shortlist)} (odds odpovědi teď filtrované na potřebné trhy, viz OddsPapiProvider._trim_bookmaker_markets)")
 
     print(f"[enrich-odds-oddspapi] {matched_count}/{len(shortlist)} zápasů bez kurzu dostalo OddsPapi kurz")
 
