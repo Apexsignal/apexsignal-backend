@@ -2178,7 +2178,15 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 # padala. Uživatel chtěl zpátky víc zápasů (100 appce dávalo příliš málo
 # reálných příležitostí) — appka jde zpátky na 150 a spoléhá na tuhle
 # souběžnostní opravu, ne že by 150 samo o sobě bylo bezpečnější než dřív.
-MAX_FIXTURES_PER_REQUEST = 150
+#
+# 2026-09-25: appka zjistila, že opakované OOM appka celou tu dobu
+# nezpůsoboval počet zápasů samotný, ale samostatná chyba v
+# _enrich_with_oddspapi (jedna odpověď 21,6 MB, appka ji nikdy
+# neuvolňovala/nefiltrovala — viz backend_api.py a _trim_bookmaker_markets
+# výš v tomhle souboru). Po opravě appka zvedá strop ze 150 na 220 —
+# opatrně, ne rovnou na 300-400, appka to sleduje přes nové [mem] logy
+# v backend_api.py, než půjde výš.
+MAX_FIXTURES_PER_REQUEST = 220
 
 # Ligy dostupné na Tipsport.cz — appka filtruje jen zápasy z těchto soutěží.
 # Tipsport pokrývá přes 70 fotbalových soutěží z celého světa.
