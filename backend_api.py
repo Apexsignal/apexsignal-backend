@@ -1507,12 +1507,17 @@ TOKEN_COSTS = {"kratky": 10}  # 300 Kč při TOKEN_KC_VALUE=30 — appka BOOST i
 # svázané schválně.
 REFERRAL_CODE_GIFT_TOKENS = TOKEN_COSTS["kratky"]
 
-# QR/tiskový promo dárek (vizitky) — schválně 2× krátký tiket, svázané se
-# stejnou konstantou jako výš, ať appka nezapomene přepočítat, kdyby se
-# cena krátkého tiketu změnila. Kód "letak" je natvrdo daný, appka ho
-# appce nikde nezveřejňuje ke psaní, jen ho appka propíše přes QR odkaz.
+# QR/tiskový promo dárek (vizitky) — přesně JEDNO generování zdarma
+# (2026-09-25, uživatelovo výslovné přání: "jenom jedno generování
+# zdarma nic víc"). Dřív appka dávala 2× krátký tiket, teď jen 1×
+# (TOKEN_COSTS["kratky"] tokenů appce strhne teprve ve chvíli, kdy appka
+# tiket skutečně NAJDE — appka tak dárkem kryje přesně jeden nalezený
+# a stržený tiket, ne dva). Svázané se stejnou konstantou jako výš, ať
+# appka nezapomene přepočítat, kdyby se cena krátkého tiketu změnila.
+# Kód "letak" je natvrdo daný, appka ho appce nikde nezveřejňuje ke
+# psaní, jen ho appka propíše přes QR odkaz.
 QR_FLYER_PROMO_CODE = "letak"
-QR_FLYER_GIFT_TOKENS = TOKEN_COSTS["kratky"] * 2
+QR_FLYER_GIFT_TOKENS = TOKEN_COSTS["kratky"]
 
 TOKEN_PACKAGES = [12, 24, 60]  # předvolby k nákupu (v tokenech) — nejmenší pokryje aspoň 2 krátké tikety
 MIN_CUSTOM_TOKENS = 1
